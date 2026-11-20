@@ -108,6 +108,9 @@ env:
   # The production binary cache (§6, §18): narinfos on GitHub Pages of rime-cache, NARs as its release assets.
   CACHE_URL: https://cache.rimeos.com
   CACHE_REPO: AndreNijman/rime-cache
+  # The build's Nix trusts Rime's cache through nix/release/cache_gate.py on this loopback URL (§6.3 step 1): it
+  # holds the cache's index (the rime-cache tree) and sends Nix to Pages only for the narinfos the cache holds.
+  RIME_CACHE_GATE: http://127.0.0.1:37515
   RIME_CACHE_PUBKEY: "rime-cache-1:LXocssi9/mdVEgEUlO+thxyiumct4b+HfqW2nIFmX1k="
   UPSTREAM_KEY: "cache.nixos.org-1:6NCHdD59X431o0gWypbMrAURkbJ16ZPMQFGspcDShjY="
   # rime-nix-release's own default; repeated here so the expected identity is visible in the workflow it names.
@@ -225,6 +228,14 @@ jobs:
       # answered ~5,500 of the build's narinfo lookups with HTTP 429 and a failed lookup is a build. A path both hold
       # comes from upstream, so split records it as upstream. Fallback off, more attempts and the reachability check
       # keep an outage or a burst from turning into hours of rebuilding.
+      # Nix asks it through the gate (nix/release/cache_gate.py): Pages answered HTTP 503 instead of 404 for paths
+      # the cache does not hold, for up to an hour per URL, and failed run 44472232881 three times. The gate answers
+      # those 404 itself from the cache's index and redirects the rest to the cache, so Nix still reads every narinfo
+      # Rime serves from Pages and checks its signature. Every nix build runs under `cache_gate.py retry --ensure`:
+      # the gate must answer before each try (a substituter Nix cannot reach is skipped and its paths BUILT), and a
+      # command that failed only on a transient error of the cache (429, 5xx, a dropped connection) runs again.
+      - name: Rime's cache gate (Nix asks Pages only about what the cache holds)
+        run: python3 nix/release/cache_gate.py ensure
       - name: Install Nix (pinned, hash-checked; Rime's cache trusted)
         run: |
           set -euo pipefail
@@ -233,7 +244,7 @@ jobs:
           echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
           tar -xf nix.tar.xz
           ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
-            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nmax-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY")
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nmax-jobs = auto\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' "$RIME_CACHE_GATE" "$RIME_CACHE_PUBKEY")
           echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
           curl -fsS --retry 5 "$CACHE_URL/nix-cache-info" >/dev/null
 
@@ -259,7 +270,7 @@ jobs:
           fi
           echo "The release toplevels moved (${was:-no comparable earlier commit} -> $now): dry run." | tee -a "$GITHUB_STEP_SUMMARY"
           RIME_EVAL_JOBS=3 nix/ci/eval-each.sh . "${o[@]}"  # not nix flake check: 27.9 GB in one evaluator
-          nix build --dry-run "${o[@]}" .#rime-release-toplevels-hosted .#rime-release-catalogue .#rime-nix-release .#rime-release-plan 2>&1 | tee "$RUNNER_TEMP/dry-run.txt"
+          python3 nix/release/cache_gate.py retry --ensure -- nix build --dry-run "${o[@]}" .#rime-release-toplevels-hosted .#rime-release-catalogue .#rime-nix-release .#rime-release-plan 2>&1 | tee "$RUNNER_TEMP/dry-run.txt"
           {
             echo
             echo "Dry run, nothing built or published:"
@@ -277,13 +288,14 @@ jobs:
           set -euo pipefail
           o=(--override-input rime-shell "github:AndreNijman/rime-shell/$SHELL_SHA")
           RIME_EVAL_JOBS=3 nix/ci/eval-each.sh . "${o[@]}"  # not nix flake check: 27.9 GB in one evaluator
-          nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/toplevels" .#rime-release-toplevels-hosted
-          nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/tool" .#rime-nix-release
-          nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/plan" .#rime-release-plan
-          nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue
-          nix build -L .#checks.x86_64-linux.release-unit
-          nix build "${o[@]}" -L .#checks.x86_64-linux.release-plan
+          python3 nix/release/cache_gate.py retry --ensure -- nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/toplevels" .#rime-release-toplevels-hosted
+          python3 nix/release/cache_gate.py retry --ensure -- nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/tool" .#rime-nix-release
+          python3 nix/release/cache_gate.py retry --ensure -- nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/plan" .#rime-release-plan
+          python3 nix/release/cache_gate.py retry --ensure -- nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue
+          python3 nix/release/cache_gate.py retry --ensure -- nix build -L .#checks.x86_64-linux.release-unit
+          python3 nix/release/cache_gate.py retry --ensure -- nix build "${o[@]}" -L .#checks.x86_64-linux.release-plan
           # TODO(handover): the VM tests (nix flake check) run here once the katana-nix runners have KVM to spare.
+          curl -sS "$RIME_CACHE_GATE/_gate/health" || true  # what the gate was asked: redirected, not_held
 
       - name: closure.json, the upstream split and the stage (or the S3 fallback's export)
         if: needs.changes.outputs.build == 'full'
@@ -504,6 +516,9 @@ jobs:
       # bubblewrap inside the Nix build sandbox (nix.yml has the same step). A throwaway hosted VM.
       - name: Allow user namespaces (bubblewrap in rimed's tests)
         run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      # Rime's cache through the gate, as in the build job (see there).
+      - name: Rime's cache gate (Nix asks Pages only about what the cache holds)
+        run: python3 nix/release/cache_gate.py ensure
       - name: Install Nix (pinned, hash-checked; Rime's cache trusted)
         run: |
           set -euo pipefail
@@ -512,7 +527,7 @@ jobs:
           echo "$NIX_TARBALL_SHA256  nix.tar.xz" | sha256sum -c -
           tar -xf nix.tar.xz
           ./nix-"$NIX_VERSION"-x86_64-linux/install --daemon --yes \
-            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' "$CACHE_URL" "$RIME_CACHE_PUBKEY")
+            --nix-extra-conf-file <(printf 'experimental-features = nix-command flakes\nextra-substituters = %s\nextra-trusted-public-keys = %s\nfallback = false\ndownload-attempts = 12\n' "$RIME_CACHE_GATE" "$RIME_CACHE_PUBKEY")
           echo /nix/var/nix/profiles/default/bin >> "$GITHUB_PATH"
           curl -fsS --retry 5 "$CACHE_URL/nix-cache-info" >/dev/null
 
@@ -523,13 +538,13 @@ jobs:
           set -euo pipefail
           t="$RUNNER_TEMP"
           o=(--override-input rime-shell "github:AndreNijman/rime-shell/$SHELL_SHA")
-          nix build "${o[@]}" --out-link "$t/plan" .#rime-release-plan
+          python3 nix/release/cache_gate.py retry --ensure -- nix build "${o[@]}" --out-link "$t/plan" .#rime-release-plan
           top="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["variants"]["plain"]["toplevel"])' "$t/plan")"
           [[ "$top" =~ ^/nix/store/[0-9a-z]{32}-nixos-system-rime-plain- ]] || { echo "::error::no plain toplevel in the plan ($top)"; exit 1; }
           # An output path, not a derivation: realised by substitution only, so the payload is the published closure.
-          nix-store --realise "$top" >/dev/null
-          nix build "${o[@]}" --out-link "$t/closure" .#rime-bridge-payload-closure
-          nix build --out-link "$t/tools" .#rime-bridge-payload
+          python3 nix/release/cache_gate.py retry --ensure -- nix-store --realise "$top" >/dev/null
+          python3 nix/release/cache_gate.py retry --ensure -- nix build "${o[@]}" --out-link "$t/closure" .#rime-bridge-payload-closure
+          python3 nix/release/cache_gate.py retry --ensure -- nix build --out-link "$t/tools" .#rime-bridge-payload
           "$t/tools/bin/rime-bridge-payload-build" "$top" "$(readlink -f "$t/closure")" "$t/payload"
           ls -l "$t/payload"
           df -h / | tail -n 1
@@ -553,7 +568,7 @@ jobs:
           t="$RUNNER_TEMP"
           [[ "$RELEASE" =~ ^[0-9]{4}\.[0-9]{2}\.[0-9]{2}(\.([2-9]|[1-9][0-9]+))?$ ]] || { echo "::error::bad release ID ($RELEASE)"; exit 1; }
           # oras from the flake's own nixpkgs pin, never a download.
-          nix build --inputs-from . --out-link "$t/oras" nixpkgs#oras
+          python3 nix/release/cache_gate.py retry --ensure -- nix build --inputs-from . --out-link "$t/oras" nixpkgs#oras
           oras="$t/oras/bin/oras"
           printf '%s' "$GH_TOKEN" | "$oras" login ghcr.io --username "$ACTOR" --password-stdin
           if "$oras" manifest fetch --descriptor "$PAYLOAD_REPO:$RELEASE" >/dev/null 2>&1; then
