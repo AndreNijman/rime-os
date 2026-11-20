@@ -275,7 +275,13 @@ fn fetch_paths(
         };
         infos.extend(
             store::path_info(cfg, Some(from), paths, false)
-                .map_err(|e| stop(format!("rime: could not reach the release server ({e}); nothing was changed.")))?,
+                .map_err(|e| {
+                    if e == store::BUSY {
+                        stop(store::BUSY_MESSAGE.to_string())
+                    } else {
+                        stop(format!("rime: could not reach the release server ({e}); nothing was changed."))
+                    }
+                })?,
         );
         copies.push((from, paths));
     }
@@ -293,23 +299,29 @@ fn fetch_paths(
     match deltas {
         // Deltas (delta.md §7): any refusal falls back to the whole path from the same cache.
         Some(d) => {
-            let o = d.run(cfg, &keys, keep_fsync).map_err(|e| {
-                stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
-            })?;
+            let o = d.run(cfg, &keys, keep_fsync).map_err(|e| download_failed(&e))?;
             delta::report(&o);
         }
         None => {
             // Upstream first: an upstream path never refers to a Rime one, so a Rime path's references are valid by
             // the time it arrives (Origin orders Rime before Upstream, hence the reverse).
             for (from, paths) in copies.iter().rev() {
-                store::copy_from_cache(cfg, from, paths, &keys, keep_fsync).map_err(|e| {
-                    stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
-                })?;
+                store::copy_from_cache(cfg, from, paths, &keys, keep_fsync).map_err(|e| download_failed(&e))?;
             }
         }
     }
     println!("rime: downloaded in {:.1} s", started.elapsed().as_secs_f64());
     Ok(())
+}
+
+/// A download that failed: the server busy (HTTP 429 or 5xx, or no connection, after every try), or anything else,
+/// which is a refused signature or hash (F15).
+fn download_failed(e: &str) -> Stop {
+    if e.contains(store::BUSY) {
+        stop(store::BUSY_MESSAGE.to_string())
+    } else {
+        stop(format!("rime: a download did not match its signature ({e}). The partly downloaded paths are not used; nothing was changed."))
+    }
 }
 
 /// `rime install` of class 2 apps (pkg.rs set_apps_profile): `outs` are store paths the release record names
