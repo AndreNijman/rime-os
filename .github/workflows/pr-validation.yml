@@ -923,6 +923,19 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-gpu-notice.sh
 
+      # After a kernel panic: the summary names the panic, not a log flood
+      # before it; a record from an earlier boot is not news; the notice says
+      # it once; bootc and NixOS read one set of kernel arguments. Its full-disk
+      # case mounts a tiny tmpfs in a user namespace (unshare -Urm), which
+      # Ubuntu 24.04's AppArmor refuses by default; the suite FAILS rather than
+      # skips when it is refused here, so clear the knob for this step.
+      - name: Kernel crash — the summary names the panic and the notice says it once
+        if: ${{ !cancelled() }}
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 \
+            || echo "note: no apparmor userns restriction on this kernel"
+          ./tests/test-rime-crash.sh
+
       # "A new Rime update is available": the root check's parsing and the
       # user notice's once-per-digest rule, plus the unit shapes.
       - name: Update notice — says it once per release, costs nothing
@@ -4841,6 +4854,9 @@ jobs:
             files/system/libexec/rime-screen-reader \
             files/system/libexec/rime-gpu-notice \
             tests/test-rime-gpu-notice.sh \
+            files/system/libexec/rime-crash-record \
+            files/system/libexec/rime-crash-notice \
+            tests/test-rime-crash.sh \
             files/system/libexec/rime-pkg-notice \
             tests/test-rime-sysext-boot-wait.sh \
             files/system/libexec/rime-update-check \

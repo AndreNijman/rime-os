@@ -71,6 +71,8 @@
 // { claude-code-npm = import ./claude-code-npm.nix { inherit pkgs self; }; }
 # fwupd-esp (+ .mutants.esp-pinned)
 // { fwupd-esp = import ./fwupd-esp.nix { inherit pkgs self; }; }
+# kernel-panic (VM: flood, panic, restart, pstore record, `rime crash`; + .mutants), kernel-panic-shipped
+// import ./kernel-panic.nix { inherit pkgs self; }
 # virtualization
 // { virtualization = import ./virtualization.nix { inherit pkgs self; }; }
 # vendor-verify, vendor-fetch-refuses

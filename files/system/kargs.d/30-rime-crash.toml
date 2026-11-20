@@ -1,0 +1,25 @@
+# Rime OS: what the machine does when the kernel dies (docs/kernel-crash.md).
+#
+# One file for both systems. The bootc image copies it to
+# /usr/lib/bootc/kargs.d/ (Containerfile.rime); nix/modules/crash.nix reads the
+# same list with builtins.fromTOML, so the two cannot drift apart.
+#
+#   panic=30                     restart 30 s after a panic. The kernel's own
+#                                default (CONFIG_PANIC_TIMEOUT=0) waits forever
+#                                on the panic screen. 30 s is long enough to
+#                                read the reason or take a photo of it.
+#   drm.panic_screen=user        the panic screen says "KERNEL PANIC!" and the
+#                                reason, instead of the last lines of the kernel
+#                                log (the build default, "kmsg"). One noisy
+#                                driver can fill that log tail with junk.
+#   efi_pstore.pstore_disable=0  keep the end of the kernel log in a few small
+#                                EFI variables at the panic. systemd-pstore
+#                                moves them to /var/lib/systemd/pstore at the
+#                                next boot and deletes the variables. The
+#                                kernel is built with this backend turned off
+#                                (CONFIG_EFI_VARS_PSTORE_DEFAULT_DISABLE=y).
+#
+# Deliberately NOT set: panic_on_oops, softlockup_panic, hung_task_panic. Each
+# turns a warning the machine often survives into a restart that ends the
+# session. See docs/kernel-crash.md "What is left alone".
+kargs = ["panic=30", "drm.panic_screen=user", "efi_pstore.pstore_disable=0"]

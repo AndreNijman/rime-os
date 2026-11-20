@@ -60,7 +60,7 @@ blueprint apply sync plugin cloudflare
 ai host build send open
 task recover disposable boot migrate
 trust storage qualify firmware luks channel schema
-lid permissions user vm browser
+lid permissions user vm browser crash
 ui
 "
 
