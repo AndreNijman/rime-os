@@ -1,0 +1,38 @@
+# Rime OS — after a restart, write down why the kernel died (SYSTEM unit, root).
+#
+# systemd-pstore moves the crash record the kernel left in EFI variables into
+# /var/lib/systemd/pstore early in boot. This reads the one collected in this
+# boot (and one an earlier, cut-off run never wrote down) and writes a short
+# summary to /var/lib/rime/crash/last, which `rime crash` prints, and a line
+# to /var/lib/rime/crash/history, which rime-crash-notice (a user unit)
+# announces once. On a boot with nothing collected it finds nothing and exits.
+
+[Unit]
+Description=Rime OS kernel crash summary
+Documentation=man:rime(1)
+After=systemd-pstore.service local-fs.target
+# Done before anyone can log in, so the user notice never reads the summary
+# before this boot's is written (logins and user@.service wait for it).
+Before=systemd-user-sessions.service
+# The archive exists only once systemd-pstore has collected something.
+ConditionDirectoryNotEmpty=/var/lib/systemd/pstore
+
+[Service]
+Type=oneshot
+ExecStart=/usr/libexec/rime-crash-record
+# /var/lib/rime/crash, world-readable: the summary names no user data, and
+# the user unit and `rime crash` read it without root.
+StateDirectory=rime/crash
+StateDirectoryMode=0755
+# It holds up logins while it runs (it reads a few files of about 10 KB), so
+# it gets no low priority and a short limit; a run cut off is retried by the
+# next boot.
+TimeoutStartSec=30s
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateNetwork=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

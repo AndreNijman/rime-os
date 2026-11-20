@@ -402,6 +402,28 @@ RUN set -eux; \
     printf 'kargs = ["quiet", "splash"]\n' \
         > /usr/lib/bootc/kargs.d/20-rime-plymouth.toml
 
+# Kernel panic: a readable panic screen, a restart 30 s later, and the panic's
+# log tail kept in EFI variables for systemd-pstore (docs/kernel-crash.md). The
+# same file is nix/modules/crash.nix's source, so both systems carry one list.
+# bootc applies a kargs.d change on the next update, so installed machines get
+# it with their next `rime update` + restart.
+COPY files/system/kargs.d/30-rime-crash.toml /usr/lib/bootc/kargs.d/30-rime-crash.toml
+RUN set -eux; \
+    f=/usr/lib/bootc/kargs.d/30-rime-crash.toml; \
+    grep -Ex 'kargs = \["panic=30", "drm.panic_screen=user", "efi_pstore.pstore_disable=0"\]' "$f"; \
+    : 'Each argument must mean something to THIS kernel, or it is silently ignored:'; \
+    : 'drm_panic built in, the efi pstore backend built in (and off unless told).'; \
+    KVER="$(cat /usr/lib/rime-kver)"; \
+    cfg="/usr/lib/modules/${KVER}/config"; \
+    grep -x 'CONFIG_DRM_PANIC=y' "$cfg"; \
+    grep -x 'CONFIG_EFI_VARS_PSTORE=y' "$cfg"; \
+    grep -x 'CONFIG_PSTORE=y' "$cfg"; \
+    : 'The collector the record depends on must run at boot (Fedora presets'; \
+    : 'enable it; enabling again is a no-op, and a preset change cannot drop it).'; \
+    systemctl enable systemd-pstore.service; \
+    systemctl is-enabled systemd-pstore.service; \
+    echo "kernel panic kargs installed: $(cat "$f" | tail -n 1)"
+
 # ── The APEX-OS names, kept working for a release or two ─────────────────── (rime-rename: keep)
 # Andre: "keep `apex` working for a release or two". Existing machines name the
 # old spellings where no update rewrites them: units a person enabled
