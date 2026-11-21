@@ -60,7 +60,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::io::{Read, Seek, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -279,6 +279,11 @@ pub trait Backend: Send + Sync {
     fn close(&self, id: u32) -> Result<(), String>;
     /// Who answers for `org.freedesktop.Notifications` now, if anyone.
     fn owner(&self) -> Option<String>;
+    /// Show `path` selected in its folder (the file manager's
+    /// `org.freedesktop.FileManager1.ShowItems`). Never opens it.
+    fn show_item(&self, _path: &Path) -> Result<(), String> {
+        Err("this desktop cannot show a file in its folder".into())
+    }
 }
 
 /// A signal from the notification server's current owner.
@@ -296,12 +301,29 @@ pub enum Heard {
 pub type Hear = Box<dyn Fn(Heard) + Send + Sync>;
 
 const NAME: &str = "org.freedesktop.Notifications";
+const FILE_MANAGER: &str = "org.freedesktop.FileManager1";
+const FILE_MANAGER_PATH: &str = "/org/freedesktop/FileManager1";
+
+/// `path` as a `file://` URI, every byte but the unreserved ones escaped.
+pub fn file_uri(path: &Path) -> String {
+    use std::os::unix::ffi::OsStrExt;
+    let mut uri = String::from("file://");
+    for b in path.as_os_str().as_bytes() {
+        if b.is_ascii_alphanumeric() || b"/-._~".contains(b) {
+            uri.push(char::from(*b));
+        } else {
+            uri.push_str(&format!("%{b:02X}"));
+        }
+    }
+    uri
+}
 const PATH: &str = "/org/freedesktop/Notifications";
 
 enum Call {
     Notify(Shown, u32, SyncSender<Result<u32, String>>),
     Close(u32, SyncSender<Result<(), String>>),
     Owner(SyncSender<Option<String>>),
+    ShowItems(String, SyncSender<Result<(), String>>),
 }
 
 /// The desktop's notification server, over the session bus.
@@ -452,6 +474,7 @@ impl Bus {
                 Call::Notify(_, _, r) => drop(r.send(Err(why.into()))),
                 Call::Close(_, r) => drop(r.send(Err(why.into()))),
                 Call::Owner(r) => drop(r.send(None)),
+                Call::ShowItems(_, r) => drop(r.send(Err(why.into()))),
             }
             return false;
         };
@@ -486,6 +509,23 @@ impl Bus {
                 let _ = reply.send(got.map_err(|(e, _)| e));
                 gone
             }
+            Call::ShowItems(uri, reply) => {
+                let conn = l.notifications.connection().clone();
+                let got = Bus::within(
+                    by,
+                    conn.call_method(
+                        Some(FILE_MANAGER),
+                        FILE_MANAGER_PATH,
+                        Some(FILE_MANAGER),
+                        "ShowItems",
+                        &(vec![uri.as_str()], ""),
+                    ),
+                )
+                .await;
+                let gone = matches!(got, Err((_, true)));
+                let _ = reply.send(got.map(|_| ()).map_err(|(e, _)| e));
+                gone
+            }
             Call::Owner(reply) => {
                 let Ok(name) = zbus::names::BusName::from_static_str(NAME) else { return false };
                 let got = Bus::within(by, l.dbus.get_name_owner(name)).await;
@@ -518,6 +558,11 @@ impl Backend for Bus {
 
     fn owner(&self) -> Option<String> {
         self.ask(Call::Owner).flatten()
+    }
+
+    fn show_item(&self, path: &Path) -> Result<(), String> {
+        let uri = file_uri(path);
+        self.ask(|r| Call::ShowItems(uri, r)).unwrap_or_else(|| Err("the file manager did not answer in time".into()))
     }
 }
 
@@ -576,6 +621,10 @@ impl Backend for Stub {
     fn owner(&self) -> Option<String> {
         Some(std::fs::read_to_string(self.dir.join("owner")).map(|s| s.trim().to_string()).unwrap_or("stub".into()))
     }
+
+    fn show_item(&self, path: &Path) -> Result<(), String> {
+        self.record(json!({"op": "show_item", "uri": file_uri(path)}))
+    }
 }
 
 // ── The mirror ──────────────────────────────────────────────────────────────
@@ -589,6 +638,8 @@ pub enum Job {
     /// A notice of this computer's own (a call action that did not go):
     /// kept by no phone, so it is never replaced, closed or reported.
     Notice(Shown),
+    /// Show a saved file in its folder (a button pressed on its notification).
+    ShowItem(PathBuf),
     /// The server's `NotificationClosed`, `NotificationReplied` or `ActionInvoked`.
     Heard(Heard),
 }
@@ -749,6 +800,11 @@ impl Mirror {
             Job::Notice(shown) => {
                 if let Err(why) = self.backend.notify(&shown, 0) {
                     eprintln!("rime-remoted: a notice was not shown: {why}");
+                }
+            }
+            Job::ShowItem(path) => {
+                if let Err(why) = self.backend.show_item(&path) {
+                    eprintln!("rime-remoted: a file was not shown in its folder: {why}");
                 }
             }
             Job::Heard(Heard::Action { id, key: action }) => {

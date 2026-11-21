@@ -3555,7 +3555,11 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
     let mut peer = identity_of(&b).connect(&a).expect("a paired computer opens a session");
     let hello = peer.call(r#"{"cmd":"remote_hello"}"#);
     assert_eq!(hello["scope"], "peer", "{hello}");
-    assert_eq!(hello["features"], serde_json::json!(["peer_hello", "peer_tombstones", "peer_presence", "peer_offer"]), "{hello}");
+    assert_eq!(
+        hello["features"],
+        serde_json::json!(["peer_hello", "peer_tombstones", "peer_presence", "peer_offer", "peer_clipboard", "peer_file"]),
+        "{hello}"
+    );
     assert_eq!(peer.call(r#"{"cmd":"peer_hello"}"#)["reply"], "peer_hello");
     for line in [
         r#"{"cmd":"list"}"#,
@@ -4023,4 +4027,505 @@ fn a_computer_brings_its_phone_to_a_new_computer_as_a_companion_until_a_person_a
     let told = events_on(&mut on_a, 1, 1).remove(0);
     assert_eq!(told["event"], "device_removed", "{told}");
     assert_eq!(told["key"], key_b.as_str(), "{told}");
+}
+
+/// What the agentd desktop stub of `h` holds as the clipboard, once it holds
+/// `want`, or what it holds after `within` (None: never written).
+fn clipboard_of(h: &Harness, want: &str, within: Duration) -> Option<String> {
+    let path = h.root.join("desk/clipboard");
+    let deadline = Instant::now() + within;
+    loop {
+        let now = std::fs::read_to_string(&path).ok();
+        if now.as_deref() == Some(want) || Instant::now() >= deadline {
+            return now;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn sha256_hex(text: &str) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(text.as_bytes()).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// A `peer_clipboard` line as computer `from` would send it.
+fn peer_clip(from: &Harness, text: &str, seq: u64) -> String {
+    serde_json::json!({"cmd": "peer_clipboard", "text": text, "hash": sha256_hex(text),
+        "origin": identity_of(from).key(), "seq": seq})
+    .to_string()
+}
+
+const UNLOCKED: fn() -> serde_json::Value = || serde_json::json!({"locked": false});
+
+#[test]
+fn paired_computers_share_a_copy_only_where_both_turned_it_on_and_it_never_comes_back() {
+    let a = harness!("share-a");
+    let b = harness!("share-b");
+    set_machine(&a, UNLOCKED());
+    set_machine(&b, UNLOCKED());
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+
+    // Off by default: a copy here goes to no computer, and B takes nothing.
+    let r = a.control(r#"{"cmd":"clipboard","text":"nobody asked"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+    let mut peer = identity_of(&a).connect(&b).expect("A is paired with B");
+    let r = peer.call(&peer_clip(&a, "pushed anyway", 1));
+    assert_eq!(r["kind"], "not_shared", "{r}");
+    let (rc, said) = rime_remote(&a, &["computers", "list"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("clipboard not shared, files taken"), "{said}");
+
+    // A sends, B takes: one direction only.
+    let (rc, said) = rime_remote(&a, &["computers", "clipboard", &b_on_a, "send"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let (rc, said) = rime_remote(&b, &["computers", "clipboard", &a_on_b, "receive"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let listed = computer_on(&a, &b_on_a);
+    assert_eq!((listed["clipboard_send"].as_bool(), listed["clipboard_receive"].as_bool()), (Some(true), Some(false)), "{listed}");
+    let stored = std::fs::read_to_string(a.root.join("state/rime/remote/computers.json")).expect("computers.json");
+    assert!(stored.contains("clipboard_send"), "the switch is not kept: {stored}");
+
+    let r = a.control(r#"{"cmd":"clipboard","text":"copied on a"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0, "computers": 1}), "{r}");
+    assert_eq!(clipboard_of(&b, "copied on a", Duration::from_secs(15)).as_deref(), Some("copied on a"));
+    // B's Shell sees the change and hands it back: it goes nowhere, not to
+    // B's computers and not to B's phones.
+    let r = b.control(r#"{"cmd":"clipboard","text":"copied on a"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+    // B does not send: a copy there reaches no computer.
+    let r = b.control(r#"{"cmd":"clipboard","text":"copied on b"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+
+    // Never a sensitive copy, never one over the cap.
+    let r = a.control(r#"{"cmd":"clipboard","text":"hunter2","sensitive":true}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+    let big = serde_json::json!({"cmd": "clipboard", "text": "x".repeat(8193)});
+    assert_eq!(a.control(&big.to_string()), serde_json::json!({"reply": "clipboard_sent", "reached": 0}));
+
+    // What B answers a peer line, each refusal in its own words.
+    let seq = rime_remote_core::now_ms() * 10;
+    let r = peer.call(&peer_clip(&a, "straight from a", seq));
+    assert_eq!(r, serde_json::json!({"reply": "peer_clipboard", "applied": true}), "{r}");
+    assert_eq!(clipboard_of(&b, "straight from a", Duration::from_secs(5)).as_deref(), Some("straight from a"));
+    let r = peer.call(&peer_clip(&a, "the same seq again", seq));
+    assert_eq!(r["why"], "duplicate", "{r}");
+    let mut forged: serde_json::Value = serde_json::from_str(&peer_clip(&a, "forged", seq + 1)).unwrap();
+    forged["origin"] = serde_json::json!(identity_of(&b).key());
+    assert_eq!(peer.call(&forged.to_string())["kind"], "bad_request");
+    let mut wrong: serde_json::Value = serde_json::from_str(&peer_clip(&a, "wrong hash", seq + 2)).unwrap();
+    wrong["hash"] = serde_json::json!(sha256_hex("something else"));
+    assert_eq!(peer.call(&wrong.to_string())["kind"], "bad_request");
+    assert_eq!(peer.call(&peer_clip(&a, &"y".repeat(8193), seq + 3))["kind"], "too_large");
+    assert_eq!(clipboard_of(&b, "straight from a", Duration::ZERO).as_deref(), Some("straight from a"), "a refused line was written");
+    // Locked: dropped, never written, never kept for later.
+    set_machine(&b, serde_json::json!({"locked": true}));
+    let r = peer.call(&peer_clip(&a, "while locked", seq + 4));
+    assert_eq!(r, serde_json::json!({"reply": "peer_clipboard", "applied": false, "why": "locked"}), "{r}");
+    set_machine(&b, UNLOCKED());
+    assert_eq!(clipboard_of(&b, "straight from a", Duration::ZERO).as_deref(), Some("straight from a"));
+
+    // Both directions now. B's copy reaches A; A's Shell hands it back and it
+    // goes nowhere; A's earlier copy, echoed by B, is dropped by A.
+    let (rc, said) = rime_remote(&a, &["computers", "clipboard", &b_on_a, "on"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("both have it on"), "{said}");
+    let (rc, said) = rime_remote(&b, &["computers", "clipboard", &a_on_b, "on"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let r = b.control(r#"{"cmd":"clipboard","text":"copied on b"}"#);
+    assert_eq!(r["computers"], 1, "{r}");
+    assert_eq!(clipboard_of(&a, "copied on b", Duration::from_secs(15)).as_deref(), Some("copied on b"));
+    let r = a.control(r#"{"cmd":"clipboard","text":"copied on b"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "A sent B's copy on: {r}");
+    let mut back = identity_of(&b).connect(&a).expect("B is paired with A");
+    let r = back.call(&peer_clip(&b, "copied on a", rime_remote_core::now_ms() * 10));
+    assert_eq!(r["why"], "echo", "A took its own copy back: {r}");
+    assert_eq!(clipboard_of(&a, "copied on b", Duration::ZERO).as_deref(), Some("copied on b"));
+
+    // Off on A: A sends nothing more. Removed: B takes nothing more from A.
+    let (rc, said) = rime_remote(&a, &["computers", "clipboard", &b_on_a, "off"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert_eq!(a.control(r#"{"cmd":"clipboard","text":"after off"}"#)["computers"], serde_json::Value::Null);
+    let removed = b.control(&serde_json::json!({"cmd": "computer_remove", "computer": a_on_b}).to_string());
+    assert_eq!(removed["reply"], "computer_removed", "{removed}");
+    let r = b.control(&serde_json::json!({"cmd": "computer_clipboard", "computer": a_on_b, "send": true, "receive": true}).to_string());
+    assert_eq!(r["reply"], "error", "a removed computer's switch went on: {r}");
+}
+
+/// A connection to `socket` made by a child process that has exited and been
+/// reaped by the time this returns. `SO_PEERCRED` names this account but a
+/// pid with no `/proc` entry, so `rime-remoted` cannot read where the request
+/// came from: a caller that is not a person at this machine, on the real
+/// dispatch path, with no seam in the daemon.
+fn connect_from_a_process_that_is_gone(socket: &std::path::Path) -> UnixStream {
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+    let (ours, theirs) = UnixStream::pair().expect("pair");
+    // Everything the child needs is made before the fork: it only calls
+    // socket, connect, sendmsg and _exit.
+    let mut addr: libc::sockaddr_un = unsafe { std::mem::zeroed() };
+    addr.sun_family = libc::AF_UNIX as libc::sa_family_t;
+    let path = socket.as_os_str().as_bytes();
+    assert!(path.len() < addr.sun_path.len(), "socket path too long");
+    for (d, s) in addr.sun_path.iter_mut().zip(path) {
+        *d = *s as libc::c_char;
+    }
+    let mut control = [0u64; 8];
+    let space = unsafe { libc::CMSG_SPACE(std::mem::size_of::<libc::c_int>() as u32) } as usize;
+    assert!(space <= std::mem::size_of_val(&control));
+    let mut byte = 0u8;
+    let mut iov = libc::iovec { iov_base: (&mut byte as *mut u8).cast(), iov_len: 1 };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space as _;
+    let theirs_fd = theirs.as_raw_fd();
+    let pid = unsafe { libc::fork() };
+    assert!(pid >= 0, "fork");
+    if pid == 0 {
+        unsafe {
+            let fd = libc::socket(libc::AF_UNIX, libc::SOCK_STREAM, 0);
+            let len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
+            if fd < 0 || libc::connect(fd, (&addr as *const libc::sockaddr_un).cast(), len) != 0 {
+                libc::_exit(1);
+            }
+            let c = libc::CMSG_FIRSTHDR(&msg);
+            (*c).cmsg_level = libc::SOL_SOCKET;
+            (*c).cmsg_type = libc::SCM_RIGHTS;
+            (*c).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<libc::c_int>() as u32) as _;
+            std::ptr::write_unaligned(libc::CMSG_DATA(c).cast::<libc::c_int>(), fd);
+            libc::_exit(if libc::sendmsg(theirs_fd, &msg, 0) == 1 { 0 } else { 2 });
+        }
+    }
+    let mut status = 0;
+    assert_eq!(unsafe { libc::waitpid(pid, &mut status, 0) }, pid, "waitpid");
+    assert!(libc::WIFEXITED(status) && libc::WEXITSTATUS(status) == 0, "the child could not connect: {status}");
+    drop(theirs);
+    // Take the connection it made.
+    let mut control = [0u64; 8];
+    let mut byte = 0u8;
+    let mut iov = libc::iovec { iov_base: (&mut byte as *mut u8).cast(), iov_len: 1 };
+    let mut msg: libc::msghdr = unsafe { std::mem::zeroed() };
+    msg.msg_iov = &mut iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = control.as_mut_ptr().cast();
+    msg.msg_controllen = space as _;
+    assert_eq!(unsafe { libc::recvmsg(ours.as_raw_fd(), &mut msg, 0) }, 1, "recvmsg");
+    let c = unsafe { libc::CMSG_FIRSTHDR(&msg) };
+    assert!(!c.is_null() && unsafe { (*c).cmsg_type } == libc::SCM_RIGHTS, "no descriptor came back");
+    let fd = unsafe { std::ptr::read_unaligned(libc::CMSG_DATA(c).cast::<libc::c_int>()) };
+    // The pid the daemon will ask about is gone: no origin can be read.
+    assert!(
+        rime_agent_core::origin::observe_pid(pid).is_err(),
+        "the child's pid {pid} is still readable; this test proves nothing"
+    );
+    unsafe { UnixStream::from_raw_fd(fd) }
+}
+
+#[test]
+fn a_copy_no_person_handed_over_reaches_the_phones_and_no_computer() {
+    let a = harness!("share-job-a");
+    let b = harness!("share-job-b");
+    set_machine(&a, UNLOCKED());
+    set_machine(&b, UNLOCKED());
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+    let (rc, said) = rime_remote(&a, &["computers", "clipboard", &b_on_a, "send"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let (rc, said) = rime_remote(&b, &["computers", "clipboard", &a_on_b, "receive"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let Some(offer) = open_offer(&a) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&a, &offer, "pixel-8")["ok"], true);
+    let mut p = phone.connect(&a).expect("the phone's session");
+    open_events(&mut p, 9);
+    assert_eq!(p.call(r#"{"cmd":"phone_report","can":["clipboard"]}"#)["reply"], "ok");
+
+    // The control arm: this test process is a person here (pair_computers
+    // proved it), and its copy reaches the phone and B.
+    let r = a.control(r#"{"cmd":"clipboard","text":"from a person"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 1, "computers": 1}), "{r}");
+    assert_eq!(clipboard_of(&b, "from a person", Duration::from_secs(15)).as_deref(), Some("from a person"));
+
+    // The same request from a caller whose origin cannot be read (an agent
+    // or a scheduled job is refused the same way): the phone still gets it,
+    // as before; no computer does.
+    let stream = connect_from_a_process_that_is_gone(&a.remoted_socket);
+    stream.set_read_timeout(Some(Duration::from_secs(15))).ok();
+    let mut writer = stream.try_clone().expect("clone");
+    writeln!(writer, r#"{{"cmd":"clipboard","text":"from a job"}}"#).expect("write");
+    let mut reply = String::new();
+    BufReader::new(stream).read_line(&mut reply).expect("read");
+    let r: serde_json::Value = serde_json::from_str(reply.trim()).unwrap_or_else(|e| panic!("{e}: {reply}"));
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 1}), "{r}");
+    assert_eq!(
+        events_on(&mut p, 9, 2),
+        vec![
+            serde_json::json!({"event": "clipboard", "text": "from a person"}),
+            serde_json::json!({"event": "clipboard", "text": "from a job"}),
+        ]
+    );
+    assert_eq!(
+        clipboard_of(&b, "from a job", Duration::from_secs(3)).as_deref(),
+        Some("from a person"),
+        "a copy no person handed over reached another computer"
+    );
+}
+
+#[test]
+fn three_computers_share_one_copy_once_each_and_it_settles() {
+    let a = harness!("three-a");
+    let b = harness!("three-b");
+    let c = harness!("three-c");
+    for h in [&a, &b, &c] {
+        set_machine(h, UNLOCKED());
+    }
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+    let Some((c_on_a, a_on_c)) = pair_computers(&a, &c) else { return };
+    let Some((c_on_b, b_on_c)) = pair_computers(&b, &c) else { return };
+    for (h, id) in [(&a, &b_on_a), (&a, &c_on_a), (&b, &a_on_b), (&b, &c_on_b), (&c, &a_on_c), (&c, &b_on_c)] {
+        let (rc, said) = rime_remote(h, &["computers", "clipboard", id, "on"], b"");
+        assert_eq!(rc, 0, "{said}");
+    }
+
+    // A copy on A reaches B and C directly.
+    let r = a.control(r#"{"cmd":"clipboard","text":"one copy"}"#);
+    assert_eq!(r["computers"], 2, "{r}");
+    assert_eq!(clipboard_of(&b, "one copy", Duration::from_secs(15)).as_deref(), Some("one copy"));
+    assert_eq!(clipboard_of(&c, "one copy", Duration::from_secs(15)).as_deref(), Some("one copy"));
+    // Both Shells hand it back; neither passes it on, so it settles.
+    for h in [&b, &c] {
+        let r = h.control(r#"{"cmd":"clipboard","text":"one copy"}"#);
+        assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+    }
+    // A's clipboard was never written: nothing came back to it.
+    assert_eq!(clipboard_of(&a, "one copy", Duration::from_secs(2)), None, "the copy came back to A");
+
+    // A copy on B reaches A and C; C's hand-back goes nowhere, and A's
+    // clipboard holds B's copy and nothing after it.
+    let r = b.control(r#"{"cmd":"clipboard","text":"from b"}"#);
+    assert_eq!(r["computers"], 2, "{r}");
+    assert_eq!(clipboard_of(&a, "from b", Duration::from_secs(15)).as_deref(), Some("from b"));
+    assert_eq!(clipboard_of(&c, "from b", Duration::from_secs(15)).as_deref(), Some("from b"));
+    let r = c.control(r#"{"cmd":"clipboard","text":"from b"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+    let r = a.control(r#"{"cmd":"clipboard","text":"from b"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "clipboard_sent", "reached": 0}), "{r}");
+}
+
+/// What is in `h`'s stand-in Downloads, names sorted; dot files included.
+fn downloads_of(h: &Harness) -> Vec<String> {
+    let mut names: Vec<String> = std::fs::read_dir(h.root.join("desk/Downloads"))
+        .map(|d| d.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+        .unwrap_or_default();
+    names.sort();
+    names
+}
+
+/// A file of `len` bytes that no two offsets repeat soon in, at `dir/name`.
+fn a_file(dir: &std::path::Path, name: &str, len: usize) -> (PathBuf, Vec<u8>) {
+    std::fs::create_dir_all(dir).expect("mkdir");
+    let body: Vec<u8> = (0..len).map(|i| ((i * 7 + i / 251) % 256) as u8).collect();
+    let path = dir.join(name);
+    std::fs::write(&path, &body).expect("write");
+    (path, body)
+}
+
+fn sha256_bytes(b: &[u8]) -> String {
+    use sha2::Digest;
+    sha2::Sha256::digest(b).iter().map(|b| format!("{b:02x}")).collect()
+}
+
+#[test]
+fn a_file_sent_to_a_paired_computer_lands_in_its_downloads_under_a_new_name_and_nothing_is_opened() {
+    let a = harness!("files-a");
+    let b = harness!("files-b");
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+    let outbox = a.root.join("outbox");
+    let (notes, body) = a_file(&outbox, "notes.txt", 1234);
+
+    // On by default for a computer paired with a code.
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("saved notes.txt"), "{said}");
+    assert_eq!(std::fs::read(b.root.join("desk/Downloads/notes.txt")).expect("saved"), body);
+    // Again: a new name, the first one untouched.
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("saved notes (2).txt"), "{said}");
+    assert_eq!(downloads_of(&b), ["notes (2).txt", "notes.txt"]);
+
+    // B says so, with one button, and opens nothing. The button shows the
+    // file in its folder; the path never came from A.
+    let lines = notify_lines(&b, 2);
+    let posted: Vec<&serde_json::Value> =
+        lines.iter().filter(|l| l["op"] == "notify" && l["summary"].as_str().unwrap_or("").contains("sent you")).collect();
+    assert_eq!(posted.len(), 2, "{lines:?}");
+    assert!(posted[0]["summary"].as_str().unwrap().ends_with("sent you notes.txt"), "{:?}", posted[0]);
+    assert_eq!(posted[0]["actions"], serde_json::json!([["show", "Show in folder"]]));
+    assert!(lines.iter().all(|l| l["op"] != "show_item"), "something was shown before a press: {lines:?}");
+    press_here(&b, &posted[1]["id"], "show");
+    let want = format!("file://{}", b.root.join("desk/Downloads/notes%20%282%29.txt").display());
+    let mut shown = Vec::new();
+    assert!(
+        soon(|| {
+            shown = notify_lines(&b, 0).into_iter().filter(|l| l["op"] == "show_item").collect();
+            !shown.is_empty()
+        }),
+        "the button showed nothing"
+    );
+    assert_eq!(shown, [serde_json::json!({"op": "show_item", "uri": want})]);
+
+    // More than the sender keeps on the way unacknowledged: it waits for
+    // B's progress lines and every byte arrives.
+    let (big, big_body) = a_file(&outbox, "big.bin", 6 * 1024 * 1024 + 3);
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, big.to_str().unwrap()], b"");
+    assert_eq!(rc, 0, "{said}");
+    let got = std::fs::read(b.root.join("desk/Downloads/big.bin")).expect("big saved");
+    assert_eq!(sha256_bytes(&got), sha256_bytes(&big_body));
+
+    // B turns files off: A's next file is refused and nothing lands.
+    let (rc, said) = rime_remote(&b, &["computers", "files", &a_on_b, "off"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 1, "{said}");
+    assert!(said.contains("did not take it"), "{said}");
+    assert_eq!(downloads_of(&b), ["big.bin", "notes (2).txt", "notes.txt"]);
+    let (rc, said) = rime_remote(&a, &["computers", "list"], b"");
+    assert_eq!(rc, 0, "{said}");
+
+    // A file that cannot be opened is said so; the others still go.
+    let (rc, said) = rime_remote(&b, &["computers", "files", &a_on_b, "on"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let (rc, said) =
+        rime_remote(&a, &["computers", "send", &b_on_a, "/nonexistent/x.txt", notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 1, "{said}");
+    assert!(said.contains("could not open /nonexistent/x.txt") && said.contains("saved notes (3).txt"), "{said}");
+
+    // Removed on B: B takes nothing more from A. Removed on A: A sends
+    // nothing more to B.
+    let removed = b.control(&serde_json::json!({"cmd": "computer_remove", "computer": a_on_b}).to_string());
+    assert_eq!(removed["reply"], "computer_removed", "{removed}");
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 1, "{said}");
+    let _ = until_computer(&a, &b_on_a, Duration::from_secs(15), |c| c["revoked_ms"].is_u64());
+    let (rc, said) = rime_remote(&a, &["computers", "send", &b_on_a, notes.to_str().unwrap()], b"");
+    assert_eq!(rc, 1, "{said}");
+    assert!(said.contains("removed"), "{said}");
+    assert_eq!(downloads_of(&b), ["big.bin", "notes (2).txt", "notes (3).txt", "notes.txt"]);
+}
+
+/// Open a `peer_file` channel with `offer` and give the reply line.
+fn open_peer_file(session: &mut Session, channel: u32, offer: serde_json::Value) -> serde_json::Value {
+    session.send(Frame::Open { channel, request: offer.to_string().into_bytes() });
+    loop {
+        match session.recv() {
+            Frame::Control(line) => return serde_json::from_slice(&line).expect("json"),
+            other => session.pending.push(other),
+        }
+    }
+}
+
+/// The lines B writes on `channel` until one is an outcome.
+fn peer_file_outcome(session: &mut Session, channel: u32) -> serde_json::Value {
+    let mut buf = Vec::new();
+    loop {
+        match session.recv() {
+            Frame::Data { channel: c, bytes } if c == channel => {
+                buf.extend_from_slice(&bytes);
+                while let Some(i) = buf.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = buf.drain(..=i).collect();
+                    let v: serde_json::Value = serde_json::from_slice(&line).expect("json");
+                    if v["reply"] != "peer_file_progress" {
+                        return v;
+                    }
+                }
+            }
+            Frame::Close { channel: c, .. } if c == channel => panic!("closed with no outcome"),
+            other => session.pending.push(other),
+        }
+    }
+}
+
+#[test]
+fn a_peer_offering_a_bad_name_a_wrong_hash_or_half_a_file_leaves_nothing_behind() {
+    let a = harness!("files-bad-a");
+    let b = harness!("files-bad-b");
+    let Some((_b_on_a, _a_on_b)) = pair_computers(&a, &b) else { return };
+    let mut peer = identity_of(&a).connect(&b).expect("A is paired with B");
+    let body = b"ssh-ed25519 AAAA attacker".to_vec();
+    let offer = |name: &str, len: u64, sha: &str| serde_json::json!({"cmd": "peer_file", "name": name, "len": len, "sha256": sha});
+
+    // Refused before a byte: a path, a hidden control, a zero or huge length.
+    let mut ch = 1;
+    for (o, kind) in [
+        (offer("../../.ssh/authorized_keys", body.len() as u64, &sha256_bytes(&body)), "bad_request"),
+        (offer("..", body.len() as u64, &sha256_bytes(&body)), "bad_request"),
+        (offer("a\nb", body.len() as u64, &sha256_bytes(&body)), "bad_request"),
+        (offer("invoice\u{202E}fdp.exe", body.len() as u64, &sha256_bytes(&body)), "bad_request"),
+        (offer("a.txt", 0, &sha256_bytes(b"")), "too_large"),
+        (offer("a.txt", 1 << 40, &sha256_bytes(&body)), "too_large"),
+        (offer("a.txt", body.len() as u64, "not a hash"), "bad_request"),
+    ] {
+        let r = open_peer_file(&mut peer, ch, o.clone());
+        assert_eq!(r["kind"], kind, "{o}: {r}");
+        ch += 1;
+    }
+    // A peer cannot reach rime-agentd's own save under any name.
+    let r = open_peer_file(&mut peer, ch, serde_json::json!({"cmd": "save_file", "name": "x", "len": 1}));
+    assert_eq!(r["reply"], "error", "{r}");
+    ch += 1;
+    assert!(downloads_of(&b).is_empty(), "{:?}", downloads_of(&b));
+    assert!(!b.root.join(".ssh").exists() && !b.root.join("desk/.ssh").exists());
+
+    // The wrong hash: every byte sent, the outcome says so, nothing saved.
+    let r = open_peer_file(&mut peer, ch, offer("a.txt", body.len() as u64, &sha256_bytes(b"something else")));
+    assert_eq!(r["reply"], "peer_file", "{r}");
+    for f in Frame::data_frames(ch, &body) {
+        peer.send(f);
+    }
+    let out = peer_file_outcome(&mut peer, ch);
+    assert_eq!(out["reply"], "error", "{out}");
+    assert!(out["message"].as_str().unwrap_or("").contains("did not match"), "{out}");
+    assert!(soon(|| downloads_of(&b).is_empty()), "{:?}", downloads_of(&b));
+    ch += 1;
+
+    // The right hash, straight over a peer channel: saved, by its own name.
+    let r = open_peer_file(&mut peer, ch, offer(".profile", body.len() as u64, &sha256_bytes(&body)));
+    assert_eq!(r["reply"], "peer_file", "{r}");
+    for f in Frame::data_frames(ch, &body) {
+        peer.send(f);
+    }
+    let out = peer_file_outcome(&mut peer, ch);
+    assert_eq!(out, serde_json::json!({"reply": "peer_file_saved", "name": "profile"}), "a dot file was hidden: {out}");
+    assert!(!out.to_string().contains(b.root.to_str().unwrap()), "B told A where it saved: {out}");
+    ch += 1;
+
+    // What an earlier rime-agentd left when it was killed mid-save goes with
+    // the next save; and so does nothing else.
+    let downloads = b.root.join("desk/Downloads");
+    std::fs::write(downloads.join(".rime-save-4194999-0-1.part"), b"half").expect("stale");
+    std::fs::write(downloads.join(".rime-save-notmine.part"), b"keep").expect("other");
+    let r = open_peer_file(&mut peer, ch, offer("second.txt", body.len() as u64, &sha256_bytes(&body)));
+    assert_eq!(r["reply"], "peer_file", "{r}");
+    for f in Frame::data_frames(ch, &body) {
+        peer.send(f);
+    }
+    assert_eq!(peer_file_outcome(&mut peer, ch)["reply"], "peer_file_saved");
+    assert_eq!(downloads_of(&b), [".rime-save-notmine.part", "profile", "second.txt"]);
+    std::fs::remove_file(downloads.join(".rime-save-notmine.part")).expect("rm");
+    ch += 1;
+
+    // Half a file, then A goes away: B keeps no partial.
+    let len: u64 = 3 * 1024 * 1024;
+    let half: Vec<u8> = vec![7u8; 1024 * 1024];
+    let r = open_peer_file(&mut peer, ch, offer("half.bin", len, &sha256_bytes(&vec![7u8; len as usize])));
+    assert_eq!(r["reply"], "peer_file", "{r}");
+    for f in Frame::data_frames(ch, &half) {
+        peer.send(f);
+    }
+    // The partial is there while the bytes arrive...
+    assert!(soon(|| downloads_of(&b).iter().any(|n| n.ends_with(".part"))), "{:?}", downloads_of(&b));
+    drop(peer);
+    // ...and gone once A is.
+    assert!(soon(|| downloads_of(&b) == ["profile", "second.txt"]), "{:?}", downloads_of(&b));
 }

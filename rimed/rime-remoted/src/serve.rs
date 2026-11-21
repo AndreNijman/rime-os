@@ -400,11 +400,13 @@ fn refuses_own_key(state: &State, key: &[u8; 32]) -> bool {
 /// full session may open any (what is behind it decides); a companion session
 /// only a request the allow list names AND the phone routers' own predicates
 /// claim, so nothing it opens can fall through to nex or `rime-agentd`; a
-/// peer session (another computer) none at all.
+/// peer session (another computer) a file it sends and nothing else, which
+/// the channel opener routes on the scope, never to `rime-agentd`.
 fn may_open(scope: Scope, request: &[u8]) -> bool {
     match scope {
         Scope::Full => true,
-        Scope::Peer => false,
+        Scope::Peer => crate::companion::verb_of(request)
+            .is_some_and(|v| crate::computers::PEER_CHANNELS.contains(&v.as_str())),
         Scope::Companion => {
             crate::companion::channel_allowed(scope, request)
                 && (crate::phone::is_channel(request) || crate::phone::is_take(request))
@@ -890,7 +892,21 @@ impl Worker {
         // close, exactly like a takeover the daemon refused.
         // `keep`: whether the channel goes in the map. A one-shot nex answer
         // ends by itself once its bytes are out, so it is never kept.
-        let opened = if crate::phone::is_channel(request) {
+        let opened = if self.scope == Scope::Peer {
+            // Another computer's file, and only that: `may_open` let nothing
+            // else through, and nothing a peer opens falls to the routes
+            // below. Its bytes are checked and saved by files.rs, which
+            // builds its own `save_file`; the channel closes after the outcome.
+            crate::files::open_incoming(&self.state, &self.agentd, &self.device_id, request)
+                .map(|(stream, reply)| {
+                    let ch = DaemonChannel {
+                        stream,
+                        read_only: false,
+                    };
+                    (ch, reply, Vec::new(), true)
+                })
+                .map_err(crate::proxy::ProxyError::NotTakenOver)
+        } else if crate::phone::is_channel(request) {
             // The one channel this machine writes to unprompted: its other end
             // stays in `state.events`, and a ring is a line written there.
             self.state
@@ -1031,7 +1047,7 @@ fn reply_to(state: &State, agentd: &Path, device_id: &str, scope: Scope, connect
     // Another computer first, and only: its own short list, answered here,
     // never routed and never forwarded. Membership is not authority.
     if scope == Scope::Peer {
-        return crate::computers::peer_reply(state, device_id, line);
+        return crate::computers::peer_reply(state, agentd, device_id, line);
     }
     let cmd = crate::companion::verb_of(line);
     if !crate::companion::allowed(scope, cmd.as_deref()) {
@@ -2025,6 +2041,8 @@ pub(crate) mod tests {
         let refused = every_reserved_verb()
             .into_iter()
             .chain(CONTROL_VERBS)
+            // A file is a channel, never a control line.
+            .chain([crate::files::FILE_VERB])
             .filter(|v| !crate::computers::PEER_VERBS.contains(v))
             .map(|v| format!(r#"{{"cmd":"{v}"}}"#))
             .chain(AGENTD_AND_GARBAGE.iter().map(|l| l.to_string()))
@@ -2048,12 +2066,41 @@ pub(crate) mod tests {
         let r = reply_to(&state, &agentd, "desk", Scope::Peer, 0, br#"{"cmd":"peer_hello"}"#);
         let v: serde_json::Value = serde_json::from_slice(&r).expect("json");
         assert_eq!(v["reply"], "peer_hello", "{v}");
-        // The list is exactly these four: a verb added to it is a verb the
+        // The list is exactly these: a verb added to it is a verb the
         // refusals above stop trying, so it is named here and nowhere else.
         assert_eq!(
             crate::computers::PEER_VERBS,
-            ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence", "peer_offer"]
+            ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence", "peer_offer", "peer_clipboard"]
         );
+        // A clipboard copy from a computer that is not paired here, and from
+        // one that is but whose copies are not taken, never reaches
+        // rime-agentd; nor does one while the screen is locked or its lock
+        // unknown (the unit-test machine stub never says unlocked).
+        let clip = |text: &str, seq: u64| {
+            serde_json::json!({"cmd": "peer_clipboard", "text": text, "hash": crate::share::hash_hex(text),
+                               "origin": rime_remote_core::b64_encode(&[61; 32]), "seq": seq})
+            .to_string()
+        };
+        let v: serde_json::Value =
+            serde_json::from_slice(&reply_to(&state, &agentd, "desk", Scope::Peer, 0, clip("x", 1).as_bytes())).expect("json");
+        assert_eq!(v["kind"], "not_shared", "{v}");
+        let peer = {
+            let mut store = state.devices().expect("store");
+            let c = store.pair_computer(&[61; 32], &state.identity.public_bytes(), "desk", vec![], None, 1).expect("pair");
+            state.save_devices(&store).expect("save");
+            c
+        };
+        let v: serde_json::Value =
+            serde_json::from_slice(&reply_to(&state, &agentd, &peer.id, Scope::Peer, 0, clip("x", 2).as_bytes())).expect("json");
+        assert_eq!(v["kind"], "not_shared", "{v}");
+        {
+            let mut store = state.devices().expect("store");
+            store.set_computer_clipboard(&peer.id, false, true).expect("on");
+            state.save_devices(&store).expect("save");
+        }
+        let v: serde_json::Value =
+            serde_json::from_slice(&reply_to(&state, &agentd, &peer.id, Scope::Peer, 0, clip("x", 3).as_bytes())).expect("json");
+        assert_eq!((v["applied"].clone(), v["why"].clone()), (serde_json::json!(false), serde_json::json!("locked")), "{v}");
         for (line, kind) in [
             (&br#"{"cmd":"peer_tombstones","tombstones":[]}"#[..], "peer_tombstones"),
             (br#"{"cmd":"peer_presence","presence":{"name":"desk"}}"#, "peer_presence"),
@@ -2071,21 +2118,34 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn a_peer_opens_no_channel_and_the_companion_list_refuses_it_too() {
+    fn a_peer_opens_only_a_file_and_the_companion_list_refuses_it_everything() {
         let mut names: Vec<&str> = every_reserved_verb();
         names.extend(crate::companion::ALLOWED_CHANNELS);
         names.extend([crate::phone::CHANNEL, crate::phone::TAKE, crate::photos::UPLOAD, "attach", "receive", "save_file"]);
+        names.extend([crate::files::FILE_VERB, "peer_file2", "PEER_FILE", "peer_clipboard"]);
         let mut requests: Vec<Vec<u8>> =
             names.iter().map(|n| format!(r#"{{"cmd":"{n}","id":1,"cols":80,"rows":24}}"#).into_bytes()).collect();
         requests.extend(AGENTD_AND_GARBAGE.iter().map(|l| l.as_bytes().to_vec()));
+        let mut opened = Vec::new();
         for r in &requests {
             let shown = String::from_utf8_lossy(r);
-            assert!(!may_open(Scope::Peer, r), "a peer opens {shown}");
-            // The second lock, for a path that forgot the first.
+            if may_open(Scope::Peer, r) {
+                opened.push(crate::companion::verb_of(r).expect("a verb"));
+            }
+            // The companion list never lets a peer through: a peer's one
+            // channel is decided by `may_open` and routed to files.rs alone.
             assert!(!crate::companion::channel_allowed(Scope::Peer, r), "{shown}");
             assert!(!crate::companion::allowed(Scope::Peer, crate::companion::verb_of(r).as_deref()), "{shown}");
         }
+        opened.sort();
+        opened.dedup();
+        assert_eq!(opened, [crate::files::FILE_VERB], "a peer opens a channel nobody decided");
         assert!(!crate::companion::allowed(Scope::Peer, None));
+        // A file is a channel on a peer link only: a phone's session and a
+        // companion link never reach files.rs.
+        let file = br#"{"cmd":"peer_file","name":"a.txt","len":1,"sha256":"00"}"#;
+        assert!(!may_open(Scope::Companion, file));
+        assert!(!crate::phone::is_channel(file) && !crate::phone::is_take(file) && !crate::nex::is_channel(file));
     }
 
     #[test]

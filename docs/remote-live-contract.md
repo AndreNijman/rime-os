@@ -1371,7 +1371,12 @@ belongs to the graphical session, and the Shell watches it.
 ```json
 {"cmd":"clipboard","text":"…","sensitive":true}
 → {"reply":"clipboard_sent","reached":1}
+→ {"reply":"clipboard_sent","reached":1,"computers":2}
 ```
+
+- `computers` (absent for none) is how many paired computers the copy was
+  pushed to (§2.15, "Clipboard and files between computers"): only for a
+  request from origin `rime-shell` or `local-terminal`.
 
 - `text` is sent verbatim: not trimmed, line breaks kept. It is at most
   65,536 bytes of UTF-8. Larger text is refused (`{"reply":"error",…}` with
@@ -1517,6 +1522,11 @@ removed computer is refused as a computer.
 → {"reply":"error","message":"'desk' is not removed, so there is nothing to forget"}
 {"cmd":"computer_ping","computer":"<id or name>","via":"lan"|"relay"}
 → {"reply":"computer_pong","id","name","machine","version","build","path":"lan"|"relay","rtt_ms"}
+{"cmd":"computer_clipboard","computer":"<id or name>","send":true,"receive":false}
+{"cmd":"computer_files","computer":"<id or name>","on":false}
+→ {"reply":"computer_shared","id","name","clipboard_send","clipboard_receive","files"}
+{"cmd":"computer_send","computer":"<id or name>","name":"notes.txt","via":"lan"|"relay"}  + one fd (SCM_RIGHTS)
+→ {"reply":"computer_sent","id","name","file":"notes (2).txt","bytes":1234}
 ```
 
 - `computer_show`, `computer_add`, `computer_remove` and `computer_forget`
@@ -1534,6 +1544,12 @@ removed computer is refused as a computer.
   are memory only and absent for a removed computer.
 - `computer_ping` runs the exchange below after `peer_hello`; a failed
   exchange is logged, not the ping's error.
+- `computer_clipboard`, `computer_files` and `computer_send` need a §7 local
+  origin, like pairing: what is shared with another computer, and sending it
+  a file, are a person's decisions, never an agent's. A switch cannot be
+  turned on for a removed computer or for an introduced one not allowed yet
+  (`not allowed yet`); turning one off always works. `computers` lists each
+  record's `clipboard_send`, `clipboard_receive` and `files` (below).
 
 **Stored.** `computers.json` beside `devices.json` (0600, same directory),
 `{"computers": {<id>: <device record, plus "addresses" and "relay">}}`,
@@ -1564,11 +1580,11 @@ is a paired, not removed computer is scope `peer`.
 
 | | allowed |
 | --- | --- |
-| control verbs | `remote_hello`, `peer_hello`, `peer_tombstones`, `peer_presence`, `peer_offer` |
-| channels (`Open`) | none |
+| control verbs | `remote_hello`, `peer_hello`, `peer_tombstones`, `peer_presence`, `peer_offer`, `peer_clipboard` |
+| channels (`Open`) | `peer_file` |
 
 ```json
-{"cmd":"remote_hello"} → {"reply":"remote","version":1,"features":["peer_hello","peer_tombstones","peer_presence","peer_offer"],"scope":"peer"}
+{"cmd":"remote_hello"} → {"reply":"remote","version":1,"features":["peer_hello","peer_tombstones","peer_presence","peer_offer","peer_clipboard","peer_file"],"scope":"peer"}
 {"cmd":"peer_hello"}   → {"reply":"peer_hello","name":"desk","version":1,"build":"0.1.0"}
 {"cmd":"peer_tombstones","tombstones":[{"key":"<b64url>","removed_ms":…,"name":"old"}]}
                        → {"reply":"peer_tombstones","tombstones":[…]}
@@ -1581,10 +1597,129 @@ is a paired, not removed computer is scope `peer`.
 
 Everything else is refused before routing: every `rime-agentd` verb, `decide`,
 nex, the machine verbs, the phone verbs, the companion verbs, push, a line
-with no readable `cmd`, and every channel. A peer session reaches
-`rime-agentd` never. The companion allow list refuses `peer` too, as a second
-lock. A session presenting this machine's own key is refused at the handshake
+with no readable `cmd`, and every channel but `peer_file` (a `peer_file` sent
+as a control line is refused too). A peer's line or channel reaches
+`rime-agentd` never: rime-remoted builds exactly two requests itself from
+fields it checked, `clipboard_write` (for `peer_clipboard`) and `save_file`
+(for `peer_file`), as actor `computer:<id>`, and forwards no byte of a peer's
+line to it, nor any of `rime-agentd`'s words back to the peer. The companion
+allow list refuses `peer` too, as a second lock. A session presenting this machine's own key is refused at the handshake
 whatever `devices.json` or `computers.json` says.
+
+**Clipboard and files between computers (M3a, features `peer_clipboard`,
+`peer_file`).** Both are only ever between two computers paired here and not
+removed, and only with one that is trusted: paired with a code, or introduced
+by a phone and then allowed by a person here. Each record carries three
+switches in `computers.json`, under `share` (each left out at its default),
+set only through the control verbs above and cleared on removal:
+
+| field | default | meaning |
+| --- | --- | --- |
+| `clipboard_send` | false | this computer's copies go to that one |
+| `clipboard_receive` | false | that computer's copies are put on this clipboard |
+| `files` | absent = on | files from that computer are saved here |
+
+An introduced computer counts as none of the three until it is allowed,
+whatever the file says. An older daemon ignores the fields; a rollback keeps
+them.
+
+*`peer_clipboard`: one copy, text only.*
+
+```json
+{"cmd":"peer_clipboard","text":"…","hash":"<sha256 hex of text>","origin":"<sender key b64url>","seq":17950812345670}
+→ {"reply":"peer_clipboard","applied":true}
+→ {"reply":"peer_clipboard","applied":false,"why":"duplicate"|"echo"|"locked"}
+→ {"reply":"error","kind":"not_shared"|"rate_limited"|"bad_request"|"too_large"|"unavailable","message":"…"}
+```
+
+- Sent by the computer where the copy was made, when Rime Shell or a
+  terminal at it hands over a local copy (`clipboard`, §2.14; origin
+  `rime-shell` or `local-terminal`) and only then. A `clipboard` from any
+  other origin (an agent, a scheduled job, one that cannot be read) still
+  reaches the phones and goes to no computer. Then it goes to each
+  computer whose `clipboard_send` is on, directly, over the dialler (LAN, then relay), one thread per
+  computer. Nothing is queued: a computer that cannot be reached misses the
+  copy; while one push is under way, a newer copy replaces the waiting one.
+  Nothing runs between copies, so power saver changes nothing.
+- Never sent: a copy the Shell marked `sensitive`, an empty one or one over
+  8,192 bytes, one made while this screen is locked or its lock state cannot
+  be read, and a copy that came from a phone or another computer.
+- Taken only when `clipboard_receive` is on for the sender (`not_shared`
+  otherwise, checked first), at most 30 a minute per sender (counted before
+  the line is read; `rate_limited`). `origin` must be the key that opened the
+  session (copies are never relayed through a third computer; `bad_request`),
+  `hash` must match `text`, `seq` must not repeat one of the sender's last 128
+  (`duplicate`; senders seed it from the clock, so a restart does not repeat).
+  A copy is dropped while this screen is locked or its state is unknown
+  (`locked`; never kept for later).
+- **The echo rule.** Only a copy made at a computer travels, and only one
+  hop. A copy taken from another computer is remembered by hash (before it is
+  written, for 10 s) and goes nowhere when the Shell hands it back: not to
+  other computers, not to this computer's phones. A copy a phone wrote here
+  goes to no computer. A copy whose hash this computer sent in the last 10 s
+  is dropped on arrival (`echo`), so A→B→A ends at A even against an older
+  build. With three computers, each takes A's copy once from A and passes it
+  to nobody, so it settles after one round.
+
+*`peer_file`: one file, on its own channel.*
+
+```json
+Open {"cmd":"peer_file","name":"notes.txt","len":1234,"sha256":"<64 lowercase hex>"}
+→ Control {"reply":"peer_file","len":1234}            then Data from the sender: exactly len bytes
+→ Control {"reply":"error","kind":"not_shared"|"rate_limited"|"bad_request"|"too_large"|"busy"|"unavailable","message":"…"}, Close
+Data from the receiver, one JSON line each:
+  {"reply":"peer_file_progress","got":1048576}         every 1 MiB received
+  {"reply":"peer_file_saved","name":"notes (2).txt"}   then Close
+  {"reply":"error","kind":"failed","message":"…"}      then Close
+```
+
+- Checked before a byte is taken, in this order: `files` on for the sender
+  (`not_shared`); the sender's hourly offers (100, refused ones counted, so a
+  flood of bad offers runs out too; `rate_limited`); the offer itself; the
+  sender's hourly bytes (2 GiB accepted; `rate_limited`); one transfer per
+  computer and two at once in all (`busy`). Quotas are memory only.
+- The name is **refused, not cleaned**, when empty, `.` or `..`, longer than
+  200 bytes, or holding `/`, `\`, a control character (C0, DEL, C1), or an
+  invisible or direction-changing character (every character of Unicode
+  17's categories Cf, Zl and Zp: bidi controls, zero-width characters, the
+  soft hyphen, the tags, U+2028, U+2029); then it is reduced as every saved
+  name is (leading dots and spaces dropped: nothing is saved hidden). `len` is 1 to
+  268,435,456 (`too_large` otherwise, including 0 and anything that is not a
+  whole number); `sha256` is 64 lowercase hex digits.
+- The receiver asks `rime-agentd` for `save_file` (§1.8) with the checked
+  name and `len`, then passes it exactly `len` bytes and no more, holding the
+  last byte back until the bytes hash to `sha256`: a file whose hash does not
+  match never gets its name, because `rime-agentd` removes its temporary file
+  when the stream ends short. The same happens when the sender closes the
+  channel, the session ends (removal ends it), nothing arrives for 30 s, or
+  the transfer falls behind its schedule: 60 s of grace, then 256 KiB/s from
+  the start (byte `n` is due by 60 s + n / 256 KiB, so the whole file by
+  60 s plus 1 s per 256 KiB). A computer that trickles loses its slot once it
+  is behind, not at the end. A temporary file a killed
+  `rime-agentd` left behind (`.rime-save-<pid>-<seq>-<nanos>.part`, its pid no
+  longer running) is removed before its next save. `rime-agentd` saves under
+  a name that replaces nothing (`notes (2).txt`), never through a link, mode
+  0644, keeping 64 MiB free.
+- The sender is told the saved name, never the path. `rime-agentd`'s error
+  text stays on the receiver's log; the peer gets `unavailable`.
+- **Flow.** The receiver writes `peer_file_progress` every 1 MiB; the sender
+  keeps at most 4 MiB unacknowledged, and while it waits it reads its frames
+  and answers the receiver's pings, so a long transfer keeps its session alive
+  over the LAN and the relay alike, and a slow disk slows the sender. The
+  sender gives the whole transfer the receiver's budget plus 150 s for the
+  outcome.
+- Saved: a notification "<computer> sent you <name>", "Saved in Downloads.
+  Nothing was opened.", with one button, "Show in folder", which asks the file
+  manager (`org.freedesktop.FileManager1.ShowItems`) to show the file, taken
+  from this process's own table (the last 32 saved) and only while it is
+  still a regular file there. Nothing is opened or run, then or ever.
+- Files are taken while the screen is locked; the notification waits on the
+  lock screen like any other.
+- The sender (`computer_send`) refuses a removed computer and one not allowed
+  yet, reads the file through the passed descriptor (a regular file, 1 byte to
+  256 MiB, hashed first, then sent by offset), and needs the other computer's
+  `features` to list `peer_file`. Nothing is queued: a computer that cannot be
+  reached is an error now.
 
 **The exchange.** The computer that dialled (for `computer_ping`, the
 refresh, or a tell) sends `remote_hello`, then `peer_tombstones` and

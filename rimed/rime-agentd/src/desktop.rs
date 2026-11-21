@@ -365,6 +365,62 @@ fn temp_file(dir: &Path) -> Result<(PathBuf, File), String> {
     Err(format!("cannot find a free temporary name in {}", dir.display()))
 }
 
+/// The process id in a temporary name [`temp_file`] made, and nothing for
+/// any other name: `.rime-save-<pid>-<seq>-<nanos>.part`, digits only.
+fn partial_pid(name: &str) -> Option<u32> {
+    let middle = name.strip_prefix(".rime-save-")?.strip_suffix(".part")?;
+    let parts: Vec<&str> = middle.split('-').collect();
+    if parts.len() != 3 || parts.iter().any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit())) {
+        return None;
+    }
+    parts[0].parse().ok()
+}
+
+fn process_alive(pid: u32) -> bool {
+    let Ok(pid) = libc::pid_t::try_from(pid) else { return false };
+    // SAFETY: signal 0 only asks whether the process exists.
+    pid > 0 && (unsafe { libc::kill(pid, 0) } == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM))
+}
+
+/// Remove the temporary files an earlier `rime-agentd` left in `dir` when it
+/// stopped in the middle of a save. Only names [`temp_file`] makes, only
+/// regular files (never through a link) this user owns, and only when the
+/// process that wrote them is gone: never this process's own. What was
+/// removed.
+pub fn sweep_partials(dir: &Path, own: u32, alive: impl Fn(u32) -> bool) -> Vec<PathBuf> {
+    use std::os::unix::fs::MetadataExt;
+    let mut removed = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else { return removed };
+    // SAFETY: geteuid cannot fail.
+    let uid = unsafe { libc::geteuid() };
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(pid) = name.to_str().and_then(partial_pid) else { continue };
+        if pid == own || alive(pid) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else { continue };
+        if !meta.file_type().is_file() || meta.uid() != uid {
+            continue;
+        }
+        if std::fs::remove_file(&path).is_ok() {
+            removed.push(path);
+        }
+    }
+    removed
+}
+
+/// [`sweep_partials`] on the folder a save is about to write into. Run by
+/// every save rather than once at start: a daemon started by a test (or by
+/// anything else without the desktop stub) never looks at the real Downloads
+/// unless it is asked to save there.
+fn sweep_before_save(dir: &Path) {
+    for p in sweep_partials(dir, std::process::id(), process_alive) {
+        eprintln!("rime-agentd: removed a file left half saved: {}", p.display());
+    }
+}
+
 /// Removes the temporary file unless it was put in place.
 struct Partial(Option<PathBuf>);
 
@@ -407,6 +463,7 @@ fn save_inner(
     socket
         .set_read_timeout(Some(stall))
         .map_err(|e| format!("the upload could not be given a read timeout: {e}"))?;
+    sweep_before_save(&plan.dir);
     let (tmp, mut file) = temp_file(&plan.dir)?;
     let mut partial = Partial(Some(tmp.clone()));
     let deadline = Instant::now() + budget;
@@ -515,6 +572,61 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
         }
+    }
+
+    #[test]
+    fn only_a_dead_saves_own_temporary_files_are_swept() {
+        let s = Scratch::new("rime-sweep");
+        let d = s.path();
+        let write = |name: &str| std::fs::write(d.join(name), b"partial").unwrap();
+        let dead = ".rime-save-4000001-3-123.part";
+        let live = ".rime-save-4000002-0-9.part";
+        let own = format!(".rime-save-{}-1-5.part", std::process::id());
+        for n in [dead, live, own.as_str()] {
+            write(n);
+        }
+        // Names it does not make, however close.
+        let others = [
+            "report.part",
+            ".rime-save-4000001-3.part",
+            ".rime-save-4000001-3-1-2.part",
+            ".rime-save-x-3-1.part",
+            ".rime-save-4000001--1.part",
+            ".rime-save-4000001-3-1.part.keep",
+            "rime-save-4000001-3-1.part",
+            ".rime-save-+4000001-3-1.part",
+        ];
+        for n in others {
+            write(n);
+        }
+        // A link with the right name is never followed or removed, and the
+        // file it points at stays.
+        let target = d.join("precious.txt");
+        std::fs::write(&target, b"keep me").unwrap();
+        std::os::unix::fs::symlink(&target, d.join(".rime-save-4000003-0-0.part")).unwrap();
+        // A directory with the right name stays too.
+        std::fs::create_dir(d.join(".rime-save-4000004-0-0.part")).unwrap();
+        let removed = sweep_partials(d, std::process::id(), |pid| pid == 4000002);
+        assert_eq!(removed, vec![d.join(dead)]);
+        assert!(!d.join(dead).exists());
+        for n in [live, own.as_str()].into_iter().chain(others) {
+            assert!(d.join(n).exists(), "{n} was removed");
+        }
+        assert!(std::fs::symlink_metadata(d.join(".rime-save-4000003-0-0.part")).is_ok());
+        assert_eq!(std::fs::read(&target).unwrap(), b"keep me");
+        assert!(d.join(".rime-save-4000004-0-0.part").is_dir());
+        // A folder that is not there is no error.
+        assert!(sweep_partials(&d.join("missing"), 1, |_| false).is_empty());
+        assert_eq!(partial_pid(dead), Some(4000001));
+        assert_eq!(partial_pid(".rime-save-99999999999-1-1.part"), None, "a pid past u32");
+    }
+
+    #[test]
+    fn a_name_temp_file_makes_is_one_the_sweep_knows() {
+        let s = Scratch::new("rime-sweep-own");
+        let (path, _f) = temp_file(s.path()).unwrap();
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(partial_pid(name), Some(std::process::id()), "{name}");
     }
 
     fn stub() -> (Scratch, Desk) {
@@ -636,6 +748,24 @@ mod tests {
         let mode = std::fs::metadata(&path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode & 0o111, 0, "a saved file is never executable");
         assert!(leftovers(&p.dir).is_empty());
+    }
+
+    #[test]
+    fn a_save_sweeps_what_a_stopped_daemon_left_and_keeps_what_a_live_one_writes() {
+        let (_t, d) = stub();
+        let p = plan(&d, "next.txt", 3).unwrap();
+        // A pid past the kernel's ceiling, so never running.
+        let stale = p.dir.join(".rime-save-4194999-7-1.part");
+        std::fs::write(&stale, b"half").unwrap();
+        let own = p.dir.join(format!(".rime-save-{}-999999-1.part", std::process::id()));
+        std::fs::write(&own, b"arriving").unwrap();
+        let (mut tx, rx) = pair();
+        tx.write_all(b"abc").unwrap();
+        let mut r = rx.try_clone().unwrap();
+        let (name, _) = saved(save(&p, &rx, &mut r, 3, Duration::from_secs(2), Duration::from_secs(5)));
+        assert_eq!(name, "next.txt");
+        assert!(!stale.exists(), "the stopped save's file was left");
+        assert!(own.exists(), "this daemon's own arriving file was removed");
     }
 
     #[test]

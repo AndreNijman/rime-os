@@ -136,6 +136,12 @@ pub trait Backend: Send + Sync {
     fn power(&self, deadline: Instant) -> Status {
         self.status(deadline)
     }
+    /// Whether the screen is locked, and nothing else: what sharing with
+    /// another computer asks before each copy (`share.rs`). `None` when it
+    /// cannot be told.
+    fn locked(&self, deadline: Instant) -> Option<bool> {
+        self.status(deadline).locked
+    }
     /// How this computer is online: `wired`, `wifi` or `none`.
     fn network(&self) -> Option<String> {
         None
@@ -363,6 +369,11 @@ impl Backend for Real {
                 update: updates.as_ref().and_then(|u| u.get("State")).and_then(Value::as_str).map(str::to_string),
             }
         })
+    }
+
+    fn locked(&self, deadline: Instant) -> Option<bool> {
+        let session = self.display(deadline).ok()?;
+        self.locked_hint(&session, deadline)
     }
 
     fn power(&self, deadline: Instant) -> Status {

@@ -540,6 +540,9 @@ impl Harness {
         let agentd = Command::new(bin("rime-agentd"))
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
+            // A file another computer sends lands here, never in the
+            // developer's Downloads.
+            .env("RIME_AGENTD_DESKTOP_STUB", root.join("desk"))
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
@@ -1540,4 +1543,29 @@ fn two_paired_computers_reach_each_other_through_the_relay() {
         let guests = a.relay.seen().arrivals.iter().filter(|x| *x == "guest").count();
         assert!(guests > guests_before, "B's ping never arrived at A's relay as a guest");
     }
+
+    // A file through the relay, larger than the sender keeps unacknowledged:
+    // the receiver's progress lines come back the same way and every byte
+    // arrives, with the session's pings answered on the way.
+    let outbox = b.root.join("outbox");
+    std::fs::create_dir_all(&outbox).expect("mkdir");
+    let body: Vec<u8> = (0..(5 * 1024 * 1024 + 11)).map(|i: usize| ((i * 13 + i / 509) % 256) as u8).collect();
+    let file = std::fs::File::open({
+        std::fs::write(outbox.join("through.bin"), &body).expect("write");
+        outbox.join("through.bin")
+    })
+    .expect("open");
+    let stream = UnixStream::connect(&b.remoted_socket).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(120))).ok();
+    let line = format!("{}\n", serde_json::json!({"cmd": "computer_send", "computer": a_on_b, "name": "through.bin", "via": "relay"}));
+    {
+        use std::os::fd::AsRawFd;
+        rime_remote_core::fdpass::send_with_fd(&stream, line.as_bytes(), file.as_raw_fd()).expect("send");
+    }
+    let mut reply = String::new();
+    BufReader::new(&stream).read_line(&mut reply).expect("reply");
+    let sent: serde_json::Value = serde_json::from_str(reply.trim()).expect("json");
+    assert_eq!(sent["reply"], "computer_sent", "{sent}");
+    let got = std::fs::read(a.root.join("desk/Downloads/through.bin")).expect("saved on A");
+    assert!(got == body, "the file through the relay differs: {} of {} bytes", got.len(), body.len());
 }

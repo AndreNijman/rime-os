@@ -303,6 +303,84 @@ pub enum ComputersCmd {
         #[arg(long)]
         json: bool,
     },
+    /// Share your clipboard with a paired computer: text you copy here goes
+    /// there, and text copied there comes here.
+    ///
+    /// Off until you turn it on, and each computer decides for itself: a copy
+    /// goes from this computer to the other only when this one sends to it
+    /// AND the other takes from this one, so turn it on on both. `on` sends
+    /// and takes, `send` only sends, `receive` only takes, `off` neither.
+    /// A password manager's copy, anything over 8 KiB, and anything while
+    /// either screen is locked is never shared. Only you, at this machine,
+    /// can change it; an agent cannot.
+    Clipboard {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+        #[arg(value_enum)]
+        setting: ClipboardSetting,
+    },
+    /// Whether files a paired computer sends you are saved in your Downloads.
+    ///
+    /// On by default for a computer you paired with a code, and for one your
+    /// phone added once you allowed it. Only you, at this machine, can
+    /// change it; an agent cannot.
+    Files {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+        #[arg(value_enum)]
+        setting: OnOff,
+    },
+    /// Send files to a paired computer: each lands in its Downloads.
+    ///
+    /// Only while the other computer is on and reachable: nothing waits to
+    /// be sent later. Up to 256 MiB a file. The other computer saves it under
+    /// a name that replaces nothing, says so in a notification, and opens
+    /// nothing by itself. Only you, at this machine, can send; an agent cannot.
+    Send {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+        /// The files to send.
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Which path to use: the local network, the relay, or the first that works.
+        #[arg(long, value_enum, default_value = "any")]
+        via: Via,
+    },
+}
+
+/// `rime remote computers clipboard <computer> <setting>`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClipboardSetting {
+    /// Send this computer's copies there, and take its copies here.
+    On,
+    /// Neither.
+    Off,
+    /// Only send this computer's copies there.
+    Send,
+    /// Only take that computer's copies here.
+    Receive,
+}
+
+impl ClipboardSetting {
+    /// (send, receive).
+    fn switches(self) -> (bool, bool) {
+        match self {
+            ClipboardSetting::On => (true, true),
+            ClipboardSetting::Off => (false, false),
+            ClipboardSetting::Send => (true, false),
+            ClipboardSetting::Receive => (false, true),
+        }
+    }
+}
+
+/// `on` or `off`.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnOff {
+    On,
+    Off,
 }
 
 /// The path `rime remote computers ping` takes.
@@ -506,6 +584,21 @@ enum Request {
     },
     ComputerPing {
         computer: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        via: Option<&'static str>,
+    },
+    ComputerClipboard {
+        computer: String,
+        send: bool,
+        receive: bool,
+    },
+    ComputerFiles {
+        computer: String,
+        on: bool,
+    },
+    ComputerSend {
+        computer: String,
+        name: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         via: Option<&'static str>,
     },
@@ -713,6 +806,19 @@ enum Reply {
         id: String,
         name: String,
     },
+    ComputerShared {
+        id: String,
+        name: String,
+        clipboard_send: bool,
+        clipboard_receive: bool,
+        files: bool,
+    },
+    ComputerSent {
+        id: String,
+        name: String,
+        file: String,
+        bytes: u64,
+    },
     DeviceAllowed {
         id: String,
         name: String,
@@ -776,6 +882,14 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
             ComputersCmd::Forget { computer } => computers_forget(&computer),
             ComputersCmd::Allow { computer } => computers_allow(&computer),
             ComputersCmd::Ping { computer, via, json } => computers_ping(&computer, via, json),
+            ComputersCmd::Clipboard { computer, setting } => {
+                let (send, receive) = setting.switches();
+                computers_share(Request::ComputerClipboard { computer, send, receive })
+            }
+            ComputersCmd::Files { computer, setting } => {
+                computers_share(Request::ComputerFiles { computer, on: setting == OnOff::On })
+            }
+            ComputersCmd::Send { computer, files, via } => computers_send(&computer, &files, via),
         },
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
@@ -1868,6 +1982,9 @@ fn computers_table(computers: &[rime_remote_core::peer::Listed]) -> String {
         if let (Some(p), Some(at)) = (&l.presence, l.presence_ms) {
             out.push_str(&format!("{:<18} {} ({})\n", "", presence_words(p), ago(at)));
         }
+        if c.is_active() {
+            out.push_str(&format!("{:<18} {}\n", "", sharing_words(l.clipboard_send, l.clipboard_receive, l.files)));
+        }
     }
     out
 }
@@ -1972,6 +2089,74 @@ fn computers_allow(computer: &str) -> Result<i32> {
         }
         _ => unexpected(),
     }
+}
+
+fn computers_share(req: Request) -> Result<i32> {
+    match call(&req)? {
+        Reply::ComputerShared { id, name, clipboard_send, clipboard_receive, files } => {
+            eprintln!("rime: {name} ({id}): {}.", sharing_words(clipboard_send, clipboard_receive, files));
+            if matches!(req, Request::ComputerClipboard { send: true, .. } | Request::ComputerClipboard { receive: true, .. }) {
+                eprintln!(
+                    "rime: a copy goes between two computers only when both have it on: run the same on {name} \
+                     for the other direction. Rime Shell hands this computer's copies over while Settings → Paired \
+                     devices → \"Send my clipboard to my phone\" is on."
+                );
+            }
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
+/// How long `rime remote computers send` waits for one file: the other
+/// computer gives a transfer 60 s plus a second per 256 KiB, the dial and the
+/// last answer get the rest.
+fn computer_send_wait(len: u64) -> std::time::Duration {
+    std::time::Duration::from_secs(240 + len / (256 * 1024))
+}
+
+fn computers_send(computer: &str, files: &[PathBuf], via: Via) -> Result<i32> {
+    use std::os::fd::AsRawFd;
+    let mut code = 0;
+    for path in files {
+        let file = match std::fs::File::open(path) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("rime: could not open {}: {e}", path.display());
+                code = 1;
+                continue;
+            }
+        };
+        let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let req = Request::ComputerSend { computer: computer.to_string(), name: name.clone(), via: via.wire() };
+        match call_for(&req, Some(file.as_raw_fd()), computer_send_wait(len))? {
+            Reply::ComputerSent { id, name: to, file, bytes } => {
+                eprintln!("rime: {to} ({id}) saved {file} ({}) in its Downloads.", bytes_short(bytes));
+            }
+            Reply::Error { message } => {
+                eprintln!("rime: {name}: {message}");
+                code = 1;
+            }
+            _ => return unexpected(),
+        }
+    }
+    Ok(code)
+}
+
+/// "clipboard sent and taken, files taken": what is shared with a computer.
+fn sharing_words(send: bool, receive: bool, files: bool) -> String {
+    let clipboard = match (send, receive) {
+        (true, true) => "clipboard sent and taken",
+        (true, false) => "clipboard sent, not taken",
+        (false, true) => "clipboard taken, not sent",
+        (false, false) => "clipboard not shared",
+    };
+    format!("{clipboard}, {}", if files { "files taken" } else { "files refused" })
 }
 
 fn computers_ping(computer: &str, via: Via, json: bool) -> Result<i32> {
@@ -2637,7 +2822,96 @@ mod tests {
         };
         let table = computers_table(&computers);
         assert!(table.contains("battery 81%, balanced, locked, Wi-Fi, up 2h"), "{table}");
-        assert_eq!(table.lines().count(), 4, "{table}");
+        // The header, two rows, the presence and what is shared with desk.
+        assert_eq!(table.lines().count(), 5, "{table}");
+        assert!(table.contains("clipboard not shared, files refused"), "{table}");
+    }
+
+    #[test]
+    fn the_computers_table_and_json_show_each_computers_switches() {
+        let text = r#"{"reply":"computers","computers":[
+            {"id":"aaaa","name":"desk","public_key":"k","paired_ms":1,"clipboard_send":true,"clipboard_receive":true,"files":true},
+            {"id":"bbbb","name":"lab","public_key":"k2","paired_ms":1,"clipboard_receive":true,"files":false}]}"#;
+        let Reply::Computers { computers } = serde_json::from_str::<Reply>(text).expect("reply") else {
+            panic!("not computers")
+        };
+        let table = computers_table(&computers);
+        assert!(table.contains("clipboard sent and taken, files taken"), "{table}");
+        assert!(table.contains("clipboard taken, not sent, files refused"), "{table}");
+        let json = serde_json::to_value(&computers).expect("json");
+        assert_eq!((json[0]["clipboard_send"].clone(), json[1]["files"].clone()), (serde_json::json!(true), serde_json::json!(false)));
+    }
+
+    #[test]
+    fn the_sharing_switches_parse_and_go_on_the_wire_as_the_service_reads_them() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("r").chain(args.iter().copied()));
+        for (word, want) in [("on", (true, true)), ("off", (false, false)), ("send", (true, false)), ("receive", (false, true))] {
+            match parse(&["computers", "clipboard", "desk", word]).expect("clipboard").cmd {
+                RemoteCmd::Computers { action: ComputersCmd::Clipboard { computer, setting } } => {
+                    assert_eq!((computer.as_str(), setting.switches()), ("desk", want), "{word}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+        assert!(parse(&["computers", "clipboard", "desk"]).is_err(), "a setting is needed");
+        assert!(parse(&["computers", "clipboard", "desk", "maybe"]).is_err());
+        assert!(parse(&["computers", "files", "desk", "send"]).is_err());
+        assert!(matches!(
+            parse(&["computers", "files", "desk", "off"]).expect("files").cmd,
+            RemoteCmd::Computers { action: ComputersCmd::Files { setting: OnOff::Off, .. } }
+        ));
+        let wire = |r: &Request| serde_json::to_string(r).unwrap();
+        assert_eq!(
+            wire(&Request::ComputerClipboard { computer: "d".into(), send: true, receive: false }),
+            r#"{"cmd":"computer_clipboard","computer":"d","send":true,"receive":false}"#
+        );
+        assert_eq!(wire(&Request::ComputerFiles { computer: "d".into(), on: false }), r#"{"cmd":"computer_files","computer":"d","on":false}"#);
+        let r: Reply = serde_json::from_str(
+            r#"{"reply":"computer_shared","id":"d","name":"desk","clipboard_send":true,"clipboard_receive":false,"files":true}"#,
+        )
+        .expect("shared");
+        assert!(matches!(r, Reply::ComputerShared { clipboard_send: true, clipboard_receive: false, files: true, .. }));
+    }
+
+    #[test]
+    fn send_to_a_computer_takes_one_or_more_files_and_goes_on_the_wire_one_by_one() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("r").chain(args.iter().copied()));
+        match parse(&["computers", "send", "desk", "a.txt", "b c.pdf"]).expect("send").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Send { computer, files, via } } => {
+                assert_eq!(via, Via::Any);
+                assert_eq!(computer, "desk");
+                assert_eq!(files, vec![PathBuf::from("a.txt"), PathBuf::from("b c.pdf")]);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["computers", "send", "desk"]).is_err(), "a file is needed");
+        let wire = serde_json::to_string(&Request::ComputerSend { computer: "d".into(), name: "a.txt".into(), via: None }).unwrap();
+        assert_eq!(wire, r#"{"cmd":"computer_send","computer":"d","name":"a.txt"}"#);
+        let wire =
+            serde_json::to_string(&Request::ComputerSend { computer: "d".into(), name: "a.txt".into(), via: Via::Relay.wire() })
+                .unwrap();
+        assert_eq!(wire, r#"{"cmd":"computer_send","computer":"d","name":"a.txt","via":"relay"}"#);
+        assert!(matches!(
+            parse(&["computers", "send", "desk", "a.txt", "--via", "lan"]).expect("via").cmd,
+            RemoteCmd::Computers { action: ComputersCmd::Send { via: Via::Lan, .. } }
+        ));
+        let r: Reply =
+            serde_json::from_str(r#"{"reply":"computer_sent","id":"d","name":"desk","file":"a (1).txt","bytes":12}"#).expect("sent");
+        assert!(matches!(r, Reply::ComputerSent { bytes: 12, .. }));
+        // A big file gets longer than the other computer's own budget for it.
+        assert!(computer_send_wait(256 * 1024 * 1024) > std::time::Duration::from_secs(60 + 1024 + 150));
     }
 
     #[test]
@@ -2685,8 +2959,9 @@ mod tests {
         let table = computers_table(&computers);
         assert!(table.contains("added by Pixel 8, not allowed yet"), "{table}");
         assert!(table.contains("added by Pixel 8, allowed"), "{table}");
-        // One header, four rows, and a line under each active introduced one.
-        assert_eq!(table.lines().count(), 7, "{table}");
+        // One header, four rows, a line under each active introduced one, and
+        // what is shared under each active one.
+        assert_eq!(table.lines().count(), 10, "{table}");
         // `--json` is the record as the service sent it: who added it, and
         // when it was allowed, if it was.
         let json = serde_json::to_value(&computers).expect("json");
@@ -2927,7 +3202,10 @@ mod tests {
                 ComputersCmd::Remove { computer }
                 | ComputersCmd::Allow { computer }
                 | ComputersCmd::Forget { computer }
-                | ComputersCmd::Ping { computer, .. } => Some(computer),
+                | ComputersCmd::Ping { computer, .. }
+                | ComputersCmd::Clipboard { computer, .. }
+                | ComputersCmd::Files { computer, .. }
+                | ComputersCmd::Send { computer, .. } => Some(computer),
                 ComputersCmd::Add { .. } | ComputersCmd::List { .. } => None,
             },
             RemoteCmd::Messages { action: Some(MessagesCmd::Send { device, .. }), .. }
@@ -2973,6 +3251,14 @@ mod tests {
             &["computers", "ping", ID],
             &["computers", "ping", ID, "--via", "lan", "--json"],
             &["computers", "ping", "--json", ID],
+            &["computers", "clipboard", ID, "on"],
+            &["computers", "clipboard", ID, "receive"],
+            &["computers", "clipboard", "--", ID, "off"],
+            &["computers", "files", ID, "off"],
+            &["computers", "send", ID, "a.txt"],
+            &["computers", "send", ID, "a.txt", "b.pdf"],
+            &["computers", "send", "--", ID, "a.txt"],
+            &["computers", "send", "--via", "relay", ID, "a.txt"],
             &["messages", "--device", ID],
             &["messages", "--device", ID, "--thread", "7", "--json"],
             &["messages", "send", "--device", ID, "--to", "5556"],

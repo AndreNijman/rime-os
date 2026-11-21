@@ -194,6 +194,22 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via: Option<String>,
     },
+    /// Set this computer's two clipboard switches for another computer
+    /// (§2.15). A person at this machine only.
+    ComputerClipboard { computer: String, send: bool, receive: bool },
+    /// Whether files another computer sends are saved here. A person at
+    /// this machine only.
+    ComputerFiles { computer: String, on: bool },
+    /// Send another computer a file: the open file rides the request line as
+    /// its one descriptor, `name` is what the other computer is offered.
+    /// A person at this machine only; answered once the other computer
+    /// saved it or refused it.
+    ComputerSend {
+        computer: String,
+        name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        via: Option<String>,
+    },
 }
 
 /// What it answers.
@@ -245,7 +261,12 @@ pub enum Reply {
     /// A `clipboard` line went to this many phones. Zero is an answer: no
     /// phone connected, none asked for the clipboard, or the only one that
     /// did put this very text here itself a moment ago.
-    ClipboardSent { reached: usize },
+    ClipboardSent {
+        reached: usize,
+        /// How many other computers it was pushed to (§2.15); absent for none.
+        #[serde(default, skip_serializing_if = "is_zero")]
+        computers: usize,
+    },
     /// A ring went out. `path` is `link` when the app said it is ringing, or
     /// `push` when the push service took the request (the phone rings if it
     /// is on and online, which nobody here can see).
@@ -311,7 +332,18 @@ pub enum Reply {
     ComputerRemoved { id: String, name: String },
     ComputerForgotten { id: String, name: String },
     ComputerAllowed { id: String, name: String },
+    /// What this computer now shares with another: the switches as they
+    /// count (all off for a computer not allowed yet).
+    ComputerShared {
+        id: String,
+        name: String,
+        clipboard_send: bool,
+        clipboard_receive: bool,
+        files: bool,
+    },
     DeviceAllowed { id: String, name: String },
+    /// Another computer saved a file sent to it, as `file` in its Downloads.
+    ComputerSent { id: String, name: String, file: String, bytes: u64 },
     /// Another computer answered `peer_hello`: what it calls itself, its
     /// protocol and build, the path and the time the whole dial took.
     ComputerPong {
@@ -325,6 +357,10 @@ pub enum Reply {
     },
     Ok,
     Error { message: String },
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl Reply {
@@ -354,7 +390,7 @@ pub fn serve(listener: UnixListener, state: Arc<State>) {
 /// escaped, is well under it.
 const MAX_REQUEST: usize = 1024 * 1024;
 
-fn handle(stream: UnixStream, state: &State) -> std::io::Result<()> {
+fn handle(stream: UnixStream, state: &Arc<State>) -> std::io::Result<()> {
     // Peer credentials once, from the accepted socket, before a request is
     // parsed. The kernel filled them in at `connect(2)`; anything in a request
     // line is whatever the client chose to send.
@@ -417,7 +453,7 @@ pub(crate) fn reply(writer: &mut UnixStream, reply: &Reply) -> std::io::Result<(
     writer.flush()
 }
 
-fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, state: &State) -> Reply {
+fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, state: &Arc<State>) -> Reply {
     // WHO is asking, before WHAT is asked.
     if let Err(why) = authorized(&req, peer) {
         return Reply::error(why);
@@ -433,7 +469,10 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::DeviceAllow { device } => allow_device(state, &device),
         Request::Ring { device } => ring(state, &device),
         Request::Focus { dnd } => focus(state, dnd),
-        Request::Clipboard { text, sensitive } => clipboard(state, &text, sensitive),
+        Request::Clipboard { text, sensitive } => {
+            let by_a_person = handed_over_by_a_person(peer, rime_agent_core::origin::observe_pid);
+            clipboard(state, &text, sensitive, by_a_person)
+        }
         Request::Send {
             device,
             kind,
@@ -464,6 +503,33 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::ComputerForget { computer } => crate::computers::forget(state, &computer),
         Request::ComputerAllow { computer } => crate::computers::allow(state, &computer),
         Request::ComputerPing { computer, via } => crate::computers::ping(state, &computer, via.as_deref()),
+        Request::ComputerClipboard { computer, send, receive } => {
+            crate::computers::share(state, &computer, |store, c| store.set_computer_clipboard(c, send, receive))
+        }
+        Request::ComputerFiles { computer, on } => {
+            crate::computers::share(state, &computer, |store, c| store.set_computer_files(c, on))
+        }
+        Request::ComputerSend { computer, name, via } => computer_send(state, &computer, &name, via.as_deref(), fds),
+    }
+}
+
+/// `computer_send`: the one descriptor, sent to the other computer.
+fn computer_send(state: &State, computer: &str, name: &str, via: Option<&str>, mut fds: Vec<OwnedFd>) -> Reply {
+    let via = match crate::computers::via_of(via) {
+        Ok(v) => v,
+        Err(why) => return Reply::error(why),
+    };
+    if fds.len() != 1 {
+        return Reply::error(format!(
+            "a file is sent as one open descriptor passed with the request (`rime remote computers send \
+             <computer> <file>`); this request carried {}",
+            fds.len()
+        ));
+    }
+    let file = std::fs::File::from(fds.remove(0));
+    match crate::files::send(state, computer, file, name, via) {
+        Ok(s) => Reply::ComputerSent { id: s.id, name: s.computer, file: s.name, bytes: s.bytes },
+        Err(why) => Reply::error(why),
     }
 }
 
@@ -548,6 +614,13 @@ fn authorized_by(
         // Allowing gives an introduced device the authority of one paired
         // here: a person's decision, like pairing.
         Request::DeviceAllow { .. } | Request::ComputerAllow { .. } => computers_caller(peer, observe, may_allow),
+        // What is shared with another computer, and from it: a person's
+        // decision, like pairing. An agent could otherwise turn a computer's
+        // clipboard into a feed.
+        Request::ComputerClipboard { .. } | Request::ComputerFiles { .. } => computers_caller(peer, observe, may_share),
+        // The other computer saves what it is sent without asking, as a
+        // phone does: a person here only, like `send`.
+        Request::ComputerSend { .. } => computers_caller(peer, observe, may_send_to_computer),
         _ => own_user(peer),
     }
 }
@@ -619,6 +692,41 @@ pub fn may_allow(origin: RequestOrigin) -> Result<(), String> {
         "a {origin} request cannot allow an introduced device: that gives it what a device paired here has, so \
          only a person at this machine may do it. Run `rime remote devices allow` or `rime remote computers allow` \
          from a terminal"
+    ))
+}
+
+/// The sharing rule over a value: what goes to another computer, or is
+/// taken from it, is a person's decision, like pairing.
+pub fn may_share(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot change what is shared with another computer: only a person at this \
+         machine may. Run `rime remote computers clipboard` or `rime remote computers files` from a terminal"
+    ))
+}
+
+/// Whether a `clipboard` request comes from Rime Shell or a terminal at this
+/// machine. Only then does the copy go on to other computers (§2.15): their
+/// clipboards are written without asking, and a person may paste what lands
+/// there into a terminal. Anything else (an agent, a scheduled job, an
+/// unreadable origin) still reaches this computer's phones, as before.
+fn handed_over_by_a_person(
+    peer: Option<crate::peer::Peer>,
+    observe: impl Fn(i32) -> Result<RequestOrigin, String>,
+) -> bool {
+    peer.is_some_and(|p| observe(p.pid).is_ok_and(|o| MAY_PAIR.contains(&o)))
+}
+
+/// `computer_send`'s rule over a value.
+pub fn may_send_to_computer(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot send a file to another computer: it saves what it is sent without asking, \
+         so only a person at this machine may send. Run `rime remote computers send` from a terminal"
     ))
 }
 
@@ -910,10 +1018,16 @@ fn focus(state: &State, dnd: bool) -> Reply {
 ///
 /// Only phones with an events channel open, as for [`focus`]: a clipboard is
 /// not worth waking a phone for, and it would be stale by the time it woke.
-fn clipboard(state: &State, text: &str, sensitive: bool) -> Reply {
+fn clipboard(state: &Arc<State>, text: &str, sensitive: bool, by_a_person: bool) -> Reply {
     let line = match crate::clipboard::line(text, sensitive) {
         Ok(line) => line,
         Err(why) => return Reply::error(why),
+    };
+    // Other computers first (§2.15). A copy another computer sent here goes
+    // nowhere: not on to other computers, and not to this computer's phones.
+    let computers = match crate::share::local_copy(state, text, sensitive, by_a_person) {
+        crate::share::Local::FromAComputer => return Reply::ClipboardSent { reached: 0, computers: 0 },
+        crate::share::Local::Shared(n) => n,
     };
     let reached = state
         .phones()
@@ -922,7 +1036,7 @@ fn clipboard(state: &State, text: &str, sensitive: bool) -> Reply {
         .filter(|(id, _)| !state.clip_echo.is_echo(id, text))
         .filter(|(id, _)| state.events.send_whole(id, &line, crate::clipboard::WRITE_LIMIT))
         .count();
-    Reply::ClipboardSent { reached }
+    Reply::ClipboardSent { reached, computers }
 }
 
 fn ring(state: &State, device: &str) -> Reply {
@@ -1522,6 +1636,9 @@ mod tests {
             Request::ComputerPing { computer: "desk".into(), via: None },
             Request::ComputerAllow { computer: "laptop".into() },
             Request::DeviceAllow { device: "pixel".into() },
+            Request::ComputerClipboard { computer: "desk".into(), send: true, receive: true },
+            Request::ComputerFiles { computer: "desk".into(), on: true },
+            Request::ComputerSend { computer: "desk".into(), name: "a.txt".into(), via: None },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -1593,9 +1710,95 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_allow(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
+                Request::ComputerClipboard { .. } | Request::ComputerFiles { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_share(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
+                Request::ComputerSend { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_send_to_computer(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
             }
         }
+    }
+
+    #[test]
+    fn only_a_person_here_may_change_what_is_shared_with_another_computer() {
+        // Injected origins, so this fails on any machine if the gate goes:
+        // an agent, a scheduled job, an MCP server, remote control and a
+        // cloud session are all refused; a terminal and the Shell are not.
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let switches = [
+            Request::ComputerClipboard { computer: "desk".into(), send: true, receive: false },
+            Request::ComputerClipboard { computer: "desk".into(), send: false, receive: false },
+            Request::ComputerFiles { computer: "desk".into(), on: true },
+            Request::ComputerFiles { computer: "desk".into(), on: false },
+        ];
+        for o in RequestOrigin::ALL {
+            for req in &switches {
+                let verdict = authorized_by(req, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} {req:?}: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("rime remote computers"), "{why}");
+                }
+            }
+        }
+        for req in &switches {
+            assert!(authorized_by(req, Some(me), |_| Err("no cgroup".into())).is_err());
+            assert!(authorized_by(req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        }
+        assert_eq!(
+            serde_json::to_string(&switches[0]).unwrap(),
+            r#"{"cmd":"computer_clipboard","computer":"desk","send":true,"receive":false}"#
+        );
+        assert_eq!(serde_json::to_string(&switches[2]).unwrap(), r#"{"cmd":"computer_files","computer":"desk","on":true}"#);
+    }
+
+    #[test]
+    fn only_a_copy_a_person_handed_over_goes_on_to_other_computers() {
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        for o in RequestOrigin::ALL {
+            assert_eq!(handed_over_by_a_person(Some(me), |_| Ok(*o)), o.is_local(), "{o}");
+            // The request itself is still the owner's to make, for the phones.
+            let req = Request::Clipboard { text: "x".into(), sensitive: false };
+            assert!(authorized_by(&req, Some(me), |_| Ok(*o)).is_ok(), "{o}");
+        }
+        assert!(!handed_over_by_a_person(Some(me), |_| Err("no cgroup".into())));
+        assert!(!handed_over_by_a_person(None, |_| Ok(RequestOrigin::RimeShell)));
+    }
+
+    #[test]
+    fn only_a_person_here_may_send_another_computer_a_file() {
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let req = Request::ComputerSend { computer: "desk".into(), name: "a.txt".into(), via: None };
+        for o in RequestOrigin::ALL {
+            let verdict = authorized_by(&req, Some(me), |_| Ok(*o));
+            assert_eq!(verdict.is_ok(), o.is_local(), "{o}: {verdict:?}");
+            if let Err(why) = verdict {
+                assert!(why.contains(o.as_str()) && why.contains("rime remote computers send"), "{why}");
+            }
+        }
+        assert!(authorized_by(&req, Some(me), |_| Err("no cgroup".into())).is_err());
+        assert!(authorized_by(&req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        assert_eq!(
+            serde_json::to_string(&req).unwrap(),
+            r#"{"cmd":"computer_send","computer":"desk","name":"a.txt"}"#
+        );
     }
 
     #[test]
@@ -1892,7 +2095,7 @@ mod tests {
             r#"{"cmd":"clipboard","text":"a","sensitive":true}"#
         );
         assert_eq!(
-            serde_json::to_string(&Reply::ClipboardSent { reached: 1 }).unwrap(),
+            serde_json::to_string(&Reply::ClipboardSent { reached: 1, computers: 0 }).unwrap(),
             r#"{"reply":"clipboard_sent","reached":1}"#
         );
         // The wire shapes `rime remote computers` depends on.
@@ -1963,7 +2166,7 @@ mod tests {
                 }]),
                 changed_ms: None,
             },
-            Reply::ClipboardSent { reached: 0 },
+            Reply::ClipboardSent { reached: 0, computers: 0 },
             Reply::Sent { device: "Pixel".into(), path: "waiting".into(), id: 3, push_error: Some("503".into()) },
             Reply::Status {
                 version: 1,

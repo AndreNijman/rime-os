@@ -48,6 +48,8 @@ mod proxy;
 mod push;
 mod relay;
 mod serve;
+mod share;
+mod files;
 mod state;
 
 use std::net::TcpListener;
@@ -283,6 +285,10 @@ fn run(args: &[String]) -> Result<(), String> {
         mirror::mirror().on_action(Box::new(move |device, key, action| {
             // Remove on a "joined" notification (intro.rs): it only takes away.
             if intro::on_action(&state, device, key, action) {
+                return;
+            }
+            // Show in folder on a file another computer sent (files.rs).
+            if files::on_action(&state, key, action) {
                 return;
             }
             if key != calls::CALL_KEY || !matches!(action, "answer" | "decline") {
