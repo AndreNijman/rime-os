@@ -389,16 +389,20 @@ fn label_of(info: &Value, id: u32) -> String {
     }
 }
 
+/// An agent attach opened for a peer: the stream onto `rime-agentd`, the
+/// reply line for the peer, bytes that came after `rime-agentd`'s reply, and
+/// the slot that counts it.
+pub type Opened = (UnixStream, Vec<u8>, Vec<u8>, Slot);
+
 /// The `peer_agent_attach {id, cols, rows}` channel from computer
-/// `device_id`: the grant, a slot, the fields, the session; then the attach,
-/// which `rime-agentd` takes over. `Ok` carries the stream, the reply, the
-/// bytes that came with it and the slot; `Err` the refusal line.
+/// `device_id`: the grant, the fields, a slot, the session; then the attach,
+/// which `rime-agentd` takes over. `Err` is the refusal line.
 pub fn open_attach(
     state: &Arc<State>,
     agentd: &Path,
     device_id: &str,
     request: &[u8],
-) -> Result<(UnixStream, Vec<u8>, Vec<u8>, Slot), Vec<u8>> {
+) -> Result<Opened, Vec<u8>> {
     if !allowed(state, device_id, ATTACH_VERB) {
         return Err(crate::computers::refusal(ATTACH_VERB));
     }

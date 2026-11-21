@@ -103,10 +103,13 @@ impl Write for RelayWriter {
     }
 }
 
+/// Where a split link's frames are written, and the cipher they are sealed with.
+type Sealer = (Box<dyn Write + Send>, Arc<Mutex<Channel>>);
+
 /// The writing half of a split link; cloned freely, one frame at a time.
 #[derive(Clone)]
 pub struct LinkWriter {
-    inner: Arc<Mutex<(Box<dyn Write + Send>, Arc<Mutex<Channel>>)>>,
+    inner: Arc<Mutex<Sealer>>,
 }
 
 impl LinkWriter {
