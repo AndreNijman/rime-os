@@ -404,6 +404,13 @@ pub fn locked(s: &Sources) -> bool {
         || (s.shell == ShellFile::Absent && !s.notifier_offered)
 }
 
+/// Whether a Shell lock file with these properties could only have been
+/// written by `me`: a regular file, owned by `me`, with no group or other
+/// write bit, of at most [`SHELL_FILE_MAX`] bytes.
+fn shell_file_trusted(is_file: bool, owner: u32, me: u32, mode: u32, len: u64) -> bool {
+    is_file && owner == me && mode & 0o022 == 0 && len <= SHELL_FILE_MAX
+}
+
 /// Read the Shell's lock file. Only a regular file (not a link, a FIFO or a
 /// directory) owned by this user, writable by nobody else, of at most
 /// [`SHELL_FILE_MAX`] bytes, is read at all; anything else there is
@@ -425,11 +432,13 @@ pub fn read_shell_file(path: &Path) -> ShellFile {
     };
     // SAFETY: getuid has no failure mode.
     let uid = unsafe { libc::getuid() };
-    if !meta.file_type().is_file()
-        || meta.uid() != uid
-        || meta.mode() & 0o022 != 0
-        || meta.len() > SHELL_FILE_MAX
-    {
+    if !shell_file_trusted(
+        meta.file_type().is_file(),
+        meta.uid(),
+        uid,
+        meta.mode(),
+        meta.len(),
+    ) {
         return ShellFile::Unreadable;
     }
     let mut bytes = Vec::new();
@@ -3139,15 +3148,37 @@ mod tests {
 
     #[test]
     fn a_shell_file_owned_by_someone_else_says_nothing_but_locked() {
-        // Any world-readable regular file root owns shows the owner check
-        // alone refusing it.
+        // The rule itself, so the owner check is proven alone: a user
+        // cannot make a file another user owns that says unlocked.
+        let me = 1000;
+        assert!(shell_file_trusted(true, me, me, 0o100600, 16));
+        assert!(shell_file_trusted(true, me, me, 0o100644, SHELL_FILE_MAX));
+        assert!(
+            !shell_file_trusted(true, 0, me, 0o100600, 16),
+            "root's file"
+        );
+        assert!(
+            !shell_file_trusted(true, 1001, me, 0o100600, 16),
+            "another user's file"
+        );
+        assert!(!shell_file_trusted(true, me, me, 0o100620, 16));
+        assert!(!shell_file_trusted(true, me, me, 0o100602, 16));
+        assert!(!shell_file_trusted(false, me, me, 0o100600, 16));
+        assert!(!shell_file_trusted(
+            true,
+            me,
+            me,
+            0o100600,
+            SHELL_FILE_MAX + 1
+        ));
+        // And a real file root owns is refused (it would be anyway, as it
+        // does not parse; the rule above is what proves the owner check).
         // SAFETY: getuid has no failure mode.
-        if unsafe { libc::getuid() } == 0 {
-            return;
+        if unsafe { libc::getuid() } != 0 {
+            let f = Path::new("/etc/hostname");
+            assert!(f.is_file(), "the test needs a root-owned regular file");
+            assert_eq!(read_shell_file(f), ShellFile::Unreadable);
         }
-        let f = Path::new("/etc/hostname");
-        assert!(f.is_file(), "the test needs a root-owned regular file");
-        assert_eq!(read_shell_file(f), ShellFile::Unreadable);
     }
 
     #[test]
