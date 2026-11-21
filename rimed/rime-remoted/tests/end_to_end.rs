@@ -4919,6 +4919,15 @@ fn a_computer_given_view_lists_and_peeks_given_control_types_and_lowering_or_rem
     let (rc, said) = rime_remote(&a, &["computers", "grant", &b_on_a, "agents", "control"], b"");
     assert_ne!(rc, 0, "raised without a terminal: {said}");
     assert!(said.contains("asked about at a terminal"), "{said}");
+    // --yes skips typing the name, not the terminal: a script that pipes the
+    // name in, or passes --yes, still raises nothing.
+    let name_line = format!("{}\n", computer_on(&a, &b_on_a)["name"].as_str().unwrap());
+    let yes = ["computers", "grant", &b_on_a, "agents", "control", "--yes"];
+    for (args, stdin) in [(&yes[..5], name_line.as_bytes()), (&yes[..], b"".as_slice())] {
+        let (rc, said) = rime_remote(&a, args, stdin);
+        assert_ne!(rc, 0, "raised without a terminal: {said}");
+        assert!(said.contains("asked about at a terminal"), "{said}");
+    }
     assert_eq!(computer_on(&a, &b_on_a)["agents"], "off");
 
     // View: list and peek, never attach.
