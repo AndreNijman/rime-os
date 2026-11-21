@@ -179,6 +179,25 @@ pub struct Listed {
     pub files: bool,
     #[serde(default)]
     pub handoff: bool,
+    /// What THIS computer lets that one do with its agent sessions (M4):
+    /// `off`, `view` or `control`, as it counts right now (off for a computer
+    /// that is removed, or introduced and not allowed yet).
+    #[serde(default = "off")]
+    pub agents: String,
+    /// What THAT computer said, the last time this one reached it, it lets
+    /// this one do with its agent sessions: `off`, `view` or `control`. A
+    /// claim from the other computer, kept in memory only, and never a
+    /// permission here: the other computer checks its own grant on every
+    /// request.
+    #[serde(default = "off")]
+    pub can_agents: String,
+    /// When `can_agents` was heard, in Unix milliseconds; absent when it never was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub can_agents_ms: Option<u64>,
+}
+
+fn off() -> String {
+    "off".to_string()
 }
 
 impl Listed {
@@ -189,6 +208,9 @@ impl Listed {
             clipboard_receive: computer.takes_clipboard(),
             files: computer.takes_files(),
             handoff: computer.takes_handoff(),
+            agents: crate::device::AgentGrant::word_of(computer.agents_grant()).to_string(),
+            can_agents: off(),
+            can_agents_ms: None,
             computer,
             presence: None,
             presence_ms: None,

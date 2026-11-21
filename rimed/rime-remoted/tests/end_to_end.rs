@@ -4767,3 +4767,474 @@ fn a_computer_a_phone_introduced_shows_no_card_until_a_person_allows_it() {
     assert_eq!(handoff_cards(&b).len(), 1);
     assert!(opened_links(&b).is_empty());
 }
+
+// ── Agents across computers (M4) ────────────────────────────────────────────
+
+/// A person at `h` sets what computer `id` may do with `h`'s agent sessions.
+/// `rime remote <args>` for `h` on a pseudo-terminal (100x30) as its stdin,
+/// stdout and stderr: a person at a terminal, as far as the CLI can tell.
+/// Its config (the detach key) comes from an empty home under `h.root`.
+struct Terminal {
+    child: Child,
+    master: std::fs::File,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl Terminal {
+    fn open(h: &Harness, args: &[&str]) -> Terminal {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let (mut m, mut s) = (-1, -1);
+        let size = libc::winsize { ws_row: 30, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: openpty writes two descriptors it opened, which are then
+        // owned here exactly once each.
+        let rc = unsafe { libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), &size) };
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        let master = unsafe { std::fs::File::from_raw_fd(m) };
+        let slave = unsafe { OwnedFd::from_raw_fd(s) };
+        let home = h.root.join("cli-home");
+        std::fs::create_dir_all(&home).expect("cli home");
+        let child = Command::new(bin("rime"))
+            .arg("remote")
+            .args(args)
+            .env("XDG_RUNTIME_DIR", h.root.join("run"))
+            .env("XDG_STATE_HOME", h.root.join("state"))
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("HOME", &home)
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .stdin(Stdio::from(slave.try_clone().expect("slave")))
+            .stdout(Stdio::from(slave.try_clone().expect("slave")))
+            .stderr(Stdio::from(slave))
+            .spawn()
+            .expect("run rime");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut from, into) = (master.try_clone().expect("master"), std::sync::Arc::clone(&seen));
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            // EIO once the CLI and every copy of the slave are gone.
+            while let Ok(n) = from.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                into.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        Terminal { child, master, seen }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.seen.lock().unwrap()).into_owned()
+    }
+
+    fn type_in(&mut self, bytes: &[u8]) {
+        self.master.write_all(bytes).expect("type");
+    }
+
+    fn shows(&self, want: &str, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if self.text().contains(want) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// Its exit code and everything it printed, or a panic after `within`.
+    fn exit(mut self, within: Duration) -> (i32, String) {
+        let deadline = Instant::now() + within;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("wait") {
+                std::thread::sleep(Duration::from_millis(100));
+                return (status.code().unwrap_or(-1), self.text());
+            }
+            if Instant::now() > deadline {
+                let _ = self.child.kill();
+                panic!("rime remote did not exit: {}", self.text());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
+fn grant_agents(h: &Harness, id: &str, level: &str) -> serde_json::Value {
+    h.control(&serde_json::json!({"cmd": "computer_grant", "computer": id, "agents": level}).to_string())
+}
+
+/// A `cat` session on `h`'s own runtime, started here at 80x24: the honest
+/// probe, it echoes what it is given and prints nothing of its own.
+fn cat_session(h: &Harness) -> u64 {
+    let started = h.direct(
+        r#"{"cmd":"run","agent":"generic","cwd":"/tmp","sandbox":"unrestricted","cols":80,"rows":24,"args":["/bin/cat"]}"#,
+    );
+    assert_eq!(started["reply"], "session", "{started}");
+    started["id"].as_u64().expect("an id")
+}
+
+/// `h`'s own record of session `id`.
+fn session_info(h: &Harness, id: u64) -> serde_json::Value {
+    let info = h.direct(&format!(r#"{{"cmd":"info","id":{id}}}"#));
+    assert_eq!(info["reply"], "session", "{info}");
+    info
+}
+
+/// `computer_attach` on `h`'s control socket, as `rime remote computers
+/// attach` sends it: the stream that now carries the terminal, or the reply
+/// that refused it.
+fn attach_from(h: &Harness, computer: &str, id: u64, cols: u16, rows: u16) -> Result<UnixStream, serde_json::Value> {
+    let mut stream = UnixStream::connect(&h.remoted_socket).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(30))).ok();
+    let line = serde_json::json!({"cmd": "computer_attach", "computer": computer, "id": id, "cols": cols, "rows": rows});
+    writeln!(stream, "{line}").expect("write");
+    // A byte at a time: what follows the line is the terminal.
+    let mut reply = Vec::new();
+    let mut byte = [0u8; 1];
+    while stream.read(&mut byte).expect("read the reply") == 1 && byte[0] != b'\n' {
+        reply.push(byte[0]);
+    }
+    let v: serde_json::Value = serde_json::from_slice(&reply).unwrap_or_else(|e| panic!("{e}: {reply:?}"));
+    if v["reply"] == "computer_attached" {
+        Ok(stream)
+    } else {
+        Err(v)
+    }
+}
+
+/// Read `stream` until `want` shows, or `within` passes.
+fn shows(stream: &mut UnixStream, want: &str, within: Duration) -> bool {
+    stream.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    let deadline = Instant::now() + within;
+    let mut seen = Vec::new();
+    let mut buf = [0u8; 4096];
+    while Instant::now() < deadline {
+        match stream.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                seen.extend_from_slice(&buf[..n]);
+                if String::from_utf8_lossy(&seen).contains(want) {
+                    return true;
+                }
+            }
+            Err(_) => continue,
+        }
+    }
+    false
+}
+
+/// Whether `stream` reaches its end within `within` (what it sends on the
+/// way is read and dropped).
+fn ends(stream: &mut UnixStream, within: Duration) -> bool {
+    stream.set_read_timeout(Some(Duration::from_millis(200))).ok();
+    let deadline = Instant::now() + within;
+    let mut buf = [0u8; 4096];
+    while Instant::now() < deadline {
+        match stream.read(&mut buf) {
+            Ok(0) => return true,
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(_) => return true,
+        }
+    }
+    false
+}
+
+impl Session {
+    /// Open `channel` with `request` and give the reply line; anything else
+    /// that arrives (keepalives are answered) is kept in `pending`.
+    fn open(&mut self, channel: u32, request: &str) -> serde_json::Value {
+        self.send(Frame::Open { channel, request: request.as_bytes().to_vec() });
+        loop {
+            match self.recv() {
+                Frame::Control(line) => return serde_json::from_slice(&line).unwrap_or_else(|e| panic!("{e}: {line:?}")),
+                other => self.pending.push(other),
+            }
+        }
+    }
+}
+
+/// `rime remote <args>` against `h`, started by the user's service manager
+/// rather than from this login session: what an agent's scheduled job, or
+/// anything else systemd starts with nobody present, looks like to the
+/// service. Panics, never skips, when it cannot be started: the test that
+/// calls it runs only where pairing (a person here) was possible.
+fn rime_remote_as_a_job(h: &Harness, args: &[&str]) -> (i32, String) {
+    let out = Command::new("systemd-run")
+        .args(["--user", "--wait", "--pipe", "--quiet", "--collect"])
+        .arg(format!("--setenv=XDG_RUNTIME_DIR={}", h.root.join("run").display()))
+        .arg(format!("--setenv=XDG_STATE_HOME={}", h.root.join("state").display()))
+        .arg(bin("rime"))
+        .arg("remote")
+        .args(args)
+        .stdin(Stdio::null())
+        .output()
+        .expect("systemd-run");
+    let said = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    assert!(
+        !said.contains("Failed to connect") && !said.contains("Failed to start transient"),
+        "could not start a job under the user's service manager: {said}"
+    );
+    (out.status.code().unwrap_or(-1), said)
+}
+
+#[test]
+fn a_computer_given_view_lists_and_peeks_given_control_types_and_lowering_or_removal_drops_it_at_once() {
+    let a = harness!("agents-a");
+    let b = harness!("agents-b");
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+    let id = cat_session(&a);
+    let list = serde_json::json!({"cmd": "computer_agents", "computer": a_on_b}).to_string();
+    let peek = serde_json::json!({"cmd": "computer_agent_peek", "computer": a_on_b, "id": id}).to_string();
+
+    // No grant (the default, stored as nothing): everything is refused, and
+    // no claim is shown on B.
+    assert!(computer_on(&a, &b_on_a).get("share").and_then(|s| s.get("agents")).is_none());
+    assert_eq!(computer_on(&a, &b_on_a)["agents"], "off");
+    for line in [&list, &peek] {
+        let r = b.control(line);
+        assert_eq!(r["reply"], "error", "{line}: {r}");
+        assert!(r["message"].as_str().unwrap().contains("does not let this computer"), "{r}");
+    }
+    let refused = attach_from(&b, &a_on_b, id, 80, 24).expect_err("attached with no grant");
+    assert_eq!(refused["reply"], "error", "{refused}");
+    assert_eq!(computer_on(&b, &a_on_b)["can_agents"], "off");
+
+    // A grant from anything but a person at A is refused, and changes nothing.
+    let (rc, said) = rime_remote_as_a_job(&a, &["computers", "grant", &b_on_a, "agents", "off"]);
+    assert_ne!(rc, 0, "{said}");
+    assert!(said.contains("cannot let another computer into"), "{said}");
+    let (rc, said) = rime_remote(&a, &["computers", "grant", &b_on_a, "agents", "control"], b"");
+    assert_ne!(rc, 0, "raised without a terminal: {said}");
+    assert!(said.contains("asked about at a terminal"), "{said}");
+    // --yes skips typing the name, not the terminal: a script that pipes the
+    // name in, or passes --yes, still raises nothing.
+    let name_line = format!("{}\n", computer_on(&a, &b_on_a)["name"].as_str().unwrap());
+    let yes = ["computers", "grant", &b_on_a, "agents", "control", "--yes"];
+    for (args, stdin) in [(&yes[..5], name_line.as_bytes()), (&yes[..], b"".as_slice())] {
+        let (rc, said) = rime_remote(&a, args, stdin);
+        assert_ne!(rc, 0, "raised without a terminal: {said}");
+        assert!(said.contains("asked about at a terminal"), "{said}");
+    }
+    assert_eq!(computer_on(&a, &b_on_a)["agents"], "off");
+
+    // View: list and peek, never attach.
+    // Raised from the CLI at a terminal, as a person does: a wrong name
+    // changes nothing, the right one raises it.
+    let b_name = computer_on(&a, &b_on_a)["name"].as_str().unwrap().to_string();
+    let mut t = Terminal::open(&a, &["computers", "grant", &b_on_a, "agents", "view"]);
+    assert!(t.shows("Type the computer's name", Duration::from_secs(10)), "{}", t.text());
+    t.type_in(b"not-that-one\n");
+    let (rc, said) = t.exit(Duration::from_secs(10));
+    assert_ne!(rc, 0, "a wrong name raised it: {said}");
+    assert_eq!(computer_on(&a, &b_on_a)["agents"], "off");
+    let mut t = Terminal::open(&a, &["computers", "grant", &b_on_a, "agents", "view"]);
+    assert!(t.shows("Type the computer's name", Duration::from_secs(10)), "{}", t.text());
+    t.type_in(format!("{b_name}\n").as_bytes());
+    let (rc, said) = t.exit(Duration::from_secs(10));
+    assert_eq!(rc, 0, "{said}");
+    assert_eq!(computer_on(&a, &b_on_a)["share"]["agents"], "view");
+    let listed = b.control(&list);
+    assert_eq!(listed["reply"], "computer_agents", "{listed}");
+    assert!(listed["sessions"].as_array().unwrap().iter().any(|s| s["id"] == id), "{listed}");
+    let (rc, said) = rime_remote(&b, &["computers", "agents", &a_on_b, "--json"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("\"sessions\""), "{said}");
+    // An agent or a job on B gets nothing of A's sessions, granted or not:
+    // not even the list, which carries command lines.
+    let sid = id.to_string();
+    for args in [&["computers", "agents", &a_on_b, "--json"][..], &["computers", "peek", &a_on_b, &sid]] {
+        let (rc, said) = rime_remote_as_a_job(&b, args);
+        assert_ne!(rc, 0, "{args:?}: {said}");
+        assert!(said.contains("cannot read or type into another computer's agent sessions"), "{args:?}: {said}");
+    }
+    assert_eq!(b.control(&peek)["reply"], "computer_agent_peek");
+    let refused = attach_from(&b, &a_on_b, id, 80, 24).expect_err("attached with view");
+    assert!(refused["message"].as_str().unwrap().contains("does not let this computer"), "{refused}");
+    // B learned the claim when it dialled, and shows it as one.
+    let on_b = computer_on(&b, &a_on_b);
+    assert_eq!((on_b["can_agents"].as_str(), on_b["agents"].as_str()), (Some("view"), Some("off")), "{on_b}");
+    assert!(on_b["can_agents_ms"].is_u64(), "{on_b}");
+
+    // Control: attach, type, and see it echo; A says so once; the session
+    // counts the viewer; the other computer's size is a remote one. Raised
+    // from a terminal with --yes.
+    let (rc, said) = Terminal::open(&a, &["computers", "grant", &b_on_a, "agents", "control", "--yes"]).exit(Duration::from_secs(10));
+    assert_eq!(rc, 0, "{said}");
+    assert_eq!(computer_on(&a, &b_on_a)["agents"], "control");
+    let mut term = attach_from(&b, &a_on_b, id, 60, 20).expect("attach with control");
+    term.write_all(b"hello across computers\n").expect("type");
+    assert!(shows(&mut term, "hello across computers", Duration::from_secs(10)), "the session never echoed");
+    let shown = notify_lines(&a, 1);
+    let attached: Vec<_> = shown.iter().filter(|n| n["summary"].as_str().is_some_and(|s| s.contains("attached to"))).collect();
+    assert_eq!(attached.len(), 1, "{shown:?}");
+    let info = session_info(&a, id);
+    assert_eq!((info["attached"].as_u64(), info["cols"].as_u64(), info["rows"].as_u64()), (Some(1), Some(60), Some(20)), "{info}");
+    let (rc, said) = rime_remote(&b, &["computers", "peek", &a_on_b, &id.to_string()], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("hello across computers"), "{said}");
+
+    // The same from the CLI at a terminal: the session takes its size once
+    // it types, what it types arrives, and the detach key leaves the session
+    // running.
+    let mut t = Terminal::open(&b, &["computers", "attach", &a_on_b, &id.to_string()]);
+    assert!(soon(|| session_info(&a, id)["attached"] == 2), "{} {}", session_info(&a, id), t.text());
+    t.type_in(b"typed at a terminal\n");
+    assert!(t.shows("typed at a terminal", Duration::from_secs(10)), "{}", t.text());
+    assert!(soon(|| session_info(&a, id)["cols"] == 100 && session_info(&a, id)["rows"] == 30), "{}", session_info(&a, id));
+    t.type_in(&[0x1d]);
+    let (rc, said) = t.exit(Duration::from_secs(10));
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("rime: detached from"), "{said}");
+    assert!(soon(|| session_info(&a, id)["attached"] == 1), "{}", session_info(&a, id));
+    assert!(session_info(&a, id)["exit_code"].is_null(), "detaching ended the session");
+
+    // Lowered to view: the live attach is dropped at once, the size goes
+    // back to the one this computer gave, a late resize from B changes
+    // nothing, and a new attach is refused.
+    let lowered = grant_agents(&a, &b_on_a, "view");
+    assert_eq!(lowered["dropped"], true, "{lowered}");
+    assert!(ends(&mut term, Duration::from_secs(5)), "an attach outlived lowering the grant");
+    assert!(soon(|| session_info(&a, id)["attached"] == 0), "{}", session_info(&a, id));
+    assert!(soon(|| session_info(&a, id)["cols"] == 80), "{}", session_info(&a, id));
+    let late = b.control(&serde_json::json!({"cmd": "computer_agent_resize", "computer": a_on_b, "id": id, "cols": 30, "rows": 10}).to_string());
+    assert_eq!(late["reply"], "error", "a resize went through with view: {late}");
+    assert_eq!((session_info(&a, id)["cols"].as_u64(), session_info(&a, id)["rows"].as_u64()), (Some(80), Some(24)));
+    assert!(attach_from(&b, &a_on_b, id, 80, 24).is_err(), "attached after lowering");
+    assert!(session_info(&a, id)["exit_code"].is_null(), "the session itself was touched");
+
+    // Removed: its attach is dropped and every verb refused.
+    assert_eq!(grant_agents(&a, &b_on_a, "control")["agents"], "control");
+    let mut term = attach_from(&b, &a_on_b, id, 80, 24).expect("attach again");
+    let removed = a.control(&serde_json::json!({"cmd": "computer_remove", "computer": b_on_a}).to_string());
+    assert_eq!(removed["reply"], "computer_removed", "{removed}");
+    assert!(ends(&mut term, Duration::from_secs(5)), "an attach outlived the removal");
+    assert!(computer_on(&a, &b_on_a).get("share").and_then(|s| s.get("agents")).is_none(), "the grant outlived the removal");
+    assert_eq!(b.control(&list)["reply"], "error");
+    assert!(attach_from(&b, &a_on_b, id, 80, 24).is_err());
+    assert!(session_info(&a, id)["exit_code"].is_null());
+}
+
+#[test]
+fn a_peer_with_control_reaches_no_approval_nex_spawn_or_kill_and_hostile_requests_are_refused() {
+    let a = harness!("agents-hostile-a");
+    let b = harness!("agents-hostile-b");
+    let Some((b_on_a, _a_on_b)) = pair_computers(&a, &b) else { return };
+    let id = cat_session(&a);
+    // A privilege request waiting on A, so there is something to approve.
+    let pending = a.direct(r#"{"cmd":"requests"}"#);
+    assert_eq!(pending["reply"], "requests", "{pending}");
+    assert_eq!(grant_agents(&a, &b_on_a, "control")["agents"], "control");
+    let mut peer = identity_of(&b).connect(&a).expect("B reaches A as a peer");
+    let hello = peer.call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "peer_agents"), "{hello}");
+    assert_eq!(hello["agents"], "control", "{hello}");
+
+    // What only a person here, or the phone, may do.
+    for line in [
+        r#"{"cmd":"requests"}"#.to_string(),
+        r#"{"cmd":"decide","id":1,"decision":"approve"}"#.to_string(),
+        r#"{"cmd":"grants"}"#.to_string(),
+        r#"{"cmd":"run","agent":"generic","cwd":"/tmp","sandbox":"unrestricted","cols":80,"rows":24,"args":["/bin/sh"]}"#.to_string(),
+        format!(r#"{{"cmd":"signal","id":{id},"signal":"kill"}}"#),
+        format!(r#"{{"cmd":"input","id":{id},"text":"x"}}"#),
+        format!(r#"{{"cmd":"remove","id":{id}}}"#),
+        r#"{"cmd":"list"}"#.to_string(),
+        r#"{"cmd":"nex","method":"session.list"}"#.to_string(),
+        r#"{"cmd":"lock"}"#.to_string(),
+        r#"{"cmd":"computer_grant","computer":"x","agents":"control"}"#.to_string(),
+        r#"{"cmd":"peer_agent_attach","id":1,"cols":80,"rows":24}"#.to_string(),
+    ] {
+        let r = peer.call(&line);
+        assert_eq!(r["kind"], "not_allowed", "{line}: {r}");
+    }
+    // A channel is only ever an agent attach built here.
+    for (ch, request) in [
+        (11, format!(r#"{{"cmd":"attach","id":{id},"cols":80,"rows":24,"replay":0}}"#)),
+        (12, r#"{"cmd":"nex_events"}"#.to_string()),
+        (13, r#"{"cmd":"receive","id":1,"len":1}"#.to_string()),
+    ] {
+        let r = peer.open(ch, &request);
+        assert_ne!(r["reply"], "attached", "{request}: {r}");
+        assert_ne!(r["reply"], "peer_agent_attached", "{request}: {r}");
+    }
+
+    // Hostile ids, sizes and counts: refused before rime-agentd, and the
+    // service keeps answering.
+    for line in [
+        r#"{"cmd":"peer_agent_peek","id":"1"}"#,
+        r#"{"cmd":"peer_agent_peek","id":-1}"#,
+        r#"{"cmd":"peer_agent_peek","id":1099511627776}"#,
+        r#"{"cmd":"peer_agent_peek","id":1,"bytes":0}"#,
+        r#"{"cmd":"peer_agent_peek","id":1,"bytes":99999}"#,
+        r#"{"cmd":"peer_agent_resize","id":1,"cols":0,"rows":24}"#,
+        r#"{"cmd":"peer_agent_resize","id":1,"cols":65535,"rows":65535}"#,
+    ] {
+        let r = peer.call(line);
+        assert_eq!(r["kind"], "bad_request", "{line}: {r}");
+    }
+    let r = peer.open(20, r#"{"cmd":"peer_agent_attach","id":1,"cols":2,"rows":1}"#);
+    assert_eq!(r["kind"], "bad_request", "{r}");
+    let r = peer.open(21, r#"{"cmd":"peer_agent_attach","id":424242,"cols":80,"rows":24}"#);
+    assert_eq!(r["kind"], "no_such_session", "{r}");
+    assert_eq!(peer.call(r#"{"cmd":"peer_agents"}"#)["reply"], "peer_agents");
+
+    // Four attachments at once from one computer, and no more.
+    for ch in 30..34 {
+        let r = peer.open(ch, &format!(r#"{{"cmd":"peer_agent_attach","id":{id},"cols":80,"rows":24}}"#));
+        assert_eq!(r["reply"], "peer_agent_attached", "attach {ch}: {r}");
+    }
+    let r = peer.open(34, &format!(r#"{{"cmd":"peer_agent_attach","id":{id},"cols":80,"rows":24}}"#));
+    assert_eq!(r["kind"], "busy", "{r}");
+
+    // Nothing the peer did reached a decision, started a session or ended one.
+    assert_eq!(a.direct(r#"{"cmd":"requests"}"#), pending);
+    let sessions = a.direct(r#"{"cmd":"list"}"#);
+    assert_eq!(sessions["sessions"].as_array().unwrap().len(), 1, "{sessions}");
+    assert!(session_info(&a, id)["exit_code"].is_null());
+}
+
+#[test]
+fn an_introduced_computer_has_no_agents_grant_until_a_person_allows_it_and_then_grants_it() {
+    let a = harness!("agents-intro-a");
+    let b = harness!("agents-intro-b");
+    let phone = Device::new();
+    let Some(offer) = open_offer(&a) else { return };
+    assert_eq!(phone.pair(&a, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&b) else { return };
+    assert_eq!(phone.pair(&b, &offer, "pixel-8")["ok"], true);
+    let mut on_a = phone.connect(&a).expect("a session on A");
+    let mut on_b = phone.connect(&b).expect("a session on B");
+    for s in [&mut on_a, &mut on_b] {
+        assert_eq!(s.call(r#"{"cmd":"phone_report","can":["ring","join"]}"#)["reply"], "ok");
+    }
+    let card_a = on_a.call(r#"{"cmd":"computer_card"}"#);
+    let card_b = on_b.call(r#"{"cmd":"computer_card"}"#);
+    let added = on_a.call(&serde_json::json!({"cmd": "computer_introduce", "card": card_b["card"]}).to_string());
+    assert_eq!(added["outcome"], "added", "{added}");
+    let b_on_a = added["id"].as_str().expect("id").to_string();
+    let added = on_b.call(&serde_json::json!({"cmd": "computer_introduce", "card": card_a["card"]}).to_string());
+    assert_eq!(added["outcome"], "added", "{added}");
+    let a_on_b = added["id"].as_str().expect("id").to_string();
+    let id = cat_session(&a);
+
+    // Introduced, not allowed: no grant, and none can be given.
+    assert_eq!(computer_on(&a, &b_on_a)["agents"], "off");
+    let refused = grant_agents(&a, &b_on_a, "view");
+    assert_eq!(refused["reply"], "error", "granted to a computer nobody here allowed: {refused}");
+    assert_eq!(computer_on(&a, &b_on_a)["agents"], "off");
+    let mut peer = identity_of(&b).connect(&a).expect("B reaches A as a peer");
+    assert_eq!(peer.call(r#"{"cmd":"peer_agents"}"#)["kind"], "not_allowed");
+    let r = peer.open(1, &format!(r#"{{"cmd":"peer_agent_attach","id":{id},"cols":80,"rows":24}}"#));
+    assert_eq!(r["kind"], "not_allowed", "{r}");
+    assert_eq!(b.control(&serde_json::json!({"cmd": "computer_agents", "computer": a_on_b}).to_string())["reply"], "error");
+
+    // Allowed, still nothing until granted; then granted, it lists.
+    let (rc, said) = rime_remote(&a, &["computers", "allow", &b_on_a], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert_eq!(peer.call(r#"{"cmd":"peer_agents"}"#)["kind"], "not_allowed");
+    assert_eq!(grant_agents(&a, &b_on_a, "view")["agents"], "view");
+    let listed = b.control(&serde_json::json!({"cmd": "computer_agents", "computer": a_on_b}).to_string());
+    assert_eq!(listed["reply"], "computer_agents", "{listed}");
+    let (rc, table) = rime_remote(&a, &["computers", "list"], b"");
+    assert_eq!(rc, 0, "{table}");
+    assert!(table.contains("it may view agents here"), "{table}");
+}

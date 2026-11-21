@@ -380,6 +380,94 @@ pub enum ComputersCmd {
         #[arg(long, value_enum, default_value = "any")]
         via: Via,
     },
+    /// What a paired computer may do with this computer's agent sessions.
+    ///
+    /// `off` (the default): nothing. `view`: list them and read the end of
+    /// what each shows. `control`: also attach and TYPE into them, which is
+    /// the same as sitting at this keyboard in that session, including
+    /// answering the agent's own prompts. It never lets that computer start,
+    /// stop or approve anything here. Raising it asks you to type the
+    /// computer's name. Lowering it ends that computer's live attachments at
+    /// once. Only you, at this machine, can change it; an agent cannot.
+    Grant {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+        #[arg(value_enum)]
+        what: GrantWhat,
+        #[arg(value_enum)]
+        level: AgentLevel,
+        /// Do not ask for the computer's name (still only from a terminal).
+        #[arg(long)]
+        yes: bool,
+    },
+    /// The agent sessions on a paired computer, if it lets this one see them.
+    Agents {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// The end of what one agent session on a paired computer shows, as text.
+    ///
+    /// Escape sequences are taken out, so colours and cursor moves are lost.
+    /// Only you, at this machine: an agent here cannot read another
+    /// computer's sessions.
+    Peek {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+        /// The session's number there (`rime remote computers agents`).
+        session: u32,
+        /// How many bytes of the end to read (1 to 8192).
+        #[arg(long, value_parser = clap::value_parser!(u32).range(1..=8192))]
+        bytes: Option<u32>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Attach this terminal to an agent session on a paired computer that
+    /// gave this one `control`.
+    ///
+    /// Leave with the same detach key as `rime agent attach`; the session
+    /// keeps running there. That computer shows a notification that you
+    /// attached, and its own terminal is never made smaller by yours.
+    Attach {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+        /// The session's number there (`rime remote computers agents`).
+        session: u32,
+    },
+}
+
+/// What `rime remote computers grant` sets. One thing for now; a word of its
+/// own so the command reads as what it does.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrantWhat {
+    /// This computer's agent sessions.
+    Agents,
+}
+
+/// How far a paired computer may reach this computer's agent sessions.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AgentLevel {
+    /// Nothing.
+    Off,
+    /// List them and read the end of each.
+    View,
+    /// Also attach and type into them.
+    Control,
+}
+
+impl AgentLevel {
+    fn word(self) -> &'static str {
+        match self {
+            AgentLevel::Off => "off",
+            AgentLevel::View => "view",
+            AgentLevel::Control => "control",
+        }
+    }
 }
 
 /// `rime remote computers clipboard <computer> <setting>`.
@@ -643,6 +731,31 @@ enum Request {
         computer: String,
         on: bool,
     },
+    ComputerGrant {
+        computer: String,
+        agents: &'static str,
+    },
+    ComputerAgents {
+        computer: String,
+    },
+    ComputerAgentPeek {
+        computer: String,
+        id: u32,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bytes: Option<u32>,
+    },
+    ComputerAttach {
+        computer: String,
+        id: u32,
+        cols: u16,
+        rows: u16,
+    },
+    ComputerAgentResize {
+        computer: String,
+        id: u32,
+        cols: u16,
+        rows: u16,
+    },
     PhotosSave {
         #[serde(skip_serializing_if = "Option::is_none")]
         device: Option<String>,
@@ -882,6 +995,37 @@ enum Reply {
         path: String,
         rtt_ms: u64,
     },
+    ComputerGranted {
+        id: String,
+        name: String,
+        agents: String,
+        #[serde(default)]
+        dropped: bool,
+    },
+    ComputerAgents {
+        id: String,
+        name: String,
+        sessions: Vec<rime_agent_core::protocol::SessionInfo>,
+        #[serde(default)]
+        truncated: bool,
+        #[serde(default)]
+        unreadable: usize,
+    },
+    ComputerAgentPeek {
+        id: String,
+        name: String,
+        session: u32,
+        data: String,
+        cols: u16,
+        rows: u16,
+        state: String,
+    },
+    ComputerAttached {
+        id: String,
+        name: String,
+        session: u32,
+        label: String,
+    },
     Ok,
     Error {
         message: String,
@@ -944,6 +1088,12 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
             }
             ComputersCmd::Open { computer, url, title, json } => computers_open(&computer, &url, title, json),
             ComputersCmd::Send { computer, files, via } => computers_send(&computer, &files, via),
+            ComputersCmd::Grant { computer, what: GrantWhat::Agents, level, yes } => {
+                computers_grant(&computer, level, yes)
+            }
+            ComputersCmd::Agents { computer, json } => computers_agents(&computer, json),
+            ComputersCmd::Peek { computer, session, bytes, json } => computers_peek(&computer, session, bytes, json),
+            ComputersCmd::Attach { computer, session } => computers_attach(&computer, session),
         },
         RemoteCmd::Status { json } => status(json),
         RemoteCmd::Enable => enable(),
@@ -2042,9 +2192,27 @@ fn computers_table(computers: &[rime_remote_core::peer::Listed]) -> String {
                 "",
                 sharing_words(l.clipboard_send, l.clipboard_receive, l.files, l.handoff)
             ));
+            out.push_str(&format!("{:<18} {}\n", "", agents_words(&l.agents, &l.can_agents, l.can_agents_ms)));
         }
     }
     out
+}
+
+/// One line for both directions of the agents grant: what this computer
+/// lets that one do (the grant, stored here), and what that one said it
+/// lets this one do (a claim it made, shown as one).
+fn agents_words(granted: &str, can: &str, can_ms: Option<u64>) -> String {
+    let here = match granted {
+        "view" => "it may view agents here",
+        "control" => "it may CONTROL agents here",
+        _ => "agents here not shared",
+    };
+    let there = match (can, can_ms) {
+        ("view" | "control", Some(at)) => format!("it says this computer may {can} its agents ({})", ago(at)),
+        ("view" | "control", None) => format!("it says this computer may {can} its agents"),
+        _ => "its agents not shared with this computer".to_string(),
+    };
+    format!("{here}; {there}")
 }
 
 /// "added by Pixel 8, not allowed yet": for a device or computer another one
@@ -2280,6 +2448,349 @@ fn computers_open(computer: &str, url: &str, title: Option<String>, json: bool) 
         }
         _ => unexpected(),
     }
+}
+
+/// The id and name of one paired computer as this computer lists it, when
+/// `computer` names exactly one (an id, or a name only one has).
+fn named_computer(computer: &str) -> Option<(String, String)> {
+    let Ok(Reply::Computers { computers }) = call(&Request::Computers) else {
+        return None;
+    };
+    let active: Vec<_> = computers.iter().map(|l| &l.computer).filter(|c| c.is_active()).collect();
+    if let Some(c) = active.iter().find(|c| c.id == computer) {
+        return Some((c.id.clone(), c.name.clone()));
+    }
+    let mut named = active.iter().filter(|c| c.name == computer);
+    match (named.next(), named.next()) {
+        (Some(c), None) => Some((c.id.clone(), c.name.clone())),
+        _ => None,
+    }
+}
+
+/// Whether what was typed at the grant prompt names the computer: its name
+/// exactly (spaces around it ignored), or its id.
+fn typed_names(typed: &str, id: &str, name: &str) -> bool {
+    let typed = typed.trim();
+    !typed.is_empty() && (typed == name.trim() || typed == id)
+}
+
+fn computers_grant(computer: &str, level: AgentLevel, yes: bool) -> Result<i32> {
+    use std::io::IsTerminal;
+    // Raising it is asked about at a terminal, every time; the service
+    // refuses anyone who is not a person at this machine whatever this says,
+    // so this is for the person, not the gate.
+    if level != AgentLevel::Off {
+        if !std::io::stdin().is_terminal() {
+            bail!(
+                "giving another computer `{}` over your agent sessions is asked about at a terminal; \
+                 run it in one (with --yes to skip typing the name)",
+                level.word()
+            );
+        }
+        if !yes {
+            let Some((id, name)) = named_computer(computer) else {
+                bail!("no paired computer is called {computer}: `rime remote computers list` shows them");
+            };
+            let risk = match level {
+                AgentLevel::Control => format!(
+                    "{name} will be able to see your agent sessions here AND TYPE INTO THEM, as if it sat at \
+                     this keyboard: whatever an agent here can do, a person at {name} can make it do, \
+                     including answering its prompts. It cannot start, stop or approve anything here."
+                ),
+                _ => format!(
+                    "{name} will be able to list your agent sessions here and read the end of what each \
+                     shows, which can include code, paths and anything an agent printed."
+                ),
+            };
+            eprintln!("{risk}");
+            eprint!("Type the computer's name ({name}) to allow it: ");
+            std::io::stderr().flush().ok();
+            let mut line = String::new();
+            std::io::stdin().lock().read_line(&mut line).context("reading the name")?;
+            if !typed_names(&line, &id, &name) {
+                eprintln!("rime: that is not {name}; nothing changed.");
+                return Ok(1);
+            }
+        }
+    }
+    match call(&Request::ComputerGrant { computer: computer.to_string(), agents: level.word() })? {
+        Reply::ComputerGranted { id, name, agents, dropped } => {
+            let what = match agents.as_str() {
+                "control" => "may list, read, attach to and type into your agent sessions here",
+                "view" => "may list your agent sessions here and read the end of each",
+                _ => "may not reach your agent sessions here",
+            };
+            eprintln!("rime: {name} ({id}) {what}.");
+            if dropped {
+                eprintln!("rime: its live connections were dropped.");
+            }
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
+/// One error the service gave, as `--json` and as a line on stderr.
+fn json_error(message: &str, json: bool) -> Result<i32> {
+    if json {
+        println!("{}", serde_json::json!({"error": message}));
+    }
+    eprintln!("rime: {message}");
+    Ok(1)
+}
+
+fn computers_agents(computer: &str, json: bool) -> Result<i32> {
+    let req = Request::ComputerAgents { computer: computer.to_string() };
+    match call_for(&req, None, COMPUTER_WAIT)? {
+        Reply::ComputerAgents { id, name, sessions, truncated, unreadable } => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&serde_json::json!({
+                        "id": id, "name": name, "sessions": sessions,
+                        "truncated": truncated, "unreadable": unreadable,
+                    }))?
+                );
+            } else {
+                print!("{}", agents_table(&name, &sessions, truncated, unreadable));
+            }
+            Ok(0)
+        }
+        Reply::Error { message } => json_error(&message, json),
+        _ => unexpected(),
+    }
+}
+
+/// The table `computers agents` prints. Every text field was already made
+/// plain by the service; it is cut to fit here.
+fn agents_table(
+    name: &str,
+    sessions: &[rime_agent_core::protocol::SessionInfo],
+    truncated: bool,
+    unreadable: usize,
+) -> String {
+    let mut out = String::new();
+    if sessions.is_empty() {
+        out.push_str(&format!("{name} has no agent sessions.\n"));
+    } else {
+        out.push_str(&format!("{:<5} {:<24} {:<12} {:<9} {:<8} PLACE\n", "ID", "NAME", "AGENT", "STATE", "ATTACHED"));
+        for s in sessions {
+            let label = s.name.clone().or_else(|| s.title.clone()).unwrap_or_else(|| "-".into());
+            let state = if s.is_live() {
+                format!("{:?}", s.state).to_lowercase()
+            } else {
+                s.exit_summary().unwrap_or_else(|| "ended".into())
+            };
+            out.push_str(&format!(
+                "{:<5} {:<24} {:<12} {:<9} {:<8} {}\n",
+                s.id,
+                truncate(&label, 24),
+                truncate(&s.agent, 12),
+                truncate(&state, 9),
+                s.attached,
+                truncate(s.project_name.as_deref().unwrap_or(&s.cwd), 40),
+            ));
+        }
+    }
+    if truncated {
+        out.push_str(&format!("({name} left some out to fit one answer.)\n"));
+    }
+    if unreadable > 0 {
+        out.push_str(&format!("({unreadable} that {name} sent could not be read.)\n"));
+    }
+    out
+}
+
+/// A terminal's bytes as plain text: escape sequences (CSI, OSC, DCS and the
+/// rest) and every control character but newline and tab are taken out, and
+/// carriage returns too, so nothing in it can move the cursor, change the
+/// title, set the clipboard or otherwise act on the terminal it is printed in.
+fn peek_text(bytes: &[u8]) -> String {
+    #[derive(PartialEq)]
+    enum S {
+        Text,
+        Esc,
+        Csi,
+        Str,
+        StrEsc,
+    }
+    let text = String::from_utf8_lossy(bytes);
+    let mut out = String::with_capacity(text.len());
+    let mut st = S::Text;
+    for c in text.chars() {
+        st = match st {
+            S::Text => match c {
+                '\u{1b}' => S::Esc,
+                '\u{9b}' => S::Csi,
+                '\u{90}' | '\u{9d}' | '\u{9e}' | '\u{9f}' | '\u{98}' => S::Str,
+                '\n' | '\t' => {
+                    out.push(c);
+                    S::Text
+                }
+                c if c.is_control() => S::Text,
+                c => {
+                    out.push(c);
+                    S::Text
+                }
+            },
+            S::Esc => match c {
+                '[' => S::Csi,
+                ']' | 'P' | '^' | '_' | 'X' => S::Str,
+                // Two-character sequences (and intermediates) end here.
+                _ => S::Text,
+            },
+            S::Csi => match c {
+                '\u{40}'..='\u{7e}' => S::Text,
+                _ => S::Csi,
+            },
+            S::Str => match c {
+                '\u{7}' | '\u{9c}' => S::Text,
+                '\u{1b}' => S::StrEsc,
+                _ => S::Str,
+            },
+            S::StrEsc => match c {
+                '\\' => S::Text,
+                '\u{1b}' => S::StrEsc,
+                _ => S::Str,
+            },
+        };
+    }
+    out
+}
+
+fn computers_peek(computer: &str, session: u32, bytes: Option<u32>, json: bool) -> Result<i32> {
+    let req = Request::ComputerAgentPeek { computer: computer.to_string(), id: session, bytes };
+    match call_for(&req, None, COMPUTER_WAIT)? {
+        Reply::ComputerAgentPeek { id, name, session, data, cols, rows, state } => {
+            let raw = rime_agent_core::webauthn::b64_decode(&data).unwrap_or_default();
+            let text = peek_text(&raw);
+            if json {
+                println!(
+                    "{}",
+                    serde_json::json!({"id": id, "name": name, "session": session, "text": text,
+                                       "cols": cols, "rows": rows, "state": state})
+                );
+            } else {
+                print!("{text}");
+                if !text.ends_with('\n') {
+                    println!();
+                }
+            }
+            Ok(0)
+        }
+        Reply::Error { message } => json_error(&message, json),
+        _ => unexpected(),
+    }
+}
+
+/// Read one reply line off `stream` a byte at a time, so nothing after it
+/// (the terminal's first bytes) is taken into a buffer this never hands on.
+fn reply_line(stream: &mut UnixStream) -> Result<Reply> {
+    use std::io::Read;
+    let mut line = Vec::new();
+    let mut byte = [0u8; 1];
+    loop {
+        match stream.read(&mut byte) {
+            Ok(0) => bail!("the service closed the connection"),
+            Ok(_) if byte[0] == b'\n' => break,
+            Ok(_) => line.push(byte[0]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e).context("reading the reply"),
+        }
+        if line.len() > 64 * 1024 {
+            bail!("the service sent an overlong reply");
+        }
+    }
+    let text = String::from_utf8_lossy(&line);
+    serde_json::from_str(text.trim()).with_context(|| format!("unreadable reply: {text}"))
+}
+
+fn computers_attach(computer: &str, session: u32) -> Result<i32> {
+    use rime_agent_core::term::{self, RawMode};
+    use std::io::IsTerminal;
+    if !std::io::stdin().is_terminal() || !std::io::stdout().is_terminal() {
+        bail!("attaching needs a terminal");
+    }
+    let cfg = rime_agent_core::config::Config::load();
+    let size = term::stdout_window_size();
+    let path = socket_path();
+    let mut stream = UnixStream::connect(&path)
+        .with_context(|| format!("Rime Remote is not running (socket: {})", path.display()))?;
+    stream.set_read_timeout(Some(COMPUTER_WAIT)).ok();
+    let mut line = serde_json::to_string(&Request::ComputerAttach {
+        computer: computer.to_string(),
+        id: session,
+        cols: size.cols,
+        rows: size.rows,
+    })?;
+    line.push('\n');
+    stream.write_all(line.as_bytes())?;
+    let (id, name, session, label) = match reply_line(&mut stream)? {
+        Reply::ComputerAttached { id, name, session, label } => (id, name, session, label),
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            return Ok(1);
+        }
+        _ => return unexpected(),
+    };
+    stream.set_read_timeout(None).ok();
+    let read_half = stream.try_clone().context("cloning the control socket")?;
+    let _raw = RawMode::enter(libc::STDIN_FILENO)?;
+    install_remote_winch(computer.to_string(), session, size);
+    let detached = rime_agent_core::client::relay(read_half, stream, &[], cfg.detach_byte())?;
+    print!("\r\n");
+    std::io::stdout().flush().ok();
+    let label = if label.is_empty() { format!("session {session}") } else { label };
+    if detached {
+        eprintln!(
+            "rime: detached from {label} on {name} (still running there: `rime remote computers attach {id} {session}`)"
+        );
+    } else {
+        eprintln!("rime: {label} on {name} ended, or the link to it closed.");
+    }
+    Ok(0)
+}
+
+/// Pass this terminal's new size on while attached to a session on another
+/// computer, each on its own short request, as `rime agent attach` does.
+fn install_remote_winch(computer: String, id: u32, initial: rime_agent_core::term::WinSize) {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    static RESIZED: AtomicBool = AtomicBool::new(false);
+    extern "C" fn on_winch(_sig: libc::c_int) {
+        RESIZED.store(true, Ordering::Relaxed);
+    }
+    let handler = on_winch as extern "C" fn(libc::c_int);
+    // Safe: the handler only stores to an atomic.
+    unsafe {
+        libc::signal(libc::SIGWINCH, handler as libc::sighandler_t);
+    }
+    std::thread::Builder::new()
+        .name("rime-remote-winch".into())
+        .spawn(move || {
+            let mut last = initial;
+            loop {
+                std::thread::sleep(std::time::Duration::from_millis(120));
+                if !RESIZED.swap(false, Ordering::Relaxed) {
+                    continue;
+                }
+                let size = rime_agent_core::term::stdout_window_size();
+                if size == last {
+                    continue;
+                }
+                last = size;
+                let _ = call(&Request::ComputerAgentResize {
+                    computer: computer.clone(),
+                    id,
+                    cols: size.cols,
+                    rows: size.rows,
+                });
+            }
+        })
+        .ok();
 }
 
 fn computers_ping(computer: &str, via: Via, json: bool) -> Result<i32> {
@@ -2945,16 +3456,18 @@ mod tests {
         };
         let table = computers_table(&computers);
         assert!(table.contains("battery 81%, balanced, locked, Wi-Fi, up 2h"), "{table}");
-        // The header, two rows, the presence and what is shared with desk.
-        assert_eq!(table.lines().count(), 5, "{table}");
+        // The header, two rows, the presence, what is shared with desk, and
+        // the agents grant both ways.
+        assert_eq!(table.lines().count(), 6, "{table}");
         assert!(table.contains("clipboard not shared, files refused, links refused"), "{table}");
+        assert!(table.contains("agents here not shared; its agents not shared with this computer"), "{table}");
     }
 
     #[test]
     fn the_computers_table_and_json_show_each_computers_switches() {
         let text = r#"{"reply":"computers","computers":[
             {"id":"aaaa","name":"desk","public_key":"k","paired_ms":1,"clipboard_send":true,"clipboard_receive":true,"files":true,
-             "handoff":true},
+             "handoff":true,"agents":"control","can_agents":"view","can_agents_ms":1},
             {"id":"bbbb","name":"lab","public_key":"k2","paired_ms":1,"clipboard_receive":true,"files":false}]}"#;
         let Reply::Computers { computers } = serde_json::from_str::<Reply>(text).expect("reply") else {
             panic!("not computers")
@@ -2965,6 +3478,13 @@ mod tests {
         let json = serde_json::to_value(&computers).expect("json");
         assert_eq!((json[0]["clipboard_send"].clone(), json[1]["files"].clone()), (serde_json::json!(true), serde_json::json!(false)));
         assert_eq!((json[0]["handoff"].clone(), json[1]["handoff"].clone()), (serde_json::json!(true), serde_json::json!(false)));
+        // The agents grant both ways: what this computer gave, and what the
+        // other said it gave (absent from an older service: off).
+        assert!(table.contains("it may CONTROL agents here; it says this computer may view its agents"), "{table}");
+        assert_eq!((json[0]["agents"].clone(), json[0]["can_agents"].clone()), (serde_json::json!("control"), serde_json::json!("view")));
+        assert_eq!((json[1]["agents"].clone(), json[1]["can_agents"].clone()), (serde_json::json!("off"), serde_json::json!("off")));
+        assert_eq!(json[0]["can_agents_ms"], 1);
+        assert!(json[1].get("can_agents_ms").is_none(), "{json}");
     }
 
     #[test]
@@ -3159,8 +3679,8 @@ mod tests {
         assert!(table.contains("added by Pixel 8, not allowed yet"), "{table}");
         assert!(table.contains("added by Pixel 8, allowed"), "{table}");
         // One header, four rows, a line under each active introduced one, and
-        // what is shared under each active one.
-        assert_eq!(table.lines().count(), 10, "{table}");
+        // what is shared and the agents grant under each active one.
+        assert_eq!(table.lines().count(), 13, "{table}");
         // `--json` is the record as the service sent it: who added it, and
         // when it was allowed, if it was.
         let json = serde_json::to_value(&computers).expect("json");
@@ -3406,7 +3926,11 @@ mod tests {
                 | ComputersCmd::Files { computer, .. }
                 | ComputersCmd::Handoff { computer, .. }
                 | ComputersCmd::Open { computer, .. }
-                | ComputersCmd::Send { computer, .. } => Some(computer),
+                | ComputersCmd::Send { computer, .. }
+                | ComputersCmd::Grant { computer, .. }
+                | ComputersCmd::Agents { computer, .. }
+                | ComputersCmd::Peek { computer, .. }
+                | ComputersCmd::Attach { computer, .. } => Some(computer),
                 ComputersCmd::Add { .. } | ComputersCmd::List { .. } => None,
             },
             RemoteCmd::Messages { action: Some(MessagesCmd::Send { device, .. }), .. }
@@ -3465,6 +3989,13 @@ mod tests {
             &["computers", "send", ID, "a.txt", "b.pdf"],
             &["computers", "send", "--", ID, "a.txt"],
             &["computers", "send", "--via", "relay", ID, "a.txt"],
+            &["computers", "grant", ID, "agents", "view"],
+            &["computers", "grant", "--yes", ID, "agents", "control"],
+            &["computers", "agents", ID],
+            &["computers", "agents", ID, "--json"],
+            &["computers", "peek", ID, "3"],
+            &["computers", "peek", "--bytes", "100", ID, "3"],
+            &["computers", "attach", ID, "3"],
             &["messages", "--device", ID],
             &["messages", "--device", ID, "--thread", "7", "--json"],
             &["messages", "send", "--device", ID, "--to", "5556"],
@@ -3536,5 +4067,88 @@ mod tests {
         }
         // An id made only of letters that are short flags here reads as help.
         assert_eq!(parse(&["revoke", "-hhhh"]).expect_err("help").kind(), clap::error::ErrorKind::DisplayHelp);
+    }
+
+    #[test]
+    fn the_agents_verbs_parse_and_speak_the_services_wire() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("r").chain(args.iter().copied()));
+        match parse(&["computers", "grant", "desk", "agents", "control"]).expect("grant").cmd {
+            RemoteCmd::Computers {
+                action: ComputersCmd::Grant { computer, what: GrantWhat::Agents, level: AgentLevel::Control, yes: false },
+            } => assert_eq!(computer, "desk"),
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["computers", "grant", "desk", "agents", "admin"]).is_err(), "only off, view or control");
+        assert!(parse(&["computers", "grant", "desk", "files", "view"]).is_err(), "only agents");
+        assert!(parse(&["computers", "peek", "desk", "x"]).is_err(), "a session is a number");
+        assert!(parse(&["computers", "peek", "desk", "1", "--bytes", "0"]).is_err());
+        assert!(parse(&["computers", "peek", "desk", "1", "--bytes", "8193"]).is_err());
+        assert!(parse(&["computers", "attach", "desk"]).is_err(), "attach names a session");
+
+        let wire = |r: &Request| serde_json::to_string(r).unwrap();
+        assert_eq!(
+            wire(&Request::ComputerGrant { computer: "d".into(), agents: AgentLevel::View.word() }),
+            r#"{"cmd":"computer_grant","computer":"d","agents":"view"}"#
+        );
+        assert_eq!(wire(&Request::ComputerAgents { computer: "d".into() }), r#"{"cmd":"computer_agents","computer":"d"}"#);
+        assert_eq!(
+            wire(&Request::ComputerAgentPeek { computer: "d".into(), id: 3, bytes: None }),
+            r#"{"cmd":"computer_agent_peek","computer":"d","id":3}"#
+        );
+        assert_eq!(
+            wire(&Request::ComputerAttach { computer: "d".into(), id: 3, cols: 80, rows: 24 }),
+            r#"{"cmd":"computer_attach","computer":"d","id":3,"cols":80,"rows":24}"#
+        );
+        assert_eq!(
+            wire(&Request::ComputerAgentResize { computer: "d".into(), id: 3, cols: 100, rows: 30 }),
+            r#"{"cmd":"computer_agent_resize","computer":"d","id":3,"cols":100,"rows":30}"#
+        );
+        let r: Reply = serde_json::from_str(r#"{"reply":"computer_granted","id":"i","name":"Desk","agents":"off","dropped":true}"#)
+            .expect("granted");
+        assert!(matches!(r, Reply::ComputerGranted { dropped: true, .. }));
+        let r: Reply =
+            serde_json::from_str(r#"{"reply":"computer_attached","id":"i","name":"Desk","session":3,"label":"fix"}"#)
+                .expect("attached");
+        assert!(matches!(r, Reply::ComputerAttached { session: 3, .. }));
+        let r: Reply = serde_json::from_str(
+            r#"{"reply":"computer_agent_peek","id":"i","name":"Desk","session":3,"data":"aGk=","cols":80,"rows":24,"state":"working"}"#,
+        )
+        .expect("peek");
+        assert!(matches!(r, Reply::ComputerAgentPeek { .. }));
+        let r: Reply = serde_json::from_str(r#"{"reply":"computer_agents","id":"i","name":"Desk","sessions":[]}"#).expect("agents");
+        let Reply::ComputerAgents { name, sessions, truncated, unreadable, .. } = r else { panic!() };
+        assert!(agents_table(&name, &sessions, truncated, unreadable).contains("Desk has no agent sessions"));
+    }
+
+    #[test]
+    fn a_peek_prints_as_text_that_cannot_act_on_the_terminal() {
+        // Colour, a title, a clipboard set, a C1 CSI, a DCS and a bare CR all go.
+        let raw = b"\x1b[31mred\x1b[0m \x1b]0;title\x07\x1b]52;c;aGk=\x1b\\ok\r\n\xc2\x9b2Jx\x1bP1$r\x1b\\y\tz\x07";
+        assert_eq!(peek_text(raw), "red ok\nxy\tz");
+        // An OSC that never ends swallows the rest rather than leaking it.
+        assert_eq!(peek_text(b"a\x1b]52;c;never ending"), "a");
+        assert_eq!(peek_text("plain ünïcode\n".as_bytes()), "plain ünïcode\n");
+    }
+
+    #[test]
+    fn the_grant_prompt_wants_the_name_and_the_list_says_both_directions() {
+        assert!(typed_names("Desk\n", "AbC", "Desk"));
+        assert!(typed_names("  AbC ", "AbC", "Desk"));
+        assert!(!typed_names("desk", "AbC", "Desk"), "the name exactly");
+        assert!(!typed_names("y", "AbC", "Desk"));
+        assert!(!typed_names("\n", "AbC", ""), "an empty name is never typed");
+        assert_eq!(agents_words("off", "off", None), "agents here not shared; its agents not shared with this computer");
+        assert_eq!(
+            agents_words("control", "view", None),
+            "it may CONTROL agents here; it says this computer may view its agents"
+        );
+        // A hint outside the closed set is shown as nothing.
+        assert!(agents_words("view", "root", Some(1)).ends_with("its agents not shared with this computer"));
     }
 }

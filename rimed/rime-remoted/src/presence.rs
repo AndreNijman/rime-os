@@ -319,6 +319,9 @@ pub fn answer_presence(state: &State, sender: &str, line: &[u8]) -> Vec<u8> {
 /// Both exchanges on an open link to computer `c`, as the side that dialled.
 pub fn exchange(state: &State, link: &mut crate::dialer::Link, c: &rime_remote_core::device::Device) -> Result<(), String> {
     let hello = link.call(br#"{"cmd":"remote_hello"}"#)?;
+    // What it lets this computer do with its agent sessions: a claim, kept
+    // for the listing only (agents.rs).
+    crate::agents::heard_hello(state, &c.id, &hello);
     let offers = |verb: &str| {
         hello["features"].as_array().is_some_and(|f| f.iter().any(|x| x.as_str() == Some(verb)))
     };
