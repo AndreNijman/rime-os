@@ -1283,7 +1283,7 @@ pub fn open(
             "this computer is locked; unlock it at the keyboard first",
         ));
     }
-    let mut backend = env.backend().map_err(|why| error("unavailable", &why))?;
+    let (mut backend, bound) = env.backend().map_err(|why| error("unavailable", &why))?;
     // Keys or buttons an earlier run left held go first, on the new devices.
     // The compositor's notifier is known only now, after the round trip.
     let unlocked = !gate.locked_for(backend.as_ref());
@@ -1318,7 +1318,10 @@ pub fn open(
         backend,
         gate,
         Box::new(move || granted(&st, &dev)),
-        Box::new(move || env.available()),
+        Box::new(move || {
+            env.available()?;
+            env.same_session(bound.as_deref())
+        }),
         // One JSON line per event, as on `device_events`.
         Box::new(move |line: Value| {
             let _ = (&writer).write_all(format!("{line}\n").as_bytes());
@@ -1493,15 +1496,37 @@ impl Env {
         }
     }
 
-    fn backend(&self) -> Result<Box<dyn Backend>, String> {
+    /// The devices, on the compositor of the user's graphical session,
+    /// with that session's id (`None` for the stub).
+    fn backend(&self) -> Result<(Box<dyn Backend>, Option<String>), String> {
         match self {
             Env::Stub(dir) => StubBackend::open(dir)
-                .map(|b| Box::new(b) as Box<dyn Backend>)
+                .map(|b| (Box::new(b) as Box<dyn Backend>, None))
                 .map_err(|e| e.to_string()),
             Env::Real => {
-                let socket = wayland::discover(&rime_agent_core::paths::runtime_dir())?;
+                let display = logind::watch()
+                    .display()
+                    .ok_or("nobody is logged in to a desktop on this computer")?;
+                let stream = wayland::discover(&rime_agent_core::paths::runtime_dir(), &display)?;
                 let layout = wayland::Layout::of_session();
-                wayland::Wayland::connect(&socket, &layout).map(|b| Box::new(b) as Box<dyn Backend>)
+                wayland::Wayland::over(stream, &layout)
+                    .map(|b| (Box::new(b) as Box<dyn Backend>, Some(display)))
+            }
+        }
+    }
+
+    /// Whether the session the devices were made in is still the user's
+    /// graphical one: after a log out and in, the old socket's successor
+    /// may be someone else's to answer.
+    fn same_session(&self, bound: Option<&str>) -> Result<(), String> {
+        match self {
+            Env::Stub(_) => Ok(()),
+            Env::Real => {
+                if logind::watch().display().as_deref() == bound {
+                    Ok(())
+                } else {
+                    Err("the desktop session this touchpad was opened in has ended".into())
+                }
             }
         }
     }
@@ -1531,7 +1556,7 @@ pub fn recover_at_start() {
         while (gate.logind)().0.is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
-        let Ok(mut backend) = env.backend() else {
+        let Ok((mut backend, _)) = env.backend() else {
             return;
         };
         let unlocked = !gate.locked_for(backend.as_ref());
@@ -1559,6 +1584,9 @@ mod logind {
         hint: Option<bool>,
         signal: bool,
         no_session: bool,
+        /// The id of the user's graphical (`Display`) session, as logind
+        /// last said; `None` when there is none or nothing is known.
+        display: Option<String>,
     }
 
     /// What the watcher last saw.
@@ -1574,6 +1602,15 @@ mod logind {
 
         pub fn no_session(&self) -> bool {
             self.0.lock().unwrap_or_else(|e| e.into_inner()).no_session
+        }
+
+        /// The id of the user's graphical session (`5` for `session-5.scope`).
+        pub fn display(&self) -> Option<String> {
+            self.0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .display
+                .clone()
         }
 
         fn set(&self, f: impl FnOnce(&mut Seen)) {
@@ -1599,6 +1636,7 @@ mod logind {
                         w2.set(|s| {
                             s.hint = None;
                             s.signal = false;
+                            s.display = None;
                         });
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
@@ -1641,7 +1679,7 @@ mod logind {
         let uid = unsafe { libc::getuid() };
         let user: zbus::zvariant::OwnedObjectPath = manager.call("GetUser", &(uid,)).await?;
         let user = proxy(&conn, user.as_str(), "org.freedesktop.login1.User").await?;
-        let (_, display): (String, zbus::zvariant::OwnedObjectPath) =
+        let (display_id, display): (String, zbus::zvariant::OwnedObjectPath) =
             user.get_property("Display").await?;
         let mut user_changes = zbus::fdo::PropertiesProxy::builder(&conn)
             .destination(DEST)?
@@ -1654,6 +1692,7 @@ mod logind {
             w.set(|s| {
                 s.hint = None;
                 s.no_session = true;
+                s.display = None;
             });
             // Wait for a login: the user's Display changes.
             let _ = user_changes.next().await;
@@ -1674,6 +1713,7 @@ mod logind {
         w.set(|s| {
             s.hint = Some(hint);
             s.no_session = false;
+            s.display = Some(display_id.clone());
         });
         // Signals can be missed; the property is read again now and then.
         let mut again = tokio::time::interval(Duration::from_secs(5));
@@ -1734,14 +1774,10 @@ pub mod wayland {
 
     use super::*;
 
-    /// The compositor's `wayland-N` socket in `runtime`, found the way
-    /// `rime-agentd`'s clipboard finds it: `WAYLAND_DISPLAY` first when it is
-    /// a name, then every `wayland-<digits>` that accepts a connection (a
-    /// stale socket refuses one).
-    pub fn discover(runtime: &Path) -> Result<PathBuf, String> {
-        if cfg!(test) {
-            return Err("unit tests never look for a desktop".into());
-        }
+    /// Every socket in `runtime` that may be the compositor's:
+    /// `WAYLAND_DISPLAY` when it is a name, then each `wayland-<digits>`,
+    /// lowest first, once each.
+    pub fn candidates(runtime: &Path) -> Vec<PathBuf> {
         let mut names = Vec::new();
         if let Some(v) = std::env::var_os("WAYLAND_DISPLAY") {
             let v = v.to_string_lossy().into_owned();
@@ -1761,13 +1797,107 @@ pub mod wayland {
             found.sort_by_key(|n| n["wayland-".len()..].parse::<u32>().unwrap_or(u32::MAX));
             names.extend(found);
         }
-        for n in names {
-            let path = runtime.join(&n);
-            if UnixStream::connect(&path).is_ok() {
-                return Ok(path);
+        let mut seen = BTreeSet::new();
+        names
+            .into_iter()
+            .filter(|n| seen.insert(n.clone()))
+            .map(|n| runtime.join(n))
+            .collect()
+    }
+
+    /// The compositor of the user's graphical session `display`, connected.
+    ///
+    /// Not whoever answers first: any program running as this user can
+    /// listen on a `wayland-N` of its own (or be what `WAYLAND_DISPLAY`
+    /// names), and input sent there would be its to read. So each candidate
+    /// that accepts is asked who listens on it ([`peer_session`]), and only
+    /// a listener in `display`'s own session scope counts. None, or more
+    /// than one process, is refused: there is no telling which is real.
+    pub fn discover(runtime: &Path, display: &str) -> Result<UnixStream, String> {
+        if cfg!(test) {
+            return Err("unit tests never look for a desktop".into());
+        }
+        pick(&candidates(runtime), display, |_, stream| {
+            peer_session(stream)
+        })
+    }
+
+    /// [`discover`]'s choice, with who listens on a socket asked of
+    /// `classify` (`(session id, pid)`), so a test can stand in for the
+    /// kernel and logind.
+    pub fn pick(
+        candidates: &[PathBuf],
+        display: &str,
+        classify: impl Fn(&Path, &UnixStream) -> Option<(String, i32)>,
+    ) -> Result<UnixStream, String> {
+        let mut chosen: Vec<(i32, UnixStream)> = Vec::new();
+        for path in candidates {
+            let Ok(stream) = UnixStream::connect(path) else {
+                continue;
+            };
+            match classify(path, &stream) {
+                Some((session, pid)) if session == display => {
+                    if !chosen.iter().any(|(p, _)| *p == pid) {
+                        chosen.push((pid, stream));
+                    }
+                }
+                _ => {}
             }
         }
-        Err("no desktop is running for this user on this computer".into())
+        match chosen.len() {
+            1 => Ok(chosen.remove(0).1),
+            0 => Err("no desktop of this user's graphical session is listening".into()),
+            _ => Err(
+                "more than one program in this user's graphical session is listening as a desktop; \
+                 not guessing which is real"
+                    .into(),
+            ),
+        }
+    }
+
+    /// The uid and pid of whoever listens on `stream`'s other end
+    /// (`SO_PEERCRED`: the process that called listen(2)).
+    pub fn peer_creds(stream: &UnixStream) -> Option<(u32, i32)> {
+        // SAFETY: a zeroed ucred is valid, and the length matches it.
+        let mut cred: libc::ucred = unsafe { std::mem::zeroed() };
+        let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+        let rc = unsafe {
+            libc::getsockopt(
+                stream.as_raw_fd(),
+                libc::SOL_SOCKET,
+                libc::SO_PEERCRED,
+                (&mut cred as *mut libc::ucred).cast(),
+                &mut len,
+            )
+        };
+        (rc == 0 && cred.pid > 0).then_some((cred.uid, cred.pid))
+    }
+
+    /// The logind session whose scope the listener on `stream` runs in,
+    /// with its pid: only when it is this user, and only from the session
+    /// scope itself.
+    pub fn peer_session(stream: &UnixStream) -> Option<(String, i32)> {
+        let (uid, pid) = peer_creds(stream)?;
+        // SAFETY: getuid has no failure mode.
+        if uid != unsafe { libc::getuid() } {
+            return None;
+        }
+        let cgroup = rime_agent_core::origin::read_cgroup(pid).ok()?;
+        session_of_cgroup(&cgroup, uid).map(|id| (id, pid))
+    }
+
+    /// `5` for exactly `/user.slice/user-<uid>.slice/session-5.scope`.
+    ///
+    /// Nothing under `user@<uid>.service` counts, though a user unit may
+    /// call itself `session-5.scope` there (`systemd-run --user --scope
+    /// --unit=session-5.scope`): those are the user's to make, while a
+    /// session scope is made by logind and only root may move a process
+    /// into it.
+    pub fn session_of_cgroup(cgroup: &str, uid: u32) -> Option<String> {
+        let id = cgroup
+            .strip_prefix(&format!("/user.slice/user-{uid}.slice/session-"))?
+            .strip_suffix(".scope")?;
+        (!id.is_empty() && id.bytes().all(|b| b.is_ascii_alphanumeric())).then(|| id.to_string())
     }
 
     /// Whether gamescope (Gaming Mode) is running: one of its `-ei` sockets
@@ -2025,16 +2155,18 @@ pub mod wayland {
     }
 
     impl Wayland {
-        /// Connect to the compositor at `socket` and make the three devices.
-        /// Refused when it offers no virtual pointer or keyboard (gamescope).
+        /// Connect to the compositor at `socket` and make the three devices
+        /// (the real-compositor test's way in; the daemon goes through
+        /// [`discover`], which checks who listens first).
+        #[cfg(test)]
         pub fn connect(socket: &Path, layout: &Layout) -> Result<Wayland, String> {
             let sock = UnixStream::connect(socket)
                 .map_err(|e| format!("cannot reach the desktop: {e}"))?;
             Wayland::over(sock, layout)
         }
 
-        /// The same over a connected socket: what a test's scripted
-        /// compositor gives it.
+        /// Make the three devices over a connected socket. Refused when the
+        /// compositor offers no virtual pointer or keyboard (gamescope).
         pub fn over(sock: UnixStream, layout: &Layout) -> Result<Wayland, String> {
             sock.set_write_timeout(Some(WAIT))
                 .map_err(|e| e.to_string())?;
@@ -3150,6 +3282,118 @@ mod tests {
     }
 
     #[test]
+    fn the_desktop_is_the_listener_in_the_graphical_session_not_whoever_answers() {
+        use std::os::unix::net::UnixListener;
+        let dir = std::env::temp_dir().join(format!("rime-input-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        // wayland-0: what WAYLAND_DISPLAY names, a listener outside the
+        // session (a user unit). wayland-1: the session's compositor.
+        // wayland-2: a second socket of that same compositor.
+        let listen = |n: &str| {
+            let l = UnixListener::bind(dir.join(n)).expect("bind");
+            l.set_nonblocking(true).expect("nonblocking");
+            l
+        };
+        let (outside, real, real2) = (
+            listen("wayland-0"),
+            listen("wayland-1"),
+            listen("wayland-2"),
+        );
+        let who = |p: &Path, _: &UnixStream| -> Option<(String, i32)> {
+            match p.file_name()?.to_str()? {
+                "wayland-0" => Some(("user@".into(), 10)),
+                "wayland-1" | "wayland-2" => Some(("3".into(), 20)),
+                "wayland-3" => Some(("3".into(), 30)),
+                _ => None,
+            }
+        };
+        let paths = |ns: &[&str]| ns.iter().map(|n| dir.join(n)).collect::<Vec<_>>();
+        let got = wayland::pick(&paths(&["wayland-0", "wayland-1", "wayland-2"]), "3", who)
+            .expect("the session's compositor");
+        // It is the session's listener whose connection is kept open, not
+        // the one first in line: the others were asked and hung up.
+        let open = |l: &UnixListener| {
+            let mut c = l.accept().expect("was connected").0;
+            c.set_nonblocking(true).expect("nonblocking");
+            match std::io::Read::read(&mut c, &mut [0u8; 1]) {
+                Ok(0) => false,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => true,
+                other => panic!("{other:?}"),
+            }
+        };
+        assert!(open(&real), "the session's compositor was let go");
+        assert!(!open(&outside), "the outside listener kept a connection");
+        assert!(
+            !open(&real2),
+            "a second socket of the same compositor was kept too"
+        );
+        drop(got);
+        // Only the outside one: refused, though it answers.
+        let err = wayland::pick(&paths(&["wayland-0"]), "3", who).expect_err("chose it");
+        assert!(err.contains("no desktop"), "{err}");
+        // Another session's listener is not this one's.
+        assert!(wayland::pick(&paths(&["wayland-1"]), "4", who).is_err());
+        // Two processes in the session: no guessing.
+        let _other = listen("wayland-3");
+        let err =
+            wayland::pick(&paths(&["wayland-1", "wayland-3"]), "3", who).expect_err("guessed");
+        assert!(err.contains("more than one"), "{err}");
+        // A socket nobody listens on is passed over.
+        drop(outside);
+        assert!(wayland::pick(&paths(&["wayland-0", "wayland-1"]), "3", who).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn only_a_logind_session_scope_of_this_user_is_a_session() {
+        use wayland::session_of_cgroup as of;
+        assert_eq!(
+            of("/user.slice/user-1000.slice/session-3.scope", 1000).as_deref(),
+            Some("3")
+        );
+        assert_eq!(
+            of("/user.slice/user-1000.slice/session-c12.scope", 1000).as_deref(),
+            Some("c12")
+        );
+        for cg in [
+            // A user unit naming itself after a session.
+            "/user.slice/user-1000.slice/user@1000.service/app.slice/session-3.scope",
+            "/user.slice/user-1000.slice/user@1000.service/session-3.scope",
+            // Another user's session, and inside a session scope.
+            "/user.slice/user-1001.slice/session-3.scope",
+            "/user.slice/user-1000.slice/session-3.scope/sub",
+            "/user.slice/user-1000.slice/session-.scope",
+            "/user.slice/user-1000.slice/session-3.service",
+            "/system.slice/session-3.scope",
+            "/",
+            "",
+        ] {
+            assert_eq!(of(cg, 1000), None, "{cg}");
+        }
+    }
+
+    #[test]
+    fn the_listener_is_known_by_the_kernel_not_by_what_it_says() {
+        use std::os::unix::net::UnixListener;
+        let path = std::env::temp_dir().join(format!("rime-input-peer-{}", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let _l = UnixListener::bind(&path).expect("bind");
+        let s = UnixStream::connect(&path).expect("connect");
+        // SAFETY: getuid has no failure mode.
+        let me = (unsafe { libc::getuid() }, std::process::id() as i32);
+        assert_eq!(wayland::peer_creds(&s), Some(me));
+        // And this test's own cgroup decides whether it is a session.
+        let cg = rime_agent_core::origin::read_cgroup(me.1).expect("cgroup");
+        assert_eq!(
+            wayland::peer_session(&s).map(|(id, _)| id),
+            wayland::session_of_cgroup(&cg, me.0),
+            "{cg}"
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn layouts_become_include_keymaps_and_nothing_else_gets_into_one() {
         use wayland::Layout;
         let de = Layout::from_names("de", "nodeadkeys").keymap();
@@ -3489,6 +3733,26 @@ ShellRoot {
             &rt.join("labwc.log"),
             || UnixStream::connect(&socket).is_ok(),
         );
+        // The daemon's choice of socket, against a real kernel: the
+        // listener is labwc itself, and it is in a logind session exactly
+        // when this test is (in-login-session.sh puts it in one).
+        let probe = UnixStream::connect(&socket).expect("labwc");
+        let labwc_pid = bed.kids.last().expect("labwc").id() as i32;
+        assert_eq!(
+            wayland::peer_creds(&probe).map(|(_, pid)| pid),
+            Some(labwc_pid)
+        );
+        // SAFETY: getuid has no failure mode.
+        let uid = unsafe { libc::getuid() };
+        let own = rime_agent_core::origin::read_cgroup(std::process::id() as i32)
+            .ok()
+            .and_then(|cg| wayland::session_of_cgroup(&cg, uid));
+        assert_eq!(
+            wayland::peer_session(&probe),
+            own.clone().map(|id| (id, labwc_pid))
+        );
+        eprintln!("labwc's session as the daemon reads it: {own:?}");
+        drop(probe);
 
         let recv_log = rt.join("recv.log");
         let foot = bed
