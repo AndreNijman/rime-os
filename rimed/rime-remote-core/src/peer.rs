@@ -177,6 +177,8 @@ pub struct Listed {
     pub clipboard_receive: bool,
     #[serde(default)]
     pub files: bool,
+    #[serde(default)]
+    pub handoff: bool,
 }
 
 impl Listed {
@@ -186,6 +188,7 @@ impl Listed {
             clipboard_send: computer.sends_clipboard(),
             clipboard_receive: computer.takes_clipboard(),
             files: computer.takes_files(),
+            handoff: computer.takes_handoff(),
             computer,
             presence: None,
             presence_ms: None,

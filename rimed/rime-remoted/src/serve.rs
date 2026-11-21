@@ -2127,7 +2127,15 @@ pub(crate) mod tests {
         // refusals above stop trying, so it is named here and nowhere else.
         assert_eq!(
             crate::computers::PEER_VERBS,
-            ["remote_hello", "peer_hello", "peer_tombstones", "peer_presence", "peer_offer", "peer_clipboard"]
+            [
+                "remote_hello",
+                "peer_hello",
+                "peer_tombstones",
+                "peer_presence",
+                "peer_offer",
+                "peer_clipboard",
+                "peer_handoff"
+            ]
         );
         // A clipboard copy from a computer that is not paired here, and from
         // one that is but whose copies are not taken, never reaches
@@ -2179,7 +2187,7 @@ pub(crate) mod tests {
         let mut names: Vec<&str> = every_reserved_verb();
         names.extend(crate::companion::ALLOWED_CHANNELS);
         names.extend([crate::phone::CHANNEL, crate::phone::TAKE, crate::photos::UPLOAD, "attach", "receive", "save_file"]);
-        names.extend([crate::files::FILE_VERB, "peer_file2", "PEER_FILE", "peer_clipboard"]);
+        names.extend([crate::files::FILE_VERB, "peer_file2", "PEER_FILE", "peer_clipboard", "peer_handoff"]);
         let mut requests: Vec<Vec<u8>> =
             names.iter().map(|n| format!(r#"{{"cmd":"{n}","id":1,"cols":80,"rows":24}}"#).into_bytes()).collect();
         requests.extend(AGENTD_AND_GARBAGE.iter().map(|l| l.as_bytes().to_vec()));

@@ -63,26 +63,28 @@ use crate::state::State;
 
 /// The only verbs a peer session may send. Everything else is refused before
 /// it is routed anywhere.
-pub const PEER_VERBS: [&str; 6] = [
+pub const PEER_VERBS: [&str; 7] = [
     "remote_hello",
     "peer_hello",
     "peer_tombstones",
     "peer_presence",
     crate::intro::PEER_VERB,
     crate::share::CLIP_VERB,
+    crate::handoff::PEER_VERB,
 ];
 
 /// The only channels a peer session may open.
 pub const PEER_CHANNELS: [&str; 1] = [crate::files::FILE_VERB];
 
 /// What a peer's `remote_hello` lists.
-pub const PEER_FEATURES: [&str; 6] = [
+pub const PEER_FEATURES: [&str; 7] = [
     "peer_hello",
     "peer_tombstones",
     "peer_presence",
     crate::intro::PEER_VERB,
     crate::share::CLIP_VERB,
     crate::files::FILE_VERB,
+    crate::handoff::PEER_VERB,
 ];
 
 /// The `kind` of the refusal a peer gets for anything outside the list.
@@ -139,6 +141,11 @@ pub fn peer_reply(state: &State, agentd: &std::path::Path, device_id: &str, line
         // rime-agentd is a request built there, never this line.
         Some(c) if PEER_VERBS.contains(&c) && c == crate::share::CLIP_VERB => {
             crate::share::answer_clip(state, agentd, device_id, line)
+        }
+        // A link offered as a card (handoff.rs): shown, never opened, until
+        // a person here presses Open.
+        Some(c) if PEER_VERBS.contains(&c) && c == crate::handoff::PEER_VERB => {
+            crate::handoff::answer(state, device_id, line)
         }
         other => refusal(other.unwrap_or("that request")),
     }
@@ -503,6 +510,7 @@ pub fn remove(state: &State, computer: &str) -> Reply {
     state.drop_connections_for(&c.id);
     state.presence.forget(&c.id);
     state.sharing.forget(&c.id);
+    crate::handoff::forget(state, &c.id);
     // Tell it now, so it removes this computer too (`presence.rs`).
     state.refresh.tell_now(&c.id);
     // And the phones, so they forget it (intro.rs).
@@ -557,6 +565,7 @@ pub fn share(
         clipboard_send: c.sends_clipboard(),
         clipboard_receive: c.takes_clipboard(),
         files: c.takes_files(),
+        handoff: c.takes_handoff(),
         id: c.id,
         name: c.name,
     }
@@ -709,6 +718,12 @@ mod tests {
         let r: serde_json::Value =
             serde_json::from_slice(&peer_reply(&state, "desk", br#"{"cmd":"peer_clipboard","text":"x"}"#)).expect("json");
         assert_eq!(r["kind"], "not_shared", "{r}");
+        // A link from a computer that is not paired here is answered by
+        // handoff.rs, and shown nowhere.
+        let r: serde_json::Value =
+            serde_json::from_slice(&peer_reply(&state, "desk", br#"{"cmd":"peer_handoff","url":"https://example.com"}"#))
+                .expect("json");
+        assert_eq!(r, json!({"reply": "peer_handoff", "shown": false, "why": "off"}));
     }
 
     #[test]

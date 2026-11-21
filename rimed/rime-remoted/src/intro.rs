@@ -308,6 +308,7 @@ fn joined_shown(name: &str, by: &str, computer: bool) -> crate::mirror::Shown {
         reply: None,
         actions: vec![(REMOVE_ACTION.to_string(), "Remove".to_string())],
         sticky: false,
+        expires_ms: None,
     }
 }
 

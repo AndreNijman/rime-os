@@ -197,7 +197,7 @@ pub struct Device {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_ms: Option<u64>,
     /// For another computer only: what this computer shares with it. Set by
-    /// a person here (`rime remote computers clipboard|files`) and by nothing
+    /// a person here (`rime remote computers clipboard|files|handoff`) and by nothing
     /// else: never read from another computer or a phone, never sent to one,
     /// and cleared when the computer is removed. See [`Share`].
     #[serde(default, skip_serializing_if = "Share::is_default")]
@@ -224,6 +224,11 @@ pub struct Share {
     /// default, which is on for a trusted computer.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub files: Option<bool>,
+    /// Links that computer offers ("Open on this computer?") are shown here
+    /// as cards. `None` is the default, which is on for a trusted computer.
+    /// A card opens nothing until a person presses Open on it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<bool>,
 }
 
 impl Share {
@@ -358,6 +363,12 @@ impl Device {
     /// trusted, and its files switch is not off (on by default).
     pub fn takes_files(&self) -> bool {
         self.is_active() && self.trusted() && self.share.files.unwrap_or(true)
+    }
+
+    /// Links this (other) computer offers are shown here as cards: it is
+    /// paired, trusted, and its handoff switch is not off (on by default).
+    pub fn takes_handoff(&self) -> bool {
+        self.is_active() && self.trusted() && self.share.handoff.unwrap_or(true)
     }
 }
 
@@ -1028,6 +1039,19 @@ impl DeviceStore {
             may_share_with(c)?;
         }
         c.share.files = Some(on);
+        Ok(c.clone())
+    }
+
+    /// `rime remote computers handoff`: whether links another computer
+    /// offers are shown here as cards. Turning it on is refused like the
+    /// clipboard's.
+    pub fn set_computer_handoff(&mut self, id_or_name: &str, on: bool) -> Result<Device, StoreError> {
+        let id = resolve_in(&self.computers, id_or_name)?;
+        let c = self.computers.get_mut(&id).expect("resolved");
+        if on {
+            may_share_with(c)?;
+        }
+        c.share.handoff = Some(on);
         Ok(c.clone())
     }
 
@@ -1989,6 +2013,7 @@ mod tests {
         let mut s = DeviceStore::default();
         let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 1).expect("a");
         let b = s.pair_computer(&raw(8), &own, "b", vec![], None, 1).expect("b");
+        s.set_computer_handoff(&b.id, false).expect("cards off");
         // A key sharing b's id but not b's key.
         let mut twin = [8u8; 32];
         twin[31] = 0;
@@ -2000,6 +2025,8 @@ mod tests {
         let applied = s.apply_tombstones(&a.id, &own, &[tomb(8, 5), tomb(9, 4)], 6);
         assert_eq!(applied.removed, std::slice::from_ref(&b.id));
         assert!(s.authenticate(&key(8)).is_none());
+        // Nothing chosen for it stays: the cards switch is cleared too.
+        assert_eq!(s.find_computer(&b.id).expect("b").share.handoff, None, "a removal kept the switch");
         let unknown = s.find_computer(&Device::id_for(&key(9))).expect("recorded").clone();
         assert_eq!((unknown.revoked_ms, unknown.name.as_str()), (Some(4), "c9"));
         assert!(s.authenticate(&key(9)).is_none());

@@ -332,6 +332,37 @@ pub enum ComputersCmd {
         #[arg(value_enum)]
         setting: OnOff,
     },
+    /// Whether links a paired computer offers (`open`) are shown here as cards.
+    ///
+    /// On by default for a computer you paired with a code, and for one your
+    /// phone added once you allowed it. A card opens nothing until you press
+    /// Open on it. Only you, at this machine, can change it; an agent cannot.
+    Handoff {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+        #[arg(value_enum)]
+        setting: OnOff,
+    },
+    /// Offer a web link to a paired computer: it shows a card, "Open a link
+    /// from <this computer>?", and opens the link only if you press Open there.
+    ///
+    /// Only http and https links with a host, no user name or password, and up
+    /// to 2,048 bytes. The card goes after ten minutes, or when dismissed, and
+    /// nothing waits to be sent later. Only you, at this machine, can offer a
+    /// link; an agent cannot.
+    Open {
+        /// Computer id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        computer: String,
+        /// The link, or `-` to read it from standard input.
+        url: String,
+        /// A title the card shows under the link's host (plain text, up to 200 characters).
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Send files to a paired computer: each lands in its Downloads.
     ///
     /// Only while the other computer is on and reachable: nothing waits to
@@ -602,6 +633,16 @@ enum Request {
         #[serde(skip_serializing_if = "Option::is_none")]
         via: Option<&'static str>,
     },
+    ComputerHandoff {
+        computer: String,
+        url: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    ComputerHandoffSwitch {
+        computer: String,
+        on: bool,
+    },
     PhotosSave {
         #[serde(skip_serializing_if = "Option::is_none")]
         device: Option<String>,
@@ -812,6 +853,15 @@ enum Reply {
         clipboard_send: bool,
         clipboard_receive: bool,
         files: bool,
+        #[serde(default)]
+        handoff: bool,
+    },
+    ComputerHandoff {
+        id: String,
+        name: String,
+        shown: bool,
+        #[serde(default)]
+        why: Option<String>,
     },
     ComputerSent {
         id: String,
@@ -889,6 +939,10 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
             ComputersCmd::Files { computer, setting } => {
                 computers_share(Request::ComputerFiles { computer, on: setting == OnOff::On })
             }
+            ComputersCmd::Handoff { computer, setting } => {
+                computers_share(Request::ComputerHandoffSwitch { computer, on: setting == OnOff::On })
+            }
+            ComputersCmd::Open { computer, url, title, json } => computers_open(&computer, &url, title, json),
             ComputersCmd::Send { computer, files, via } => computers_send(&computer, &files, via),
         },
         RemoteCmd::Status { json } => status(json),
@@ -1983,7 +2037,11 @@ fn computers_table(computers: &[rime_remote_core::peer::Listed]) -> String {
             out.push_str(&format!("{:<18} {} ({})\n", "", presence_words(p), ago(at)));
         }
         if c.is_active() {
-            out.push_str(&format!("{:<18} {}\n", "", sharing_words(l.clipboard_send, l.clipboard_receive, l.files)));
+            out.push_str(&format!(
+                "{:<18} {}\n",
+                "",
+                sharing_words(l.clipboard_send, l.clipboard_receive, l.files, l.handoff)
+            ));
         }
     }
     out
@@ -2093,8 +2151,8 @@ fn computers_allow(computer: &str) -> Result<i32> {
 
 fn computers_share(req: Request) -> Result<i32> {
     match call(&req)? {
-        Reply::ComputerShared { id, name, clipboard_send, clipboard_receive, files } => {
-            eprintln!("rime: {name} ({id}): {}.", sharing_words(clipboard_send, clipboard_receive, files));
+        Reply::ComputerShared { id, name, clipboard_send, clipboard_receive, files, handoff } => {
+            eprintln!("rime: {name} ({id}): {}.", sharing_words(clipboard_send, clipboard_receive, files, handoff));
             if matches!(req, Request::ComputerClipboard { send: true, .. } | Request::ComputerClipboard { receive: true, .. }) {
                 eprintln!(
                     "rime: a copy goes between two computers only when both have it on: run the same on {name} \
@@ -2148,15 +2206,80 @@ fn computers_send(computer: &str, files: &[PathBuf], via: Via) -> Result<i32> {
     Ok(code)
 }
 
-/// "clipboard sent and taken, files taken": what is shared with a computer.
-fn sharing_words(send: bool, receive: bool, files: bool) -> String {
+/// "clipboard sent and taken, files taken, links shown": what is shared
+/// with a computer.
+fn sharing_words(send: bool, receive: bool, files: bool, handoff: bool) -> String {
     let clipboard = match (send, receive) {
         (true, true) => "clipboard sent and taken",
         (true, false) => "clipboard sent, not taken",
         (false, true) => "clipboard taken, not sent",
         (false, false) => "clipboard not shared",
     };
-    format!("{clipboard}, {}", if files { "files taken" } else { "files refused" })
+    format!(
+        "{clipboard}, {}, {}",
+        if files { "files taken" } else { "files refused" },
+        if handoff { "links shown" } else { "links refused" }
+    )
+}
+
+/// The most `rime remote computers open <computer> -` reads: one byte over
+/// the longest link, so an overlong one is refused rather than cut.
+const OPEN_STDIN_CAP: u64 = 2049;
+
+/// The link `open` was given: itself, or standard input's first line for `-`.
+fn open_link(url: &str, stdin: impl std::io::Read) -> Result<String> {
+    use std::io::Read as _;
+    if url != "-" {
+        return Ok(url.to_string());
+    }
+    let mut raw = Vec::new();
+    stdin.take(OPEN_STDIN_CAP + 2).read_to_end(&mut raw)?;
+    let text = String::from_utf8(raw).map_err(|_| anyhow::anyhow!("the link on standard input is not UTF-8"))?;
+    let line = text.strip_suffix('\n').unwrap_or(&text);
+    let line = line.strip_suffix('\r').unwrap_or(line);
+    if line.len() as u64 > OPEN_STDIN_CAP - 1 {
+        anyhow::bail!("the link on standard input is over 2,048 bytes");
+    }
+    Ok(line.to_string())
+}
+
+/// What `open` says when the card was not shown, for each fixed reason.
+fn handoff_words(name: &str, why: Option<&str>) -> String {
+    match why {
+        Some("off") => format!(
+            "{name} does not show links from this computer (run `rime remote computers handoff <this computer> on` \
+             there, or allow this computer there first)"
+        ),
+        Some("busy") => format!("{name} already has links from this computer waiting; try again in a moment"),
+        Some("offline") => format!("{name} could not be reached; nothing waits to be sent later"),
+        Some("unsupported") => format!("{name} runs a Rime that does not take links yet"),
+        _ => format!("{name} did not show the link"),
+    }
+}
+
+fn computers_open(computer: &str, url: &str, title: Option<String>, json: bool) -> Result<i32> {
+    let url = open_link(url, std::io::stdin().lock())?;
+    let req = Request::ComputerHandoff { computer: computer.to_string(), url, title };
+    match call_for(&req, None, COMPUTER_WAIT)? {
+        Reply::ComputerHandoff { id, name, shown, why } => {
+            if json {
+                println!("{}", serde_json::json!({"id": id, "name": name, "shown": shown, "why": why}));
+            } else if shown {
+                eprintln!("rime: {name} ({id}) shows the link; it opens there only if Open is pressed.");
+            } else {
+                eprintln!("rime: {}.", handoff_words(&name, why.as_deref()));
+            }
+            Ok(if shown { 0 } else { 1 })
+        }
+        Reply::Error { message } => {
+            if json {
+                println!("{}", serde_json::json!({"error": message}));
+            }
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
 }
 
 fn computers_ping(computer: &str, via: Via, json: bool) -> Result<i32> {
@@ -2824,22 +2947,24 @@ mod tests {
         assert!(table.contains("battery 81%, balanced, locked, Wi-Fi, up 2h"), "{table}");
         // The header, two rows, the presence and what is shared with desk.
         assert_eq!(table.lines().count(), 5, "{table}");
-        assert!(table.contains("clipboard not shared, files refused"), "{table}");
+        assert!(table.contains("clipboard not shared, files refused, links refused"), "{table}");
     }
 
     #[test]
     fn the_computers_table_and_json_show_each_computers_switches() {
         let text = r#"{"reply":"computers","computers":[
-            {"id":"aaaa","name":"desk","public_key":"k","paired_ms":1,"clipboard_send":true,"clipboard_receive":true,"files":true},
+            {"id":"aaaa","name":"desk","public_key":"k","paired_ms":1,"clipboard_send":true,"clipboard_receive":true,"files":true,
+             "handoff":true},
             {"id":"bbbb","name":"lab","public_key":"k2","paired_ms":1,"clipboard_receive":true,"files":false}]}"#;
         let Reply::Computers { computers } = serde_json::from_str::<Reply>(text).expect("reply") else {
             panic!("not computers")
         };
         let table = computers_table(&computers);
-        assert!(table.contains("clipboard sent and taken, files taken"), "{table}");
-        assert!(table.contains("clipboard taken, not sent, files refused"), "{table}");
+        assert!(table.contains("clipboard sent and taken, files taken, links shown"), "{table}");
+        assert!(table.contains("clipboard taken, not sent, files refused, links refused"), "{table}");
         let json = serde_json::to_value(&computers).expect("json");
         assert_eq!((json[0]["clipboard_send"].clone(), json[1]["files"].clone()), (serde_json::json!(true), serde_json::json!(false)));
+        assert_eq!((json[0]["handoff"].clone(), json[1]["handoff"].clone()), (serde_json::json!(true), serde_json::json!(false)));
     }
 
     #[test]
@@ -2877,6 +3002,80 @@ mod tests {
         )
         .expect("shared");
         assert!(matches!(r, Reply::ComputerShared { clipboard_send: true, clipboard_receive: false, files: true, .. }));
+        // The handoff switch: on or off only.
+        assert!(parse(&["computers", "handoff", "desk", "send"]).is_err());
+        assert!(parse(&["computers", "handoff", "desk"]).is_err());
+        match parse(&["computers", "handoff", "desk", "off"]).expect("handoff").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Handoff { computer, setting } } => {
+                assert_eq!((computer.as_str(), setting), ("desk", OnOff::Off));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            wire(&Request::ComputerHandoffSwitch { computer: "d".into(), on: true }),
+            r#"{"cmd":"computer_handoff_switch","computer":"d","on":true}"#
+        );
+        let r: Reply = serde_json::from_str(
+            r#"{"reply":"computer_shared","id":"d","name":"desk","clipboard_send":false,"clipboard_receive":false,"files":true,
+                "handoff":false}"#,
+        )
+        .expect("shared");
+        assert!(matches!(r, Reply::ComputerShared { handoff: false, files: true, .. }));
+        assert_eq!(sharing_words(false, false, true, false), "clipboard not shared, files taken, links refused");
+    }
+
+    #[test]
+    fn open_offers_one_link_with_an_optional_title_and_reads_it_from_stdin_for_a_dash() {
+        use clap::Parser;
+        #[derive(clap::Parser)]
+        struct Cli {
+            #[command(subcommand)]
+            cmd: RemoteCmd,
+        }
+        let parse = |args: &[&str]| Cli::try_parse_from(std::iter::once("r").chain(args.iter().copied()));
+        match parse(&["computers", "open", "desk", "https://example.com/a", "--title", "The docs", "--json"]).expect("open").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Open { computer, url, title, json } } => {
+                assert_eq!((computer.as_str(), url.as_str(), title.as_deref(), json), ("desk", "https://example.com/a", Some("The docs"), true));
+            }
+            other => panic!("{other:?}"),
+        }
+        match parse(&["computers", "open", "desk", "-"]).expect("stdin").cmd {
+            RemoteCmd::Computers { action: ComputersCmd::Open { url, title: None, json: false, .. } } => assert_eq!(url, "-"),
+            other => panic!("{other:?}"),
+        }
+        assert!(parse(&["computers", "open", "desk"]).is_err(), "a link is needed");
+        assert!(parse(&["computers", "open", "desk", "https://a", "https://b"]).is_err(), "one link");
+        let wire = |r: &Request| serde_json::to_string(r).unwrap();
+        assert_eq!(
+            wire(&Request::ComputerHandoff { computer: "d".into(), url: "https://example.com".into(), title: None }),
+            r#"{"cmd":"computer_handoff","computer":"d","url":"https://example.com"}"#
+        );
+        assert_eq!(
+            wire(&Request::ComputerHandoff { computer: "d".into(), url: "https://e.com".into(), title: Some("T".into()) }),
+            r#"{"cmd":"computer_handoff","computer":"d","url":"https://e.com","title":"T"}"#
+        );
+        for (text, shown, why) in [
+            (r#"{"reply":"computer_handoff","id":"d","name":"desk","shown":true}"#, true, None),
+            (r#"{"reply":"computer_handoff","id":"d","name":"desk","shown":false,"why":"busy"}"#, false, Some("busy")),
+        ] {
+            let Reply::ComputerHandoff { shown: s, why: w, .. } = serde_json::from_str::<Reply>(text).expect("reply") else {
+                panic!("{text}")
+            };
+            assert_eq!((s, w.as_deref()), (shown, why));
+        }
+        for why in ["off", "busy", "offline", "unsupported"] {
+            assert_ne!(handoff_words("desk", Some(why)), handoff_words("desk", None), "{why}");
+        }
+        // `-`: standard input's one line, its newline dropped; an overlong
+        // one is refused, not cut.
+        assert_eq!(open_link("https://x.example", &b"ignored"[..]).expect("arg"), "https://x.example");
+        assert_eq!(open_link("-", &b"https://x.example/a\n"[..]).expect("stdin"), "https://x.example/a");
+        assert_eq!(open_link("-", &b"https://x.example/a\r\n"[..]).expect("stdin"), "https://x.example/a");
+        let longest = format!("https://x.example/{}", "a".repeat(2048 - 18));
+        assert_eq!(longest.len(), 2048);
+        assert_eq!(open_link("-", format!("{longest}\n").as_bytes()).expect("longest"), longest);
+        assert!(open_link("-", format!("{longest}a\n").as_bytes()).is_err());
+        assert!(open_link("-", &[0xff, 0xfe][..]).is_err());
     }
 
     #[test]
@@ -3205,6 +3404,8 @@ mod tests {
                 | ComputersCmd::Ping { computer, .. }
                 | ComputersCmd::Clipboard { computer, .. }
                 | ComputersCmd::Files { computer, .. }
+                | ComputersCmd::Handoff { computer, .. }
+                | ComputersCmd::Open { computer, .. }
                 | ComputersCmd::Send { computer, .. } => Some(computer),
                 ComputersCmd::Add { .. } | ComputersCmd::List { .. } => None,
             },
@@ -3255,6 +3456,11 @@ mod tests {
             &["computers", "clipboard", ID, "receive"],
             &["computers", "clipboard", "--", ID, "off"],
             &["computers", "files", ID, "off"],
+            &["computers", "handoff", ID, "off"],
+            &["computers", "handoff", "--", ID, "on"],
+            &["computers", "open", ID, "https://example.com"],
+            &["computers", "open", ID, "-", "--json"],
+            &["computers", "open", "--json", ID, "https://example.com", "--title", "Docs"],
             &["computers", "send", ID, "a.txt"],
             &["computers", "send", ID, "a.txt", "b.pdf"],
             &["computers", "send", "--", ID, "a.txt"],
