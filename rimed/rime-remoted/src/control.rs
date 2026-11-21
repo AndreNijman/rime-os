@@ -94,6 +94,15 @@ pub enum Request {
     /// keyboard: `on` or `off` (§2.16). A person at this machine only;
     /// lowering it ends the phone's live input channel at once.
     DeviceGrant { device: String, input: String },
+    /// Stop the phone using this computer as a touchpad (only `device`, by id
+    /// or name, when given), without changing its grant; it is refused a new
+    /// channel for 30 s unless a person raises the grant again (§2.16).
+    InputStop {
+        #[serde(default)]
+        device: Option<String>,
+    },
+    /// Which phone, if any, is using this computer as a touchpad.
+    InputStatus,
     /// Make a paired phone ring, by id or name.
     Ring { device: String },
     /// Set Do Not Disturb on every connected phone that said it follows this
@@ -392,6 +401,19 @@ pub enum Reply {
     /// Whether a phone may now use this computer as a touchpad and keyboard;
     /// `stopped` when lowering it ended a live input channel.
     DeviceGranted { id: String, name: String, input: String, stopped: bool },
+    /// Whether `input_stop` ended a live touchpad channel.
+    InputStopped { stopped: bool },
+    /// The phone using this computer as a touchpad, when `live`: its id, its
+    /// name (bounded, no control characters) and when it started.
+    InputStatus {
+        live: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        since_ms: Option<u64>,
+    },
     /// Another computer saved a file sent to it, as `file` in its Downloads.
     ComputerSent { id: String, name: String, file: String, bytes: u64 },
     /// Another computer answered `peer_hello`: what it calls itself, its
@@ -554,6 +576,8 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         Request::Revoke { device } => revoke(state, &device),
         Request::DeviceAllow { device } => allow_device(state, &device),
         Request::DeviceGrant { device, input } => grant_device(state, &device, &input),
+        Request::InputStop { device } => input_stop(state, device.as_deref()),
+        Request::InputStatus => input_status(),
         Request::Ring { device } => ring(state, &device),
         Request::Focus { dnd } => focus(state, dnd),
         Request::Clipboard { text, sensitive } => {
@@ -719,6 +743,14 @@ fn authorized_by(
         // decision, like pairing: an agent could otherwise give itself hands
         // on this desktop through a phone (§2.16).
         Request::DeviceGrant { .. } => computers_caller(peer, observe, may_grant_input),
+        // Stopping a touchpad is the safe direction, like revoking: this
+        // user's own processes, whatever their origin. An agent that stops it
+        // costs the person a tap on the phone; refusing a script or the Shell
+        // would make the stop harder to reach than the grant it does not
+        // touch. Only this socket answers it, and only to this user: a phone,
+        // its companion key or another computer never reaches this socket
+        // (`serve.rs` answers none of them `input_stop`).
+        Request::InputStop { .. } | Request::InputStatus => own_user(peer),
         // What is shared with another computer, and from it: a person's
         // decision, like pairing. An agent could otherwise turn a computer's
         // clipboard into a feed.
@@ -1162,6 +1194,11 @@ fn grant_device(state: &State, device: &str, input: &str) -> Reply {
         return Reply::error(format!("the device was not written: {e}"));
     }
     drop(store);
+    // A person raised it: a stop at the computer no longer holds this phone
+    // off (§2.16's cool-down).
+    if on {
+        crate::input::lift_cool_down(&d.id);
+    }
     // Whenever it is off, not only when this call lowered it: stopping a
     // channel that is not there costs nothing.
     let stopped = !on && crate::input::stop_for(&d.id, crate::input::Why::NotAllowed);
@@ -1170,6 +1207,36 @@ fn grant_device(state: &State, device: &str, input: &str) -> Reply {
         name: d.name,
         input: if on { "on" } else { "off" }.into(),
         stopped,
+    }
+}
+
+/// `rime remote devices touchpad stop [<phone>]` and the Shell's Stop
+/// (§2.16): end the live touchpad channel through the same path as a lowered
+/// grant, telling the phone `stopped`. The grant is left as it is.
+fn input_stop(state: &State, device: Option<&str>) -> Reply {
+    let id = match device {
+        None => None,
+        Some(named) => match state.devices() {
+            Ok(store) => match store.find(named) {
+                Ok(d) => Some(d.id.clone()),
+                Err(e) => return Reply::error(e.to_string()),
+            },
+            Err(e) => return Reply::error(e.to_string()),
+        },
+    };
+    let stopped = crate::input::stop_here(id.as_deref(), std::time::Instant::now()).is_some();
+    Reply::InputStopped { stopped }
+}
+
+fn input_status() -> Reply {
+    match crate::input::shown() {
+        Some(s) => Reply::InputStatus {
+            live: true,
+            device: Some(s.device),
+            name: Some(s.name),
+            since_ms: Some(s.since_ms),
+        },
+        None => Reply::InputStatus { live: false, device: None, name: None, since_ms: None },
     }
 }
 
@@ -1680,8 +1747,64 @@ fn photos_save(state: &State, device: Option<&str>, photo: u64, fds: Vec<OwnedFd
 const MAY_PAIR: [RequestOrigin; 2] = [RequestOrigin::LocalTerminal, RequestOrigin::RimeShell];
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// `grant_device`'s reply on the wire, for the touchpad's own tests.
+    pub(crate) fn grant(state: &State, device: &str, input: &str) -> String {
+        serde_json::to_string(&grant_device(state, device, input)).expect("reply")
+    }
+
+    #[test]
+    fn any_process_of_this_user_may_stop_the_touchpad_and_nobody_else() {
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let reqs = [
+            Request::InputStop { device: None },
+            Request::InputStop { device: Some("pixel".into()) },
+            Request::InputStatus,
+        ];
+        // Every origin, an agent and a scheduled job too: stopping is the
+        // safe direction, like revoking. Not even the origin is asked.
+        for o in RequestOrigin::ALL {
+            for req in &reqs {
+                assert!(authorized_by(req, Some(me), |_| Ok(*o)).is_ok(), "{o} {req:?}");
+            }
+        }
+        for req in &reqs {
+            assert!(authorized_by(req, Some(me), |_| Err("no cgroup".into())).is_ok(), "{req:?}");
+            // Another account, or a connection the kernel cannot name: never.
+            for uid in [0, me.uid.wrapping_add(1)] {
+                let foreign = crate::peer::Peer { uid, ..me };
+                let why = authorized_by(req, Some(foreign), |_| Ok(RequestOrigin::LocalTerminal))
+                    .expect_err("another account stopped the touchpad");
+                assert!(why.contains("does not belong to this user"), "{why}");
+            }
+            assert!(authorized_by(req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        }
+        assert_eq!(serde_json::to_string(&reqs[0]).unwrap(), r#"{"cmd":"input_stop","device":null}"#);
+        let parsed: Request = serde_json::from_str(r#"{"cmd":"input_stop"}"#).expect("no device");
+        assert!(matches!(parsed, Request::InputStop { device: None }));
+        assert_eq!(
+            serde_json::to_string(&Reply::InputStopped { stopped: false }).unwrap(),
+            r#"{"reply":"input_stopped","stopped":false}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&input_status()).unwrap(),
+            r#"{"reply":"input_status","live":false}"#
+        );
+    }
+
+    #[test]
+    fn stopping_a_phone_that_is_not_paired_says_so() {
+        let (state, sdir) = crate::serve::tests::a_state("input-stop-unknown");
+        let r = serde_json::to_string(&input_stop(&state, Some("nobody"))).expect("reply");
+        assert!(r.contains(r#""reply":"error""#), "{r}");
+        let _ = std::fs::remove_dir_all(sdir);
+    }
 
     #[test]
     fn every_origin_that_may_pair_is_local_and_no_other_is() {
