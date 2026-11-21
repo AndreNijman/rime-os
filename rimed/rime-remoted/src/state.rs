@@ -127,6 +127,9 @@ pub struct State {
     pub files: Arc<crate::files::Files>,
     /// Links other computers offered, waiting for Open (§2.15, handoff.rs).
     pub handoff: crate::handoff::Handoff,
+    /// Agents across computers (M4, agents.rs): attachments, rates, and what
+    /// other computers said they let this one do. Memory only.
+    pub agents: crate::agents::Agents,
     /// Which Do Not Disturb was last handed the Shell, per phone (§2.9).
     focus_seen: crate::phone::FocusSeen,
     /// Where a phone's Do Not Disturb is written for the Shell; see
@@ -211,6 +214,7 @@ impl State {
             sharing: crate::share::Sharing::default(),
             files: Arc::default(),
             handoff: crate::handoff::Handoff::default(),
+            agents: crate::agents::Agents::default(),
             focus_seen: crate::phone::FocusSeen::default(),
             focus_file: Mutex::new(None),
             nexd: Mutex::new(None),

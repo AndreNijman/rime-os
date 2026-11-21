@@ -403,8 +403,10 @@ fn refuses_own_key(state: &State, key: &[u8; 32]) -> bool {
 /// full session may open any (what is behind it decides); a companion session
 /// only a request the allow list names AND the phone routers' own predicates
 /// claim, so nothing it opens can fall through to nex or `rime-agentd`; a
-/// peer session (another computer) a file it sends and nothing else, which
-/// the channel opener routes on the scope, never to `rime-agentd`.
+/// peer session (another computer) a file it sends or an agent attach and
+/// nothing else, which the channel opener routes on the scope: the attach
+/// only as far as the grant a person here gave that computer (`agents.rs`
+/// checks it before anything else), never the peer's request passed on.
 fn may_open(scope: Scope, request: &[u8]) -> bool {
     match scope {
         Scope::Full => true,
@@ -911,7 +913,24 @@ impl Worker {
         // close, exactly like a takeover the daemon refused.
         // `keep`: whether the channel goes in the map. A one-shot nex answer
         // ends by itself once its bytes are out, so it is never kept.
-        let opened = if self.scope == Scope::Peer {
+        let opened = if self.scope == Scope::Peer
+            && crate::companion::verb_of(request).as_deref() == Some(crate::agents::ATTACH_VERB)
+        {
+            // An agent session's terminal, for a computer a person here gave
+            // `control`: agents.rs checks the grant, the fields and the cap,
+            // then builds its own `attach`. The slot rides the channel, so
+            // the attachment counts until it is detached.
+            crate::agents::open_attach(&self.state, &self.agentd, &self.device_id, request)
+                .map(|(stream, reply, buffered, slot)| {
+                    let ch = DaemonChannel {
+                        stream,
+                        read_only: false,
+                        _slot: Some(slot),
+                    };
+                    (ch, reply, buffered, true)
+                })
+                .map_err(crate::proxy::ProxyError::NotTakenOver)
+        } else if self.scope == Scope::Peer {
             // Another computer's file, and only that: `may_open` let nothing
             // else through, and nothing a peer opens falls to the routes
             // below. Its bytes are checked and saved by files.rs, which
@@ -921,6 +940,7 @@ impl Worker {
                     let ch = DaemonChannel {
                         stream,
                         read_only: false,
+                        _slot: None,
                     };
                     (ch, reply, Vec::new(), true)
                 })
@@ -944,6 +964,7 @@ impl Worker {
                     let ch = DaemonChannel {
                         stream,
                         read_only: true,
+                        _slot: None,
                     };
                     (ch, crate::phone::opened_reply(), Vec::new(), true)
                 })
@@ -962,6 +983,7 @@ impl Worker {
                     let ch = DaemonChannel {
                         stream,
                         read_only: true,
+                        _slot: None,
                     };
                     (ch, reply, Vec::new(), true)
                 })
@@ -977,6 +999,7 @@ impl Worker {
                     let ch = DaemonChannel {
                         stream,
                         read_only: false,
+                        _slot: None,
                     };
                     (ch, reply, Vec::new(), true)
                 })
@@ -987,6 +1010,7 @@ impl Worker {
                     let ch = DaemonChannel {
                         stream: o.stream,
                         read_only: true,
+                        _slot: None,
                     };
                     (ch, o.reply, o.buffered, o.feed)
                 })
@@ -1362,6 +1386,9 @@ struct DaemonChannel {
     /// to nexd. The feed is for reading; every write goes through `nex` on
     /// the control channel, where it is one request with one reply.
     read_only: bool,
+    /// Another computer's agent attachment: its place under the cap, given
+    /// back when the channel is detached (`agents.rs`).
+    _slot: Option<crate::agents::Slot>,
 }
 
 impl DaemonChannel {
@@ -1394,6 +1421,7 @@ impl DaemonChannel {
             DaemonChannel {
                 stream,
                 read_only: false,
+                _slot: None,
             },
             reply,
             buffered,
@@ -1700,6 +1728,7 @@ pub(crate) mod tests {
         let ch = DaemonChannel {
             stream: a,
             read_only: true,
+            _slot: None,
         };
         ch.write(b"{\"method\":\"system.shutdown\"}\n").expect("dropped, not failed");
         drop(ch); // shuts the stream down: b now reads end-of-file
@@ -1797,7 +1826,7 @@ pub(crate) mod tests {
         assert!(matches!(c.route(7), Route::Worker));
         // The worker finishes the Open and publishes the channel...
         let (ours, _theirs) = std::os::unix::net::UnixStream::pair().expect("pair");
-        c.open.insert(7, Arc::new(DaemonChannel { stream: ours, read_only: false }));
+        c.open.insert(7, Arc::new(DaemonChannel { stream: ours, read_only: false, _slot: None }));
         c.done(7);
         // ...but two Data frames are still queued behind it, so a third must
         // queue too rather than overtake them.
@@ -1961,6 +1990,104 @@ pub(crate) mod tests {
         (sock, count)
     }
 
+    /// A stand-in `rime-agentd` that keeps every line of every connection
+    /// and answers `ok` to the declaration, then `sessions` to a list and an
+    /// error to anything else.
+    fn recording_agentd(dir: &Path) -> (PathBuf, Arc<Mutex<Vec<Vec<String>>>>) {
+        use std::io::BufRead;
+        let sock = dir.join("recording-agentd.sock");
+        let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
+        let seen: Arc<Mutex<Vec<Vec<String>>>> = Arc::default();
+        let kept = Arc::clone(&seen);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().flatten() {
+                let n = {
+                    let mut k = kept.lock().expect("lock");
+                    k.push(Vec::new());
+                    k.len() - 1
+                };
+                let mut w = stream.try_clone().expect("clone");
+                let mut r = std::io::BufReader::new(stream);
+                let mut line = String::new();
+                while r.read_line(&mut line).is_ok_and(|n| n > 0) {
+                    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap_or_default();
+                    kept.lock().expect("lock")[n].push(line.trim().to_string());
+                    let answer = match v["cmd"].as_str() {
+                        Some("declare_origin") => r#"{"reply":"ok"}"#,
+                        Some("list") => r#"{"reply":"sessions","sessions":[]}"#,
+                        _ => r#"{"reply":"error","kind":"no_such_session","message":"no session 9 \u001b]52;c;?\u0007"}"#,
+                    };
+                    let _ = writeln!(w, "{answer}");
+                    line.clear();
+                }
+            }
+        });
+        (sock, seen)
+    }
+
+    #[test]
+    fn a_granted_peer_reaches_rime_agentd_only_with_requests_built_here_as_computer_origin() {
+        let (state, dir) = a_state("peer-agents");
+        let (agentd, seen) = recording_agentd(&dir);
+        let peer = {
+            let mut store = state.devices().expect("store");
+            let c = store.pair_computer(&[62; 32], &state.identity.public_bytes(), "desk", vec![], None, 1).expect("pair");
+            state.save_devices(&store).expect("save");
+            c
+        };
+        let ask = |line: &str| -> serde_json::Value {
+            serde_json::from_slice(&reply_to(&state, &agentd, &peer.id, Scope::Peer, 0, line.as_bytes())).expect("json")
+        };
+        let grant = |g| {
+            let mut store = state.devices().expect("store");
+            store.set_computer_agents(&peer.id, g).expect("grant");
+            state.save_devices(&store).expect("save");
+        };
+        // No grant: refused like any verb off the list, no feature, no hint.
+        let hello = ask(r#"{"cmd":"remote_hello"}"#);
+        assert!(hello.get("agents").is_none(), "{hello}");
+        assert!(!hello["features"].as_array().expect("features").iter().any(|f| f == crate::agents::FEATURE));
+        for line in [r#"{"cmd":"peer_agents"}"#, r#"{"cmd":"peer_agent_peek","id":1}"#] {
+            assert_eq!(ask(line)["kind"], crate::computers::REFUSAL, "{line}");
+        }
+        assert!(seen.lock().expect("lock").is_empty(), "an ungranted peer reached rime-agentd");
+        // View: the hint, and a list that reaches rime-agentd as the
+        // computer, with a line built here (the peer's extra fields are gone).
+        grant(Some(rime_remote_core::device::AgentGrant::View));
+        let hello = ask(r#"{"cmd":"remote_hello"}"#);
+        assert_eq!(hello["agents"], "view", "{hello}");
+        assert!(hello["features"].as_array().expect("features").iter().any(|f| f == crate::agents::FEATURE));
+        let v = ask(r#"{"cmd":"peer_agents","all":true,"cmd2":"decide"}"#);
+        assert_eq!((v["reply"].as_str(), v["sessions"].clone()), (Some("peer_agents"), serde_json::json!([])), "{v}");
+        let v = ask(r#"{"cmd":"peer_agent_peek","id":9,"bytes":10,"decision":"approve"}"#);
+        // rime-agentd's text is not passed on; its kind is.
+        assert_eq!((v["kind"].as_str(), v["message"].as_str()), (Some("no_such_session"), Some("the agent runtime refused it")), "{v}");
+        assert_eq!(ask(r#"{"cmd":"peer_agent_resize","id":9,"cols":80,"rows":24}"#)["kind"], crate::computers::REFUSAL);
+        // Control: a resize too.
+        grant(Some(rime_remote_core::device::AgentGrant::Control));
+        assert_eq!(ask(r#"{"cmd":"peer_agent_resize","id":9,"cols":80,"rows":24}"#)["kind"], "no_such_session");
+        // What reached rime-agentd, exactly.
+        let lines = seen.lock().expect("lock").clone();
+        assert_eq!(lines.len(), 3, "{lines:?}");
+        for conn in &lines {
+            let first: serde_json::Value = serde_json::from_str(&conn[0]).expect("json");
+            assert_eq!(first["cmd"], "declare_origin");
+            assert_eq!(first["origin"], "claude-remote-control");
+            assert_eq!(first["actor"], format!("computer:{}", peer.id));
+            assert_eq!(conn.len(), 2, "{conn:?}");
+        }
+        let built: Vec<serde_json::Value> = lines.iter().map(|c| serde_json::from_str(&c[1]).expect("json")).collect();
+        assert_eq!(built[0], serde_json::json!({"cmd": "list"}));
+        assert_eq!(built[1], serde_json::json!({"cmd": "peek", "id": 9, "bytes": 10}));
+        assert_eq!(built[2], serde_json::json!({"cmd": "resize", "id": 9, "cols": 80, "rows": 24}));
+        // Approvals are never reachable: those verbs are refused at any grant.
+        for line in [r#"{"cmd":"decide","id":1,"decision":"approve"}"#, r#"{"cmd":"requests"}"#, r#"{"cmd":"input","id":1,"data":"x"}"#] {
+            assert_eq!(ask(line)["kind"], crate::computers::REFUSAL, "{line}");
+        }
+        assert_eq!(seen.lock().expect("lock").len(), 3, "an approval verb reached rime-agentd");
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
     #[test]
     fn every_channel_a_router_claims_is_decided_and_only_the_phones_open() {
         // Candidates: every name a module answers or routes, `rime-agentd`'s
@@ -2110,7 +2237,9 @@ pub(crate) mod tests {
             .into_iter()
             .chain(CONTROL_VERBS)
             // A file is a channel, never a control line.
-            .chain([crate::files::FILE_VERB])
+            .chain([crate::files::FILE_VERB, crate::agents::ATTACH_VERB])
+            // The agent verbs, from a computer nobody here granted anything.
+            .chain(crate::agents::VERBS)
             .filter(|v| !crate::computers::PEER_VERBS.contains(v))
             .map(|v| format!(r#"{{"cmd":"{v}"}}"#))
             .chain(AGENTD_AND_GARBAGE.iter().map(|l| l.to_string()))
@@ -2148,6 +2277,9 @@ pub(crate) mod tests {
                 "peer_handoff"
             ]
         );
+        // And the agent verbs, which answer only as far as a grant goes.
+        assert_eq!(crate::agents::VERBS, ["peer_agents", "peer_agent_peek", "peer_agent_resize"]);
+        assert_eq!(crate::computers::PEER_CHANNELS, ["peer_file", "peer_agent_attach"]);
         // A clipboard copy from a computer that is not paired here, and from
         // one that is but whose copies are not taken, never reaches
         // rime-agentd; nor does one while the screen is locked or its lock
@@ -2199,6 +2331,7 @@ pub(crate) mod tests {
         names.extend(crate::companion::ALLOWED_CHANNELS);
         names.extend([crate::phone::CHANNEL, crate::phone::TAKE, crate::photos::UPLOAD, "attach", "receive", "save_file"]);
         names.extend([crate::files::FILE_VERB, "peer_file2", "PEER_FILE", "peer_clipboard", "peer_handoff"]);
+        names.extend([crate::agents::ATTACH_VERB, "peer_agent_attach2", "peer_agents", "peer_agent_peek"]);
         let mut requests: Vec<Vec<u8>> =
             names.iter().map(|n| format!(r#"{{"cmd":"{n}","id":1,"cols":80,"rows":24}}"#).into_bytes()).collect();
         requests.extend(AGENTD_AND_GARBAGE.iter().map(|l| l.as_bytes().to_vec()));
@@ -2215,7 +2348,9 @@ pub(crate) mod tests {
         }
         opened.sort();
         opened.dedup();
-        assert_eq!(opened, [crate::files::FILE_VERB], "a peer opens a channel nobody decided");
+        // The attach channel opens only as far as the grant goes, which
+        // agents.rs checks before anything else (its own tests).
+        assert_eq!(opened, [crate::agents::ATTACH_VERB, crate::files::FILE_VERB], "a peer opens a channel nobody decided");
         assert!(!crate::companion::allowed(Scope::Peer, None));
         // A file is a channel on a peer link only: a phone's session and a
         // companion link never reach files.rs.

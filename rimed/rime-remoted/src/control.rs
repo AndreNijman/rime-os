@@ -222,6 +222,27 @@ pub enum Request {
     /// Whether links another computer offers are shown here as cards. A
     /// person at this machine only.
     ComputerHandoffSwitch { computer: String, on: bool },
+    /// What another computer may do with this computer's agent sessions:
+    /// `off`, `view` or `control` (M4). A person at this machine only;
+    /// lowering it ends that computer's live attachments here.
+    ComputerGrant { computer: String, agents: String },
+    /// Another computer's agent sessions, as far as it lets this one see them.
+    ComputerAgents { computer: String },
+    /// The tail of one agent session on another computer. A person at this
+    /// machine only: an agent here may not read another computer's agents.
+    ComputerAgentPeek {
+        computer: String,
+        id: u32,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        bytes: Option<u32>,
+    },
+    /// Attach to one agent session on another computer: answered
+    /// `computer_attached`, then the connection carries the terminal. A
+    /// person at this machine only. See `agents::attach_out`.
+    ComputerAttach { computer: String, id: u32, cols: u16, rows: u16 },
+    /// This terminal's window changed while attached to a session on another
+    /// computer. A person at this machine only.
+    ComputerAgentResize { computer: String, id: u32, cols: u16, rows: u16 },
 }
 
 /// What it answers.
@@ -377,6 +398,33 @@ pub enum Reply {
         path: String,
         rtt_ms: u64,
     },
+    /// What another computer may now do with this computer's agent
+    /// sessions; `dropped` when lowering it ended its live connections.
+    ComputerGranted { id: String, name: String, agents: String, dropped: bool },
+    /// Another computer's agent sessions. `truncated`: it left some out to
+    /// fit one frame; `unreadable`: how many it sent that did not parse.
+    ComputerAgents {
+        id: String,
+        name: String,
+        sessions: Vec<rime_agent_core::protocol::SessionInfo>,
+        #[serde(default)]
+        truncated: bool,
+        #[serde(default)]
+        unreadable: usize,
+    },
+    /// The tail of a session there: `data` is base64 of the raw terminal
+    /// bytes, drawn for `cols` x `rows`.
+    ComputerAgentPeek {
+        id: String,
+        name: String,
+        session: u32,
+        data: String,
+        cols: u16,
+        rows: u16,
+        state: String,
+    },
+    /// The connection now carries the terminal of `session` there.
+    ComputerAttached { id: String, name: String, session: u32, label: String },
     Ok,
     Error { message: String },
 }
@@ -459,6 +507,15 @@ fn handle(stream: UnixStream, state: &Arc<State>) -> std::io::Result<()> {
                 Ok(()) => return crate::computers::hold_screen(&stream, state),
                 Err(why) => Reply::error(why),
             },
+            // An attach holds it too: after its reply the connection is the
+            // terminal, and what came after the line belongs to it.
+            Ok(req @ Request::ComputerAttach { .. }) => match authorized(&req, peer) {
+                Ok(()) => {
+                    let Request::ComputerAttach { computer, id, cols, rows } = req else { unreachable!() };
+                    return crate::agents::attach_out(state, &stream, &computer, id, cols, rows, std::mem::take(&mut pending));
+                }
+                Err(why) => Reply::error(why),
+            },
             Ok(req) => dispatch(req, carried, peer, state),
             Err(e) => Reply::error(format!("unparseable request: {e}")),
         };
@@ -537,6 +594,14 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         }
         Request::ComputerHandoffSwitch { computer, on } => {
             crate::computers::share(state, &computer, |store, c| store.set_computer_handoff(c, on))
+        }
+        Request::ComputerGrant { computer, agents } => crate::agents::grant(state, &computer, &agents),
+        Request::ComputerAgents { computer } => crate::agents::agents_of(state, &computer),
+        Request::ComputerAgentPeek { computer, id, bytes } => crate::agents::peek_of(state, &computer, id, bytes),
+        // Answered in `handle`, which holds the connection; never here.
+        Request::ComputerAttach { .. } => Reply::error("computer_attach holds its connection and is answered there"),
+        Request::ComputerAgentResize { computer, id, cols, rows } => {
+            crate::agents::resize_of(state, &computer, id, cols, rows)
         }
     }
 }
@@ -654,6 +719,18 @@ fn authorized_by(
         // The other computer saves what it is sent without asking, as a
         // phone does: a person here only, like `send`.
         Request::ComputerSend { .. } => computers_caller(peer, observe, may_send_to_computer),
+        // Letting another computer into this one's agent sessions: a
+        // person's decision, like removing it. An agent could otherwise give
+        // itself a way back in through another computer.
+        Request::ComputerGrant { .. } => computers_caller(peer, observe, may_grant_agents),
+        // Listing, reading or typing into another computer's agent
+        // sessions: a person here only. `rime-agentd` keeps an agent out of
+        // its siblings' sessions on one machine; one here must not get round
+        // that through another, not even to read their command lines.
+        Request::ComputerAgents { .. }
+        | Request::ComputerAgentPeek { .. }
+        | Request::ComputerAttach { .. }
+        | Request::ComputerAgentResize { .. } => computers_caller(peer, observe, may_reach_agents),
         _ => own_user(peer),
     }
 }
@@ -737,6 +814,30 @@ pub fn may_share(origin: RequestOrigin) -> Result<(), String> {
     Err(format!(
         "a {origin} request cannot change what is shared with another computer: only a person at this \
          machine may. Run `rime remote computers clipboard`, `files` or `handoff` from a terminal"
+    ))
+}
+
+/// `computer_grant`'s rule over a value: what another computer may do with
+/// this computer's agent sessions is a person's decision.
+pub fn may_grant_agents(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot let another computer into this computer's agent sessions: only a person at \
+         this machine may. Run `rime remote computers grant` from a terminal"
+    ))
+}
+
+/// The rule for reading or attaching to another computer's agent sessions:
+/// a person at this machine only, never an agent here.
+pub fn may_reach_agents(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot read or type into another computer's agent sessions: only a person at this \
+         machine may. Run `rime remote computers agents`, `peek` or `attach` from a terminal"
     ))
 }
 
@@ -1686,6 +1787,11 @@ mod tests {
             Request::ComputerSend { computer: "desk".into(), name: "a.txt".into(), via: None },
             Request::ComputerHandoff { computer: "desk".into(), url: "https://example.com".into(), title: None },
             Request::ComputerHandoffSwitch { computer: "desk".into(), on: true },
+            Request::ComputerGrant { computer: "desk".into(), agents: "control".into() },
+            Request::ComputerAgents { computer: "desk".into() },
+            Request::ComputerAgentPeek { computer: "desk".into(), id: 1, bytes: None },
+            Request::ComputerAttach { computer: "desk".into(), id: 1, cols: 80, rows: 24 },
+            Request::ComputerAgentResize { computer: "desk".into(), id: 1, cols: 80, rows: 24 },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -1774,6 +1880,21 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_send_to_computer(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
+                Request::ComputerGrant { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_grant_agents(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
+                Request::ComputerAgents { .. }
+                | Request::ComputerAgentPeek { .. }
+                | Request::ComputerAttach { .. }
+                | Request::ComputerAgentResize { .. } => {
+                    assert_eq!(
+                        verdict.is_ok(),
+                        rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_reach_agents(o).is_ok()),
+                        "{req:?} stopped asking the origin rule"
+                    )
+                }
                 other => assert!(verdict.is_ok(), "{other:?} refused its own user: {verdict:?}"),
             }
         }
@@ -1828,6 +1949,48 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&off).unwrap(),
             r#"{"reply":"computer_handoff","id":"i","name":"Desk","shown":false,"why":"busy"}"#
+        );
+    }
+
+    #[test]
+    fn only_a_person_here_may_grant_agents_or_reach_another_computers_agents() {
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        let gated = [
+            Request::ComputerGrant { computer: "desk".into(), agents: "control".into() },
+            Request::ComputerGrant { computer: "desk".into(), agents: "off".into() },
+            Request::ComputerAgentPeek { computer: "desk".into(), id: 1, bytes: Some(10) },
+            Request::ComputerAttach { computer: "desk".into(), id: 1, cols: 80, rows: 24 },
+            Request::ComputerAgents { computer: "desk".into() },
+            Request::ComputerAgentResize { computer: "desk".into(), id: 1, cols: 80, rows: 24 },
+        ];
+        for o in RequestOrigin::ALL {
+            for req in &gated {
+                let verdict = authorized_by(req, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} {req:?}: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("rime remote computers"), "{why}");
+                }
+            }
+        }
+        for req in &gated {
+            assert!(authorized_by(req, Some(me), |_| Err("no cgroup".into())).is_err());
+            assert!(authorized_by(req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        }
+        assert_eq!(
+            serde_json::to_string(&gated[0]).unwrap(),
+            r#"{"cmd":"computer_grant","computer":"desk","agents":"control"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&gated[3]).unwrap(),
+            r#"{"cmd":"computer_attach","computer":"desk","id":1,"cols":80,"rows":24}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&Request::ComputerAgentPeek { computer: "d".into(), id: 2, bytes: None }).unwrap(),
+            r#"{"cmd":"computer_agent_peek","computer":"d","id":2}"#
         );
     }
 

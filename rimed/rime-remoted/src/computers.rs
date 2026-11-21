@@ -29,15 +29,18 @@
 //! A session another computer opens gets [`Scope::Peer`], from which key
 //! completed the handshake. `serve.rs` hands every control line of such a
 //! session to [`peer_reply`] before anything else, which answers
-//! [`PEER_VERBS`] and refuses everything else: nothing from a peer reaches
-//! `rime-agentd`, nex, the computer's own verbs, the phone verbs, or the human
-//! gate. A peer may open [`PEER_CHANNELS`] and no other channel: a file it
-//! sends (`files.rs`). Two of its verbs end in a request this process makes
+//! [`PEER_VERBS`] (and the agent verbs, as far as the grant goes) and refuses
+//! everything else: no line from a peer is passed to `rime-agentd`, and
+//! nothing from a peer reaches nex, the computer's own verbs, the phone verbs,
+//! or the human gate. A peer may open [`PEER_CHANNELS`] and no other channel: a file it
+//! sends (`files.rs`), and an agent session's terminal when it was granted
+//! that (`agents.rs`). Some of its verbs end in a request this process makes
 //! of `rime-agentd` itself, built from fields it checked, never a peer's line
-//! passed on: `clipboard_write` for a copy (`share.rs`) and `save_file` for
-//! a file. Controlling another computer's
-//! agents or terminals will be a local grant on the computer being
-//! controlled, per pair; it is not in this file and not in this release.
+//! passed on: `clipboard_write` for a copy (`share.rs`), `save_file` for a
+//! file, and `list`, `peek`, `resize` and `attach` for the agent verbs, each
+//! only as far as the grant a person here gave that computer (`agents.rs`,
+//! M4). That grant is local to this computer, per pair, and never synced or
+//! introduced. Nothing from a peer reaches a human gate or an approval.
 //!
 //! ## Asking
 //!
@@ -73,10 +76,12 @@ pub const PEER_VERBS: [&str; 7] = [
     crate::handoff::PEER_VERB,
 ];
 
-/// The only channels a peer session may open.
-pub const PEER_CHANNELS: [&str; 1] = [crate::files::FILE_VERB];
+/// The only channels a peer session may open. The attach channel opens only
+/// as far as the grant goes (`agents.rs` checks it before anything else).
+pub const PEER_CHANNELS: [&str; 2] = [crate::files::FILE_VERB, crate::agents::ATTACH_VERB];
 
-/// What a peer's `remote_hello` lists.
+/// What a peer's `remote_hello` lists to every paired computer; one that
+/// was granted agent access here also gets [`crate::agents::FEATURE`].
 pub const PEER_FEATURES: [&str; 7] = [
     "peer_hello",
     "peer_tombstones",
@@ -113,14 +118,22 @@ pub fn refusal(what: &str) -> Vec<u8> {
 pub fn peer_reply(state: &State, agentd: &std::path::Path, device_id: &str, line: &[u8]) -> Vec<u8> {
     let cmd = crate::companion::verb_of(line);
     match cmd.as_deref() {
-        Some(c) if PEER_VERBS.contains(&c) && c == "remote_hello" => json!({
-            "reply": "remote",
-            "version": rime_remote_core::REMOTE_PROTOCOL_VERSION,
-            "features": PEER_FEATURES,
-            "scope": "peer",
-        })
-        .to_string()
-        .into_bytes(),
+        Some(c) if PEER_VERBS.contains(&c) && c == "remote_hello" => {
+            let mut hello = json!({
+                "reply": "remote",
+                "version": rime_remote_core::REMOTE_PROTOCOL_VERSION,
+                "features": PEER_FEATURES,
+                "scope": "peer",
+            });
+            // Its own grant, and only its own: a hint it shows as a claim.
+            if let Some(word) = crate::agents::hello_fields(state, device_id) {
+                if let Some(f) = hello["features"].as_array_mut() {
+                    f.push(json!(crate::agents::FEATURE));
+                }
+                hello["agents"] = json!(word);
+            }
+            hello.to_string().into_bytes()
+        }
         Some(c) if PEER_VERBS.contains(&c) && c == "peer_hello" => json!({
             "reply": "peer_hello",
             "name": state.machine,
@@ -147,6 +160,9 @@ pub fn peer_reply(state: &State, agentd: &std::path::Path, device_id: &str, line
         Some(c) if PEER_VERBS.contains(&c) && c == crate::handoff::PEER_VERB => {
             crate::handoff::answer(state, device_id, line)
         }
+        // This computer's agent sessions (agents.rs): only as far as the
+        // grant a person here gave that computer, checked there first.
+        Some(c) if crate::agents::VERBS.contains(&c) => crate::agents::answer(state, agentd, device_id, c, line),
         other => refusal(other.unwrap_or("that request")),
     }
 }
@@ -478,9 +494,13 @@ pub fn list(state: &State) -> Reply {
                 .into_iter()
                 .map(|c| {
                     let last = c.is_active().then(|| state.presence.get(&c.id)).flatten();
+                    // What it said it lets this one do: a claim (agents.rs).
+                    let hint = c.is_active().then(|| state.agents.hint(&c.id)).flatten();
                     rime_remote_core::peer::Listed {
                         presence: last.as_ref().map(|(p, _)| p.clone()),
                         presence_ms: last.map(|(_, at)| at),
+                        can_agents: rime_remote_core::device::AgentGrant::word_of(hint.map(|(g, _)| g)).to_string(),
+                        can_agents_ms: hint.map(|(_, at)| at),
                         ..rime_remote_core::peer::Listed::of(c.clone())
                     }
                 })
@@ -511,6 +531,7 @@ pub fn remove(state: &State, computer: &str) -> Reply {
     state.presence.forget(&c.id);
     state.sharing.forget(&c.id);
     crate::handoff::forget(state, &c.id);
+    state.agents.forget(&c.id);
     // Tell it now, so it removes this computer too (`presence.rs`).
     state.refresh.tell_now(&c.id);
     // And the phones, so they forget it (intro.rs).
@@ -705,7 +726,9 @@ mod tests {
         let hello: serde_json::Value =
             serde_json::from_slice(&peer_reply(&state, "desk", br#"{"cmd":"remote_hello"}"#)).expect("json");
         assert_eq!(hello["scope"], "peer");
+        // A computer nobody granted agents gets the plain list and no hint.
         assert_eq!(hello["features"], json!(PEER_FEATURES));
+        assert!(hello.get("agents").is_none(), "{hello}");
         let ph: serde_json::Value = serde_json::from_slice(&peer_reply(&state, "desk", br#"{"cmd":"peer_hello"}"#)).expect("json");
         assert_eq!(ph["reply"], "peer_hello");
         assert_eq!(ph["name"], json!(state.machine));
