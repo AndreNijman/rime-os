@@ -256,8 +256,9 @@ say hello, ask the other's name and version, pass on the computers it
 removed, say how it is doing (battery, power mode, whether it is locked,
 wired or Wi-Fi, how long it has been up), ask for a pairing offer to hand to
 your phone (see "Phones and computers that join by themselves" below), and,
-when you allow it, share your clipboard and send you files (see "Your
-clipboard and files between computers" below). **Pairing is not authority.**
+when you allow it, share your clipboard, send you files and offer you a link
+to open (see "Your clipboard and files between computers" and "Open a link
+on another computer" below). **Pairing is not authority.**
 A paired computer cannot run anything, open a terminal, read a file, see a
 session, answer a privilege prompt or use a phone feature on the other. What
 another computer sends never reaches `rime-agentd`: for a shared copy or a
@@ -275,7 +276,9 @@ rime remote computers forget <computer>
 rime remote computers allow <computer>
 rime remote computers clipboard <computer> on|send|receive|off
 rime remote computers files <computer> on|off
+rime remote computers handoff <computer> on|off
 rime remote computers send <computer> <file>… [--via lan|relay|any]
+rime remote computers open <computer> <url>|- [--title T] [--json]
 ```
 
 **Pairing.** On one computer run `add --show-code`. It prints a six-digit code
@@ -467,8 +470,40 @@ rime: desk (3f2a…) saved photos.zip (88.0 MB) in its Downloads.
 - Nothing is queued: a computer that is off is an error now, and the files
   after it are still sent. `--via lan` or `--via relay` forces one path.
 
-`rime remote computers list` shows both switches under each computer, for
-example "clipboard sent and taken, files taken".
+`rime remote computers list` shows the switches under each computer, for
+example "clipboard sent and taken, files taken, links shown".
+
+### Open a link on another computer
+
+`open` offers a web link to another of your computers. It shows a card there,
+"Open a link from Laptop?", with the link's site first, then the title if you
+gave one, then the link itself, and one button, **Open**:
+
+```
+$ rime remote computers open desk https://example.com/notes --title "Meeting notes"
+rime: desk (3f2a…) shows the link; it opens there only if Open is pressed.
+$ wl-paste | rime remote computers open desk -
+```
+
+- **Nothing opens by itself.** The link opens in Desk's browser only when
+  someone at Desk presses Open. Dismiss the card, or leave it for ten
+  minutes, and it is gone.
+- Only `http` and `https` links are offered, with a site name (plain letters,
+  no lookalike characters) or an address, no user name or password, and up to
+  2,048 bytes. Links to the receiving computer itself (`localhost`) are
+  refused. The title is plain text, up to 200 characters. Anything else is
+  refused whole, by your computer before it sends and again by the other.
+- Showing cards is **on** for a computer you paired with a code and off for
+  one your phone introduced until you `allow` it.
+  `rime remote computers handoff laptop off`, run on Desk, stops Laptop's
+  cards there.
+- At most three cards from one computer wait at a time, and one is taken
+  every two seconds; past that `open` says the other computer is busy.
+  Offering the same link again while its card waits replaces it.
+- Offering a link, like changing the switch, must be you at the computer: an
+  agent, a scheduled job, a phone or another computer cannot. Nothing is
+  queued: a computer that is off is an error now. `open` exits 0 only when
+  the card was shown; `--json` prints `{"shown": …, "why": …}`.
 
 The wire is `docs/remote-live-contract.md` §2.15.
 
