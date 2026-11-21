@@ -2147,6 +2147,207 @@ rime remote computers peek <computer> <session> [--bytes N] [--json]
 rime remote computers attach <computer> <session>
 ```
 
+### 2.16 The phone as a touchpad and keyboard
+
+`remote_hello.features` gains `"phone_input"`, and the hello carries
+`"input":"on"|"off"`: this phone's grant, as `agents` is for a computer.
+The phone moves the pointer, clicks, scrolls and types on the computer's
+desktop. rime-remoted injects it as the user, through the compositor's own
+protocols: one `zwlr_virtual_pointer_v1` (v2) and two
+`zwp_virtual_keyboard_v1`, one with a fixed keymap and one for text. No
+uinput (root only, and it would reach the greeter) and no portal (Rime
+desktops have none).
+
+**Injected input reaches the lock screen on every compositor Rime ships**
+(measured on Hyprland, labwc and niri). The lock gate below is the only thing
+between a phone and the password field.
+
+**The grant: `share.input`, off by default.** It lives on the phone's record
+in `devices.json`.
+
+```json
+{"cmd":"device_grant","device":"<id or name>","input":"on"|"off"}
+→ {"reply":"device_granted","id","name","input":"on","stopped":false}
+```
+
+- `device_grant` needs a §7 local origin (the `pair` rule): an agent here
+  may not give a phone a keyboard on this desktop.
+- Raising it is refused for a revoked phone and for a phone another computer
+  introduced that a person here has not allowed yet. Lowering it always
+  works. Revoking the phone clears it.
+- Lowering it or revoking the phone **ends a live channel at once**:
+  everything it holds is let go, the phone gets `input_closed` with
+  `not_allowed`, and the channel is closed. `stopped` says whether a channel
+  was running. A grant that could not be written to disk is put back to off.
+- The grant is read again on **every frame and every tick** (20 ms while
+  anything is held, 250 ms otherwise), not only when the channel opens. A
+  missed stop hook still cannot leave a phone typing.
+- `rime remote devices grant <phone> input on|off [--yes]`. Raising it
+  needs a terminal, names the risk in a sentence, and asks the person to type
+  the phone's name (or its id). `--yes` skips the typing but still needs a
+  terminal. Lowering asks nothing. The service's origin rule is the gate;
+  the prompt is for the person.
+- `rime remote devices --json` adds `"input":"on"|"off"` to each phone.
+  The table names the phones that may use the computer in a line under it.
+
+**The channel.** A channel with Data frames, so input never queues behind
+slow control requests:
+
+```text
+Open {"cmd":"input","v":1}
+→ Control {"reply":"input_ready"}                                  then Data both ways
+→ Control {"reply":"error","kind":"not_allowed"|"locked"|"unavailable"|"busy"|"bad_request","message":"…"}, Close
+```
+
+Refused, in this order:
+
+1. `not_allowed`: a companion key or another computer (whatever their
+   grants), or a phone without the grant. The message for the last one names
+   the command to run at the computer. The companion and peer allow-lists
+   leave `input` out, and the channel checks the scope again where it is
+   made, so neither check alone is the wall.
+2. `bad_request`: `v` is not 1.
+3. `unavailable`: Gaming Mode is running (gamescope: a `gamescope-N-ei`
+   socket answers in the runtime dir), nobody is logged in to a graphical
+   session, no compositor socket answers, or the compositor offers no virtual
+   pointer or keyboard.
+4. `busy`: another phone has the channel. One input channel per computer.
+5. `locked`: the gate says locked (below), checked before and again after
+   the compositor connection exists, since only then is its lock notifier
+   known.
+
+**Frames.** Each Data frame from the phone is one batch, one per display
+frame: `{"seq":N,"ev":[…]}`.
+
+| Event | Shape |
+|---|---|
+| motion | `{"t":"m","dx":12.5,"dy":-3}`, already accelerated: the compositor adds no acceleration |
+| button | `{"t":"b","b":"left"\|"right"\|"middle","p":true\|false}` |
+| scroll | `{"t":"s","dx":0,"dy":-40,"src":"finger"\|"wheel","stop":false}` |
+| key | `{"t":"k","code":<evdev>,"p":true\|false}` |
+| tap | `{"t":"tap","code":<evdev>,"mods":["ctrl"]}`: press and release in one event |
+| text | `{"t":"text","s":"…"}` |
+| hold | `{"t":"hold"}`: keepalive every 250 ms while anything is held |
+
+- A batch is validated whole before any of it is applied, so a bad event
+  late in a batch leaves nothing half done. A frame that breaks a rule ends
+  the channel (`input_closed` with `refused` and the reason).
+- `seq` must grow. A frame whose `seq` is not above the last one applied (a
+  resend after a lost write) is dropped, not applied twice.
+- Limits: 250 frames a second; 64 events and 16 KiB per frame; `|dx|`,
+  `|dy|` at most 2,000; text at most 1,000 characters per event and 4,000 a
+  second over all frames. Over a limit ends the channel.
+- `key` and `tap` take keyboard codes 1 to 255, except POWER (116), SLEEP
+  (142), WAKEUP (143) and SUSPEND (205): a keyboard grant is not a way to
+  turn the computer off. Buttons go through `b` only.
+- `mods` may be `ctrl`, `shift`, `alt`, `super`, `altgr`. A tap lets go of
+  only the modifiers it pressed: one the phone already holds stays held.
+- `key` and `tap` use the session's own layout: `XKB_DEFAULT_LAYOUT` and
+  `XKB_DEFAULT_VARIANT` from the service's environment, else the system's
+  `00-keyboard.conf`, else `us`. At most 4 layouts, and a name that is not
+  plain letters, digits, `_` and `-` falls back to `us`. XKB options are not
+  carried. Hyprland keybinds fire from it (it is a full keymap).
+- `text` is typed on the second keyboard with a keymap made for that text (at
+  most 200 distinct characters per keymap; longer text goes in runs), after a
+  round trip so the compositor has the keymap before the first key. The first
+  keyboard's keymap never changes. `\r\n` and `\r` become `\n`, typed as
+  Return; `\t` is Tab; any other control character refuses the frame.
+- A new virtual pointer gets one motion there and back (+1, −1) when it is
+  made: Hyprland drops a new pointer's clicks and scrolls until it has seen a
+  relative motion.
+
+**Events to the phone**, one JSON line each (newline ended) on the channel:
+
+```json
+{"event":"input_paused","why":"locked"}
+{"event":"input_resumed"}
+{"event":"input_released","why":"lease"}
+{"event":"input_closed","why":"not_allowed"|"unavailable"|"refused"|"stopping","message":"…"}
+```
+
+`input_closed` comes before the channel's Close when the computer ends it.
+A Close the phone sends gets none.
+
+**The lock gate.** Locked is the union of every source rime-remoted can read,
+and anything it cannot read counts as locked:
+
+1. The compositor's lock notifier on the injecting connection
+   (`hyprland_lock_notifier_v1`, when offered; Hyprland said `locked` 122 ms
+   after the lock client started). labwc has none.
+2. logind's `LockedHint` for the user's graphical session, from a system-bus
+   subscription (`GetUser` → `Display`, then the session's properties). It is
+   read again every 5 s as well, and a lost bus makes everything unknown
+   until it is back.
+3. logind's `Lock` and `Unlock` signals for that session. A `Lock` stays
+   counted until an `Unlock`, `LockedHint` going true → false, or a
+   reconnect.
+4. The Shell's `$XDG_RUNTIME_DIR/rime-remote/lock.json`, `{"locked":true}`
+   from the moment the Shell starts locking, before the compositor confirms
+   it (the Shell sets `LockedHint` only after that).
+
+Only logind can say unlocked, and only by `LockedHint` false. The notifier
+and the Shell file can only say locked. A Shell file that is there but is not
+`{"locked":<bool>}` counts as locked. **An absent file is no opinion**: it
+cannot prove the screen unlocked, and it does not lock it either.
+
+*The missing-Shell rule.* Until the Shell writes `lock.json` (a separate
+rime-shell change), nothing closes the window between "the Shell starts
+locking" and "logind's `LockedHint` turns true" on a compositor without a
+notifier (labwc), unless the lock came through logind's own `Lock` (`loginctl
+lock-session`, idle lock through logind), whose signal is source 3. On
+Hyprland the notifier closes it. The window is the lock client's start-up
+time; a key held across it is let go when the gate turns, so it cannot
+auto-repeat into the field afterwards.
+
+- The gate is read before **every event**, and before every character of a
+  text. A batch that started unlocked stops where the lock begins.
+- A session thread that holds anything reads it every 20 ms whether or not
+  the phone sends anything.
+- On becoming locked: release everything held, drop the rest of the batch,
+  send `input_paused`, and apply nothing until unlocked. Frames sent while
+  paused are read (and count against the limits) and dropped. On unlock,
+  `input_resumed`; nothing that was held comes back.
+
+**Releasing.** Everything held (keys, buttons, the modifiers they make) is let
+go on: a lock; the channel or the connection closing; the grant lowered; the
+phone revoked; the compositor going away or Gaming Mode starting (checked
+every second, `input_closed` with `unavailable`); 750 ms with nothing from
+the phone while anything is held (the lease, `input_released`); SIGTERM and
+SIGINT (rime-remoted lets go and then exits, `input_closed` with
+`stopping`).
+
+- What is held is written to `$XDG_RUNTIME_DIR/rime-remote/input-held.json`
+  before every press. On Hyprland a held key keeps auto-repeating after the
+  process that pressed it dies, and a held button stays down. At start, and
+  again when the next channel opens, rime-remoted sends a bare release for
+  each key from a new keyboard and a press and release for each button. A
+  button is clicked only while the gate says unlocked (a click on a lock
+  screen is input on it); otherwise it waits in the file for the next try.
+
+**Tests never touch the real desktop.** With `RIME_REMOTED_INPUT_STUB=<dir>`,
+rime-remoted injects nothing: it appends each action to `<dir>/actions.jsonl`
+(`{"a":"open"|"warm"|"motion"|"button"|"scroll"|"key"|"mods"|"text_keymap"|"text_key"|"close",…}`)
+and reads logind's part of the gate from `<dir>/sources.json`
+(`{"locked_hint":false,"lock_signal":false,"notifier":null}`; no file is
+unknown, so locked). A file `<dir>/unavailable` makes the channel
+unavailable with its text, and `<dir>/gone` makes the compositor go away. A unit test build always uses the stub. Every
+harness that starts rime-remoted sets it: `tests/end_to_end.rs`,
+`tests/live.rs`, `tests/relay.rs`, `tests/discovery.rs` and
+`android/tools/run-device-suite.sh`, whose broker and `start_remoted` refuse
+to start without it. The Wayland path is proven against a fake compositor in
+the unit tests (the exact requests and their order, the warm-up and the
+text keymap's round trip) and on a real headless labwc
+(`WLR_BACKENDS=headless WLR_RENDERER=pixman`, its own runtime dir) by the
+ignored test `input::tests::a_real_compositor_gets_the_input_and_a_lock_screen_gets_none_of_it`:
+keys, text, clicks, wheel and motion reach a window; a real
+`ext-session-lock` screen gets nothing while the gate says locked; with the
+gate open it does (the negative control). It fails when labwc, foot,
+quickshell or python3 is missing.
+
+```text
+rime remote devices grant <phone> input on|off [--yes]
+```
+
 ## 3. The phone
 
 - Connect: race the last-good path first, then LAN addresses and the relay in

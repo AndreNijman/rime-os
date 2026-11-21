@@ -104,6 +104,7 @@ ID                 NAME                 STATE     PATH     LAST SEEN
 | `companion` | whether the device has a companion key, so it keeps working after the phone restarts (see below). The key itself is never printed |
 | `introduced_by` | `{id, name}` of the computer that brought this phone here, or absent for a phone you paired here (see "Phones and computers that join by themselves") |
 | `allowed_ms` | Unix ms at which you allowed a phone another computer brought, or absent |
+| `input` | `on` if the phone may use this computer as a touchpad and keyboard, `off` if not (see "Your phone as a touchpad and keyboard") |
 
 The `STATE` column is **derived from `revoked_ms` alone**: `revoked` if it is
 set, `paired` if it is not. There is no third state and no stored status field
@@ -597,6 +598,57 @@ is sent until the person taps Send. Text goes to the computer's clipboard
 Test daemons write into a stub: `run-device-suite.sh` refuses to start
 `rime-agentd` without `RIME_AGENTD_DESKTOP_STUB`, so a test run cannot replace
 the developer's clipboard or write into their Downloads.
+
+## Your phone as a touchpad and keyboard
+
+A phone can be a touchpad and keyboard for this computer: move the pointer,
+click, scroll, type, and press keys such as Esc, Tab and the arrows. This
+computer's side is here; the app's Touchpad screen comes in a later version of
+Rime Remote for Android. It is off for every phone until you turn it on here:
+
+```
+rime remote devices grant <phone> input on
+rime remote devices grant <phone> input off
+```
+
+Turning it on is asked about at a terminal. `rime` says what it lets the phone
+do and asks you to type the phone's name; `--yes` skips the typing, but it
+still needs a terminal. Only a person at this computer can turn it on: an
+agent session, a script without a terminal, another computer and the phone
+itself cannot. Turning it off asks nothing. `rime remote devices` lists the
+phones that may use it under the table, and `--json` says `"input":"on"` or
+`"off"` for each.
+
+What the phone gets is what a USB keyboard and mouse plugged into this
+computer would get, while the computer is unlocked. So:
+
+- **It stops at the lock screen.** As soon as the computer locks, nothing the
+  phone sends is typed or clicked, and anything it was holding down is let
+  go. The phone is told the computer is locked.
+  Unlock at the computer and the touchpad works again; there is no way to
+  unlock from the phone.
+- **One phone at a time.** A second phone is told the touchpad is busy.
+- **Desktop only.** It does not work in Gaming Mode, or when nobody is logged
+  in to the desktop.
+- **The phone's own key only.** A phone that is still locked (its
+  "Keep working after the phone restarts" connection), or another computer,
+  can never use it, whatever else it is allowed.
+- **Nothing stays pressed.** If the phone goes quiet for 0.75 s while holding
+  a key or a button, the connection drops, you turn the setting off, you
+  revoke the phone, or Rime Remote stops, everything is let go. If Rime Remote
+  crashes, it lets go of what was held the next time it starts.
+- It cannot press the power, sleep or suspend keys.
+
+Turning it off, or revoking the phone, stops a touchpad that is in use
+straight away.
+
+The pointer moves exactly as far as the phone says: the phone applies its own
+pointer acceleration. Keys follow this computer's keyboard layout; typed text
+(including accents and emoji) arrives as text, whatever the layout.
+
+Test daemons inject nothing: every harness sets `RIME_REMOTED_INPUT_STUB`,
+and `run-device-suite.sh` refuses to start `rime-remoted` without it, so a
+test run cannot type into the developer's desktop.
 
 ## `rime remote ring <device>`: find your phone
 
