@@ -4771,6 +4771,92 @@ fn a_computer_a_phone_introduced_shows_no_card_until_a_person_allows_it() {
 // ── Agents across computers (M4) ────────────────────────────────────────────
 
 /// A person at `h` sets what computer `id` may do with `h`'s agent sessions.
+/// `rime remote <args>` for `h` on a pseudo-terminal (100x30) as its stdin,
+/// stdout and stderr: a person at a terminal, as far as the CLI can tell.
+/// Its config (the detach key) comes from an empty home under `h.root`.
+struct Terminal {
+    child: Child,
+    master: std::fs::File,
+    seen: std::sync::Arc<std::sync::Mutex<Vec<u8>>>,
+}
+
+impl Terminal {
+    fn open(h: &Harness, args: &[&str]) -> Terminal {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let (mut m, mut s) = (-1, -1);
+        let size = libc::winsize { ws_row: 30, ws_col: 100, ws_xpixel: 0, ws_ypixel: 0 };
+        // SAFETY: openpty writes two descriptors it opened, which are then
+        // owned here exactly once each.
+        let rc = unsafe { libc::openpty(&mut m, &mut s, std::ptr::null_mut(), std::ptr::null(), &size) };
+        assert_eq!(rc, 0, "openpty: {}", std::io::Error::last_os_error());
+        let master = unsafe { std::fs::File::from_raw_fd(m) };
+        let slave = unsafe { OwnedFd::from_raw_fd(s) };
+        let home = h.root.join("cli-home");
+        std::fs::create_dir_all(&home).expect("cli home");
+        let child = Command::new(bin("rime"))
+            .arg("remote")
+            .args(args)
+            .env("XDG_RUNTIME_DIR", h.root.join("run"))
+            .env("XDG_STATE_HOME", h.root.join("state"))
+            .env("XDG_CONFIG_HOME", home.join(".config"))
+            .env("HOME", &home)
+            .env_remove("DBUS_SESSION_BUS_ADDRESS")
+            .stdin(Stdio::from(slave.try_clone().expect("slave")))
+            .stdout(Stdio::from(slave.try_clone().expect("slave")))
+            .stderr(Stdio::from(slave))
+            .spawn()
+            .expect("run rime");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (mut from, into) = (master.try_clone().expect("master"), std::sync::Arc::clone(&seen));
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            // EIO once the CLI and every copy of the slave are gone.
+            while let Ok(n) = from.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                into.lock().unwrap().extend_from_slice(&buf[..n]);
+            }
+        });
+        Terminal { child, master, seen }
+    }
+
+    fn text(&self) -> String {
+        String::from_utf8_lossy(&self.seen.lock().unwrap()).into_owned()
+    }
+
+    fn type_in(&mut self, bytes: &[u8]) {
+        self.master.write_all(bytes).expect("type");
+    }
+
+    fn shows(&self, want: &str, within: Duration) -> bool {
+        let deadline = Instant::now() + within;
+        while Instant::now() < deadline {
+            if self.text().contains(want) {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// Its exit code and everything it printed, or a panic after `within`.
+    fn exit(mut self, within: Duration) -> (i32, String) {
+        let deadline = Instant::now() + within;
+        loop {
+            if let Some(status) = self.child.try_wait().expect("wait") {
+                std::thread::sleep(Duration::from_millis(100));
+                return (status.code().unwrap_or(-1), self.text());
+            }
+            if Instant::now() > deadline {
+                let _ = self.child.kill();
+                panic!("rime remote did not exit: {}", self.text());
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+    }
+}
+
 fn grant_agents(h: &Harness, id: &str, level: &str) -> serde_json::Value {
     h.control(&serde_json::json!({"cmd": "computer_grant", "computer": id, "agents": level}).to_string())
 }
@@ -4931,8 +5017,20 @@ fn a_computer_given_view_lists_and_peeks_given_control_types_and_lowering_or_rem
     assert_eq!(computer_on(&a, &b_on_a)["agents"], "off");
 
     // View: list and peek, never attach.
-    let granted = grant_agents(&a, &b_on_a, "view");
-    assert_eq!((granted["reply"].as_str(), granted["agents"].as_str()), (Some("computer_granted"), Some("view")), "{granted}");
+    // Raised from the CLI at a terminal, as a person does: a wrong name
+    // changes nothing, the right one raises it.
+    let b_name = computer_on(&a, &b_on_a)["name"].as_str().unwrap().to_string();
+    let mut t = Terminal::open(&a, &["computers", "grant", &b_on_a, "agents", "view"]);
+    assert!(t.shows("Type the computer's name", Duration::from_secs(10)), "{}", t.text());
+    t.type_in(b"not-that-one\n");
+    let (rc, said) = t.exit(Duration::from_secs(10));
+    assert_ne!(rc, 0, "a wrong name raised it: {said}");
+    assert_eq!(computer_on(&a, &b_on_a)["agents"], "off");
+    let mut t = Terminal::open(&a, &["computers", "grant", &b_on_a, "agents", "view"]);
+    assert!(t.shows("Type the computer's name", Duration::from_secs(10)), "{}", t.text());
+    t.type_in(format!("{b_name}\n").as_bytes());
+    let (rc, said) = t.exit(Duration::from_secs(10));
+    assert_eq!(rc, 0, "{said}");
     assert_eq!(computer_on(&a, &b_on_a)["share"]["agents"], "view");
     let listed = b.control(&list);
     assert_eq!(listed["reply"], "computer_agents", "{listed}");
@@ -4957,8 +5055,11 @@ fn a_computer_given_view_lists_and_peeks_given_control_types_and_lowering_or_rem
     assert!(on_b["can_agents_ms"].is_u64(), "{on_b}");
 
     // Control: attach, type, and see it echo; A says so once; the session
-    // counts the viewer; the other computer's size is a remote one.
-    assert_eq!(grant_agents(&a, &b_on_a, "control")["agents"], "control");
+    // counts the viewer; the other computer's size is a remote one. Raised
+    // from a terminal with --yes.
+    let (rc, said) = Terminal::open(&a, &["computers", "grant", &b_on_a, "agents", "control", "--yes"]).exit(Duration::from_secs(10));
+    assert_eq!(rc, 0, "{said}");
+    assert_eq!(computer_on(&a, &b_on_a)["agents"], "control");
     let mut term = attach_from(&b, &a_on_b, id, 60, 20).expect("attach with control");
     term.write_all(b"hello across computers\n").expect("type");
     assert!(shows(&mut term, "hello across computers", Duration::from_secs(10)), "the session never echoed");
@@ -4970,6 +5071,21 @@ fn a_computer_given_view_lists_and_peeks_given_control_types_and_lowering_or_rem
     let (rc, said) = rime_remote(&b, &["computers", "peek", &a_on_b, &id.to_string()], b"");
     assert_eq!(rc, 0, "{said}");
     assert!(said.contains("hello across computers"), "{said}");
+
+    // The same from the CLI at a terminal: the session takes its size once
+    // it types, what it types arrives, and the detach key leaves the session
+    // running.
+    let mut t = Terminal::open(&b, &["computers", "attach", &a_on_b, &id.to_string()]);
+    assert!(soon(|| session_info(&a, id)["attached"] == 2), "{} {}", session_info(&a, id), t.text());
+    t.type_in(b"typed at a terminal\n");
+    assert!(t.shows("typed at a terminal", Duration::from_secs(10)), "{}", t.text());
+    assert!(soon(|| session_info(&a, id)["cols"] == 100 && session_info(&a, id)["rows"] == 30), "{}", session_info(&a, id));
+    t.type_in(&[0x1d]);
+    let (rc, said) = t.exit(Duration::from_secs(10));
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("rime: detached from"), "{said}");
+    assert!(soon(|| session_info(&a, id)["attached"] == 1), "{}", session_info(&a, id));
+    assert!(session_info(&a, id)["exit_code"].is_null(), "detaching ended the session");
 
     // Lowered to view: the live attach is dropped at once, the size goes
     // back to the one this computer gave, a late resize from B changes
