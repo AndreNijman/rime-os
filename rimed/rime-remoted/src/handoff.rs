@@ -61,6 +61,10 @@ pub const KEY_PREFIX: &str = "handoff:";
 pub const OPEN_ACTION: &str = "open";
 /// How much of the link the card shows, in characters.
 const URL_SHOWN: usize = 160;
+/// The longest host the card shows whole. A longer one is cut from the LEFT,
+/// so the end that names the site (`….evil.example`) is what is seen: a host
+/// cut on the right (`paypal.com.login.…`) would hide it.
+const HOST_SHOWN: usize = 48;
 
 /// A link that passed [`checked_url`]: what Open opens, and the host the
 /// card names.
@@ -326,11 +330,26 @@ fn shown_reply(shown: bool, why: Option<&str>) -> Vec<u8> {
 /// What the card shows: "Open a link from <Laptop>?", then the host, the
 /// title in quotes when there is one, and the link, shortened. The name is
 /// this computer's record of the sender; every part is made plain text.
+/// The host as the card shows it: whole up to [`HOST_SHOWN`] characters,
+/// otherwise "…" and its end, from the first whole label inside that end.
+fn shown_host(host: &str) -> String {
+    let chars: Vec<char> = host.chars().collect();
+    if chars.len() <= HOST_SHOWN {
+        return host.to_string();
+    }
+    let tail: String = chars[chars.len() - (HOST_SHOWN - 1)..].iter().collect();
+    let tail = match tail.find('.') {
+        Some(i) if i + 1 < tail.len() => tail[i + 1..].to_string(),
+        _ => tail,
+    };
+    format!("…{tail}")
+}
+
 pub fn card_shown(from_name: &str, link: &Link, title: Option<&str>) -> Shown {
     use crate::mirror::clean;
     let from = clean(from_name, crate::mirror::APP_CAP, 0, false);
     let from = if from.is_empty() { "a paired computer".to_string() } else { from };
-    let mut body = clean(&link.host, crate::mirror::TITLE_CAP, 0, true);
+    let mut body = clean(&shown_host(&link.host), HOST_SHOWN + 1, 0, true);
     if let Some(t) = title {
         body.push_str(&format!("\n“{}”", clean(t, MAX_TITLE, 0, true)));
     }
@@ -688,6 +707,19 @@ mod tests {
         let lines: Vec<&str> = s.body.lines().collect();
         assert_eq!(lines[0], "example.com");
         assert!(lines[1].ends_with('…') && lines[1].chars().count() <= URL_SHOWN + 1, "{}", lines[1]);
+        // A long host is cut from the left: the end that names the site shows.
+        let spoof = format!("paypal.com.{}.evil.example", "login-secure-account-verify.".repeat(4).trim_end_matches('.'));
+        let long = checked_url(&format!("https://{spoof}:8443/x")).expect("ok");
+        let s = card_shown("Laptop", &long, None);
+        let first = s.body.lines().next().unwrap();
+        assert!(first.starts_with('…') && first.ends_with(".evil.example:8443"), "{first}");
+        assert!(!first.contains("paypal"), "{first}");
+        assert!(first.chars().count() <= HOST_SHOWN, "{first}");
+        // Starts at a whole label.
+        assert!(first.starts_with("…login-") || first.starts_with("…secure-") || first.starts_with("…evil."), "{first}");
+        // A host that fits is whole.
+        let fits = "a".repeat(HOST_SHOWN - 4) + ".com";
+        assert_eq!(shown_host(&fits), fits);
     }
 
     #[test]
