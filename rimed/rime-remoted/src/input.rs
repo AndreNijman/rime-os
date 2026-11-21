@@ -1103,8 +1103,8 @@ pub fn shutdown(within: Duration) {
     let _ = cv.wait_timeout_while(g, within, |finished| !*finished);
 }
 
-fn error(code: &str, message: &str) -> Vec<u8> {
-    json!({"reply": "error", "code": code, "message": message})
+fn error(kind: &str, message: &str) -> Vec<u8> {
+    json!({"reply": "error", "kind": kind, "message": message})
         .to_string()
         .into_bytes()
 }
@@ -2866,7 +2866,7 @@ mod tests {
         for scope in [Scope::Companion, Scope::Peer] {
             let err = open(&state, "pixel", scope, req).expect_err("opened");
             let v: Value = serde_json::from_slice(&err).expect("json");
-            assert_eq!(v["code"], "not_allowed", "{scope:?}: {v}");
+            assert_eq!(v["kind"], "not_allowed", "{scope:?}: {v}");
         }
         // And a phone with no grant, which every phone starts as.
         let id = {
@@ -2879,7 +2879,7 @@ mod tests {
         let v: Value =
             serde_json::from_slice(&open(&state, &id, Scope::Full, req).expect_err("opened"))
                 .expect("json");
-        assert_eq!(v["code"], "not_allowed", "{v}");
+        assert_eq!(v["kind"], "not_allowed", "{v}");
         assert!(
             v["message"]
                 .as_str()
@@ -2891,7 +2891,7 @@ mod tests {
             &open(&state, &id, Scope::Full, br#"{"cmd":"input","v":2}"#).expect_err("opened"),
         )
         .expect("json");
-        assert_eq!(v["code"], "bad_request", "{v}");
+        assert_eq!(v["kind"], "bad_request", "{v}");
         let _ = std::fs::remove_dir_all(dir);
     }
 

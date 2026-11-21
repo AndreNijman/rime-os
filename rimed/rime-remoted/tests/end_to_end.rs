@@ -5330,7 +5330,7 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     assert_eq!(hello["input"], "off", "{hello}");
     assert!(hello["features"].as_array().expect("features").iter().any(|f| f == "phone_input"), "{hello}");
     let r = open_input(&mut p, 5);
-    assert_eq!(r["code"], "not_allowed", "{r}");
+    assert_eq!(r["kind"], "not_allowed", "{r}");
     assert!(r["message"].as_str().unwrap_or_default().contains("rime remote devices grant pixel-8 input on"), "{r}");
     closed(&mut p, 5);
     assert!(input_actions(&h).is_empty(), "a refused channel touched the desktop");
@@ -5350,14 +5350,14 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
 
     // Nothing known about the lock: locked, refused.
     let r = open_input(&mut p, 6);
-    assert_eq!(r["code"], "locked", "{r}");
+    assert_eq!(r["kind"], "locked", "{r}");
     closed(&mut p, 6);
     input_sources(&h, serde_json::json!({"locked_hint": false}));
     let r = open_input(&mut p, 7);
     assert_eq!(r["reply"], "input_ready", "{r}");
     // One input channel on this computer at a time.
     let r = open_input(&mut p, 8);
-    assert_eq!(r["code"], "busy", "{r}");
+    assert_eq!(r["kind"], "busy", "{r}");
     closed(&mut p, 8);
 
     // Events land, in order, and what is held is on disk before it is pressed.
@@ -5430,7 +5430,7 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     let got = input_actions_until(&h, n, "the close", |a| has(a, serde_json::json!({"a": "close"})));
     assert!(has(&got, serde_json::json!({"a": "key", "code": 36, "p": false})), "{got:?}");
     assert!(!h.root.join("run/rime-remote/input-held.json").exists(), "nothing is held any more");
-    assert_eq!(open_input(&mut p, 9)["code"], "not_allowed");
+    assert_eq!(open_input(&mut p, 9)["kind"], "not_allowed");
     closed(&mut p, 9);
 
     // A phone's companion key never opens it, grant or not.
