@@ -627,9 +627,15 @@ computer would get, while the computer is unlocked. So:
   go. The phone is told the computer is locked.
   Unlock at the computer and the touchpad works again; there is no way to
   unlock from the phone.
+- **Hyprland only, for now.** On labwc and niri the phone is told the
+  computer is locked even when it is not. Those desktops cannot tell Rime
+  Remote the moment locking starts, so it needs the Rime Shell to say so,
+  and the Shell does not yet. A later Rime Shell update lifts this.
 - **One phone at a time.** A second phone is told the touchpad is busy.
 - **Desktop only.** It does not work in Gaming Mode, or when nobody is logged
-  in to the desktop.
+  in to the desktop. It only ever types into the desktop you are logged in
+  to, never into another program pretending to be one; if that desktop
+  session ends, the touchpad stops.
 - **The phone's own key only.** A phone that is still locked (its
   "Keep working after the phone restarts" connection), or another computer,
   can never use it, whatever else it is allowed.
@@ -641,6 +647,11 @@ computer would get, while the computer is unlocked. So:
 
 Turning it off, or revoking the phone, stops a touchpad that is in use
 straight away.
+
+Each use leaves two lines in your journal (`journalctl --user -u
+rime-remoted`): which phone started, and when it stopped,
+why, how long it lasted and how many moves, clicks and keys it sent. Never
+what was typed.
 
 The pointer moves exactly as far as the phone says: the phone applies its own
 pointer acceleration. Keys follow this computer's keyboard layout; typed text

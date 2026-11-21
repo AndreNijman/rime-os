@@ -2209,12 +2209,29 @@ Refused, in this order:
 2. `bad_request`: `v` is not 1.
 3. `unavailable`: Gaming Mode is running (gamescope: a `gamescope-N-ei`
    socket answers in the runtime dir), nobody is logged in to a graphical
-   session, no compositor socket answers, or the compositor offers no virtual
-   pointer or keyboard.
+   session, no compositor socket of that session answers (or more than one
+   does, below), or the compositor offers no virtual pointer or keyboard.
 4. `busy`: another phone has the channel. One input channel per computer.
 5. `locked`: the gate says locked (below), checked before and again after
    the compositor connection exists, since only then is its lock notifier
    known.
+
+**Which compositor.** rime-remoted does not trust the name of a socket.
+It tries `$WAYLAND_DISPLAY` and every `wayland-<digits>` in its runtime
+dir, asks the kernel (`SO_PEERCRED`) which process is listening on each,
+and keeps a socket only when that process runs as this user in logind's
+scope for the user's graphical session: its cgroup is exactly
+`/user.slice/user-<uid>.slice/session-<Display>.scope`, where `<Display>` is
+`GetUser` → `Display`. A user unit, a tmux scope or a second compositor in
+the background is in `user@<uid>.service` and is never chosen, and a user
+cannot move a process into a session scope (its `cgroup.procs` is root's).
+Exactly one listener must qualify (one process with several sockets counts
+once). None or more than one is `unavailable`, never a guess. If logind's
+`Display` changes while the channel is open, the channel ends with
+`unavailable` ("the desktop session this touchpad was opened in has
+ended"). Measured on katana (Fedora bootc, Hyprland): the compositor and
+the apps it starts are in `session-<Display>.scope`; niri instances started
+from tmux are not.
 
 **Frames.** Each Data frame from the phone is one batch, one per display
 frame: `{"seq":N,"ev":[…]}`.
@@ -2249,12 +2266,19 @@ frame: `{"seq":N,"ev":[…]}`.
   carried. Hyprland keybinds fire from it (it is a full keymap).
 - `text` is typed on the second keyboard with a keymap made for that text (at
   most 200 distinct characters per keymap; longer text goes in runs), after a
-  round trip so the compositor has the keymap before the first key. The first
+  round trip so the compositor has the keymap before the first key. A
+  keymap is kept and reused while the text's characters are in it; new
+  characters are added to it while there is room, and a fresh keymap starts
+  only when it is full. At most 20 new keymaps a second (counted for the
+  whole frame before any of it is applied): more ends the channel with
+  `refused`, so a phone cannot make the compositor compile keymaps without
+  end. The first
   keyboard's keymap never changes. `\r\n` and `\r` become `\n`, typed as
   Return; `\t` is Tab; any other control character refuses the frame.
-- A new virtual pointer gets one motion there and back (+1, −1) when it is
-  made: Hyprland drops a new pointer's clicks and scrolls until it has seen a
-  relative motion.
+- A new virtual pointer gets one motion there and back (+1, −1), sent only
+  once the gate (below) says unlocked as the channel opens, never into a
+  lock screen: Hyprland drops a new pointer's clicks and scrolls until it
+  has seen a relative motion.
 
 **Events to the phone**, one JSON line each (newline ended) on the channel:
 
@@ -2279,25 +2303,36 @@ and anything it cannot read counts as locked:
    read again every 5 s as well, and a lost bus makes everything unknown
    until it is back.
 3. logind's `Lock` and `Unlock` signals for that session. A `Lock` stays
-   counted until an `Unlock`, `LockedHint` going true → false, or a
-   reconnect.
+   counted until an `Unlock` or `LockedHint` going true → false. The watcher
+   reconnecting to the bus does not clear it (only `LockedHint` is
+   forgotten, so it is unknown until read again); the graphical session
+   changing to another id does.
 4. The Shell's `$XDG_RUNTIME_DIR/rime-remote/lock.json`, `{"locked":true}`
    from the moment the Shell starts locking, before the compositor confirms
    it (the Shell sets `LockedHint` only after that).
 
 Only logind can say unlocked, and only by `LockedHint` false. The notifier
 and the Shell file can only say locked. A Shell file that is there but is not
-`{"locked":<bool>}` counts as locked. **An absent file is no opinion**: it
-cannot prove the screen unlocked, and it does not lock it either.
+`{"locked":<bool>}` counts as locked.
 
-*The missing-Shell rule.* Until the Shell writes `lock.json` (a separate
-rime-shell change), nothing closes the window between "the Shell starts
-locking" and "logind's `LockedHint` turns true" on a compositor without a
-notifier (labwc), unless the lock came through logind's own `Lock` (`loginctl
-lock-session`, idle lock through logind), whose signal is source 3. On
-Hyprland the notifier closes it. The window is the lock client's start-up
-time; a key held across it is let go when the gate turns, so it cannot
-auto-repeat into the field afterwards.
+*The Shell file is trusted only when this user alone could have written it.*
+It is opened without following a symlink and without blocking, and read only
+when it is a regular file owned by the user rime-remoted runs as, writable by
+nobody else (no group or other write bit), and at most 4 KiB. Anything else
+(a symlink, a FIFO, a directory, another owner, mode 0620/0602/0666, a larger
+file, an open error other than "not there") counts as locked. Writers write it
+whole and rename it into place, mode 0600, so a reader never sees half a file.
+
+*Without a lock notifier, an absent Shell file counts as locked.* On
+Hyprland the notifier closes the window between "the Shell starts locking" and
+"logind's `LockedHint` turns true", and an absent file is no opinion there.
+A compositor that offers no notifier (labwc, niri) has nothing else that
+sees that window unless the lock came through logind's own `Lock`
+(`loginctl lock-session`, idle lock through logind). So there the file must
+be present and say `{"locked":false}`. **Until the Shell writes `lock.json` (a
+separate rime-shell change), the channel answers `locked` on labwc and niri.**
+The answer is decided after the compositor connection exists, since only then
+is it known whether a notifier is offered.
 
 - The gate is read before **every event**, and before every character of a
   text. A batch that started unlocked stops where the lock begins.
@@ -2316,6 +2351,13 @@ the phone while anything is held (the lease, `input_released`); SIGTERM and
 SIGINT (rime-remoted lets go and then exits, `input_closed` with
 `stopping`).
 
+- A key or button is forgotten only once its release was sent and the
+  compositor confirmed the batch (a round trip). A release that fails, or a
+  round trip that fails, keeps what was not confirmed held: it stays in
+  `input-held.json` for the start's recovery, the failure goes to the
+  journal, and the channel ends with `unavailable` ("the compositor stopped
+  taking input"). The start's recovery keeps what it could not release the
+  same way.
 - What is held is written to `$XDG_RUNTIME_DIR/rime-remote/input-held.json`
   before every press. On Hyprland a held key keeps auto-repeating after the
   process that pressed it dies, and a held button stays down. At start, and
@@ -2323,13 +2365,37 @@ SIGINT (rime-remoted lets go and then exits, `input_closed` with
   each key from a new keyboard and a press and release for each button. A
   button is clicked only while the gate says unlocked (a click on a lock
   screen is input on it); otherwise it waits in the file for the next try.
+  The start's recovery takes the same one-channel slot as a phone, so it
+  never injects beside a live channel (a phone opening during it waits up to
+  5 s, then is told `busy`).
+- No lock is held while connecting to the compositor: a slow compositor
+  never makes revoking, lowering the grant or stopping wait. A stop that
+  lands during the connect is seen right after it, before the session
+  starts. A panic on the session thread still lets go of what is held and
+  gives the slot back.
+
+**The journal.** One line when a channel opens and one when it ends, on
+rime-remoted's stderr (the user journal):
+
+```text
+rime-remoted: touchpad: "Pixel 8" (<device id>) started using this computer as a touchpad and keyboard
+rime-remoted: touchpad: "Pixel 8" (<device id>) stopped (not_allowed) after 42s; frames=… motion=… button=… scroll=… key=… tap=… text=… hold=… dropped_while_locked=…
+```
+
+The reason is the `input_closed` word, or `disconnected` when the phone
+closed the channel or the connection was lost.
+The counts are events, never what they carried: no key codes, no text, no
+coordinates. The phone's name is quoted so it cannot forge a line.
 
 **Tests never touch the real desktop.** With `RIME_REMOTED_INPUT_STUB=<dir>`,
 rime-remoted injects nothing: it appends each action to `<dir>/actions.jsonl`
 (`{"a":"open"|"warm"|"motion"|"button"|"scroll"|"key"|"mods"|"text_keymap"|"text_key"|"close",…}`)
 and reads logind's part of the gate from `<dir>/sources.json`
 (`{"locked_hint":false,"lock_signal":false,"notifier":null}`; no file is
-unknown, so locked). A file `<dir>/unavailable` makes the channel
+unknown, so locked). A boolean `notifier` means the stub compositor offers a
+lock notifier (`false`: offered, says unlocked); without one, the Shell's
+`lock.json` must say unlocked, as on labwc. A file `<dir>/slow` holding
+milliseconds (at most 10,000) makes the stub's connect take that long. A file `<dir>/unavailable` makes the channel
 unavailable with its text, and `<dir>/gone` makes the compositor go away. A unit test build always uses the stub. Every
 harness that starts rime-remoted sets it: `tests/end_to_end.rs`,
 `tests/live.rs`, `tests/relay.rs`, `tests/discovery.rs` and
