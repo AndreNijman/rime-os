@@ -2229,9 +2229,12 @@ Exactly one listener must qualify (one process with several sockets counts
 once). None or more than one is `unavailable`, never a guess. If logind's
 `Display` changes while the channel is open, the channel ends with
 `unavailable` ("the desktop session this touchpad was opened in has
-ended"). Measured on katana (Fedora bootc, Hyprland): the compositor and
-the apps it starts are in `session-<Display>.scope`; niri instances started
-from tmux are not.
+ended"). Measured on a Fedora bootc Rime machine with Hyprland: the
+compositor and the apps it starts are in `session-<Display>.scope`; niri
+instances started from tmux are not. So this keeps out a background
+compositor and anything in `user@<uid>.service`, but not code started from
+the desktop itself: a second listener there makes the channel `unavailable`,
+and one that replaces the compositor's socket file would be chosen.
 
 **Frames.** Each Data frame from the phone is one batch, one per display
 frame: `{"seq":N,"ev":[…]}`.

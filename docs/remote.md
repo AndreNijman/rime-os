@@ -633,9 +633,9 @@ computer would get, while the computer is unlocked. So:
   and the Shell does not yet. A later Rime Shell update lifts this.
 - **One phone at a time.** A second phone is told the touchpad is busy.
 - **Desktop only.** It does not work in Gaming Mode, or when nobody is logged
-  in to the desktop. It only ever types into the desktop you are logged in
-  to, never into another program pretending to be one; if that desktop
-  session ends, the touchpad stops.
+  in to the desktop. It types into the desktop you are logged in to, not
+  into a program running in the background that pretends to be one; if that
+  desktop session ends, the touchpad stops.
 - **The phone's own key only.** A phone that is still locked (its
   "Keep working after the phone restarts" connection), or another computer,
   can never use it, whatever else it is allowed.
