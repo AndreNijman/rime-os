@@ -5580,3 +5580,149 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     let got = input_actions_until(&h, n, "the release on SIGTERM", |a| has(a, serde_json::json!({"a": "close"})));
     assert!(has(&got, serde_json::json!({"a": "key", "code": 38, "p": false})), "{got:?}");
 }
+
+/// The touchpad status file the Shell reads, parsed, with its mode and its
+/// folder's.
+fn input_status_file(h: &Harness) -> (serde_json::Value, u32, u32) {
+    use std::os::unix::fs::PermissionsExt;
+    let path = h.root.join("run/rime-remote/input.json");
+    let text = std::fs::read_to_string(&path).expect("the status file");
+    let mode = std::fs::metadata(&path).expect("stat").permissions().mode() & 0o777;
+    let dir = std::fs::metadata(path.parent().expect("dir")).expect("stat").permissions().mode() & 0o777;
+    (serde_json::from_str(&text).unwrap_or_else(|e| panic!("{e}: {text}")), mode, dir)
+}
+
+/// Wait until the status file says `live`.
+fn input_status_until(h: &Harness, live: bool) -> serde_json::Value {
+    let deadline = Instant::now() + INPUT_WAIT;
+    loop {
+        if let Ok(text) = std::fs::read_to_string(h.root.join("run/rime-remote/input.json")) {
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                if v["live"] == live {
+                    return v;
+                }
+            }
+        }
+        assert!(Instant::now() < deadline, "the status file never said live:{live}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn a_touchpad_stopped_at_the_computer_lets_go_tells_the_phone_and_holds_it_off() {
+    let mut h = harness!("touchstop");
+    // Nobody yet, said from the start: the Shell never reads a stale file.
+    let (status, mode, dir) = input_status_file(&h);
+    assert_eq!(status, serde_json::json!({"v": 1, "live": false}));
+    assert_eq!((mode, dir), (0o600, 0o700));
+    let (code, said) = rime_remote(&h, &["devices", "touchpad"], b"");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("No phone is using this computer as a touchpad"), "{said}");
+
+    // A phone whose chosen name carries direction and zero-width marks.
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&h, &offer, "pixel\u{202e}-8\u{200b}")["ok"], true);
+    let (code, said) = rime_remote(&h, &["devices", "--json"], b"");
+    assert_eq!(code, 0, "{said}");
+    let listed: serde_json::Value = serde_json::from_str(&said).expect("json");
+    let id = listed[0]["id"].as_str().expect("an id").to_string();
+    let grant = |input: &str| {
+        h.control(&serde_json::json!({"cmd": "device_grant", "device": id, "input": input}).to_string())
+    };
+    assert_eq!(grant("on")["reply"], "device_granted");
+    input_sources(&h, serde_json::json!({"locked_hint": false}));
+    shell_lock_file(&h, Some(false));
+    let mut p = phone.connect(&h).expect("the phone's session");
+    assert_eq!(open_input(&mut p, 7)["reply"], "input_ready");
+
+    // Live: the file names the phone, bounded and clean, and nothing typed.
+    let (status, mode, _) = input_status_file(&h);
+    assert_eq!(mode, 0o600);
+    assert_eq!((status["v"].clone(), status["live"].clone()), (serde_json::json!(1), serde_json::json!(true)), "{status}");
+    assert_eq!(status["device"], id.as_str(), "{status}");
+    assert_eq!(status["name"], "pixel-8", "{status}");
+    assert!(status["since_ms"].as_u64().is_some_and(|t| t > 0), "{status}");
+    let (code, said) = rime_remote(&h, &["devices", "touchpad"], b"");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("pixel-8") && said.contains("rime remote devices touchpad stop"), "{said}");
+    assert!(!said.contains('\u{202e}') && !said.contains('\u{200b}'), "{said:?}");
+    let (code, said) = rime_remote(&h, &["devices", "touchpad", "--json"], b"");
+    assert_eq!(code, 0, "{said}");
+    let shown: serde_json::Value = serde_json::from_str(&said).expect("json");
+    assert_eq!((shown["live"].clone(), shown["name"].clone()), (serde_json::json!(true), serde_json::json!("pixel-8")), "{shown}");
+
+    // A key held, then the phone asks this computer to stop itself: no
+    // phone session can, and the channel carries on.
+    input_batch(&mut p, 7, 1, serde_json::json!([{"t": "k", "code": 30, "p": true}, {"t": "text", "s": "hunter2"}]));
+    input_actions_until(&h, 0, "the press", |a| has(a, serde_json::json!({"a": "key", "code": 30, "p": true})));
+    for line in [r#"{"cmd":"input_stop"}"#, r#"{"cmd":"input_status"}"#] {
+        let r = input_call(&mut p, line);
+        assert_ne!(r["reply"], "input_stopped", "{r}");
+        assert_ne!(r["reply"], "input_status", "{r}");
+    }
+    assert_eq!(input_status_file(&h).0["live"], true);
+    assert!(!std::fs::read_to_string(h.root.join("run/rime-remote/input.json")).unwrap().contains("hunter2"));
+
+    // Stopped at the computer: let go, the phone is told why, the file
+    // says nobody, and the grant is what it was.
+    let n = input_actions(&h).len();
+    let (code, said) = rime_remote(&h, &["devices", "touchpad", "stop"], b"");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("the touchpad was stopped"), "{said}");
+    let told = input_events(&mut p, 7, 1, "input_closed").remove(0);
+    assert_eq!(
+        told,
+        serde_json::json!({"event": "input_closed", "why": "stopped", "message": "stopped at the computer"}),
+        "{told}"
+    );
+    closed(&mut p, 7);
+    let got = input_actions_until(&h, n, "the close", |a| has(a, serde_json::json!({"a": "close"})));
+    assert!(has(&got, serde_json::json!({"a": "key", "code": 30, "p": false})), "{got:?}");
+    assert!(!h.root.join("run/rime-remote/input-held.json").exists(), "nothing is held any more");
+    assert_eq!(input_status_until(&h, false), serde_json::json!({"v": 1, "live": false}));
+    let (code, said) = rime_remote(&h, &["devices", "--json"], b"");
+    assert_eq!(code, 0, "{said}");
+    let listed: serde_json::Value = serde_json::from_str(&said).expect("json");
+    assert_eq!(listed[0]["input"], "on", "the grant is unchanged: {listed}");
+    assert_eq!(input_call(&mut p, r#"{"cmd":"remote_hello"}"#)["input"], "on");
+    let journal = std::fs::read_to_string(h.root.join("remoted.log")).unwrap_or_default();
+    assert!(journal.contains("stopped (stopped) after"), "{journal}");
+    assert!(!journal.contains("hunter2"), "{journal}");
+    // Nothing left to stop: said so, and still not an error.
+    let r = h.control(r#"{"cmd":"input_stop"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "input_stopped", "stopped": false}));
+
+    // Held off: the phone cannot simply open it again.
+    let r = open_input(&mut p, 8);
+    assert_eq!(r["kind"], "stopped", "{r}");
+    assert!(r["message"].as_str().unwrap_or_default().contains("input on"), "{r}");
+    closed(&mut p, 8);
+    // Until a person here allows it again.
+    assert_eq!(grant("on")["reply"], "device_granted");
+    assert_eq!(open_input(&mut p, 9)["reply"], "input_ready");
+    assert_eq!(input_status_until(&h, true)["name"], "pixel-8");
+
+    // Killed outright while live: the file is left saying live, and the
+    // next start says nobody before anything else.
+    let pid = h.remoted.id().to_string();
+    assert!(Command::new("kill").args(["-KILL", &pid]).status().expect("kill").success());
+    let _ = h.remoted.wait();
+    assert_eq!(input_status_file(&h).0["live"], true, "a killed daemon wrote nothing");
+    let runtime = h.root.join("run");
+    h.remoted = Command::new(bin("rime-remoted"))
+        .args(["--port", "0", "--allow-foreground", "--handshake-timeout-ms", "1000"])
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .env("XDG_STATE_HOME", h.root.join("state"))
+        .env("RIME_REMOTED_MACHINE_STUB", h.root.join("machine"))
+        .env("RIME_REMOTED_NOTIFY_STUB", h.root.join("notify"))
+        .env("RIME_REMOTED_MEDIA_STUB", h.root.join("media"))
+        .env("RIME_REMOTED_INPUT_STUB", h.root.join("input"))
+        .stdout(Stdio::null())
+        .stderr(std::fs::File::create(h.root.join("remoted2.log")).expect("log"))
+        .spawn()
+        .expect("start again");
+    assert_eq!(input_status_until(&h, false), serde_json::json!({"v": 1, "live": false}));
+    let (_, mode, dir) = input_status_file(&h);
+    assert_eq!((mode, dir), (0o600, 0o700));
+}
