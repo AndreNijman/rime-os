@@ -50,6 +50,7 @@ mod relay;
 mod serve;
 mod share;
 mod files;
+mod handoff;
 mod state;
 
 use std::net::TcpListener;
@@ -275,6 +276,13 @@ fn run(args: &[String]) -> Result<(), String> {
     }
 
     {
+        // A card closed (dismissed, expired, or gone with its server): the
+        // link it held goes with it (handoff.rs).
+        let state = Arc::clone(&state);
+        mirror::mirror().on_own_gone(Box::new(move |_device, key| handoff::on_gone(&state, key)));
+    }
+
+    {
         // Answer or Decline pressed on a ringing call's notification (contract
         // §2.12). Heard only from the notification server's current bus owner,
         // the same trust as an inline reply (§2.7): whoever draws the desktop's
@@ -289,6 +297,11 @@ fn run(args: &[String]) -> Result<(), String> {
             }
             // Show in folder on a file another computer sent (files.rs).
             if files::on_action(&state, key, action) {
+                return;
+            }
+            // Open on a link another computer offered (handoff.rs): the only
+            // way a link is ever opened.
+            if handoff::on_action(&state, device, key, action) {
                 return;
             }
             if key != calls::CALL_KEY || !matches!(action, "answer" | "decline") {

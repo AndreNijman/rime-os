@@ -161,7 +161,7 @@ impl Drop for Slot {
 /// Every character of Unicode 17's general categories Cf (format: invisible,
 /// direction-changing, tags), Zl and Zp (line and paragraph separators, which
 /// `char::is_control` does not count): what makes a name look like another.
-fn is_format(c: char) -> bool {
+pub(crate) fn is_format(c: char) -> bool {
     matches!(c,
         '\u{00AD}' | '\u{0600}'..='\u{0605}' | '\u{061C}' | '\u{06DD}' | '\u{070F}' | '\u{0890}'..='\u{0891}'
         | '\u{08E2}' | '\u{180E}' | '\u{200B}'..='\u{200F}' | '\u{2028}'..='\u{202E}' | '\u{2060}'..='\u{206F}'
@@ -424,6 +424,7 @@ fn notify_saved(files: &Files, computer: &Device, name: &str, path: PathBuf) {
         reply: None,
         actions: vec![(SHOW_ACTION.to_string(), "Show in folder".to_string())],
         sticky: false,
+        expires_ms: None,
     };
     crate::mirror::mirror().submit(crate::mirror::Job::Post {
         device: computer.id.clone(),

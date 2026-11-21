@@ -125,6 +125,8 @@ pub struct State {
     /// Files arriving from other computers: slots, quota, and what each
     /// saved file's notification shows (§2.15).
     pub files: Arc<crate::files::Files>,
+    /// Links other computers offered, waiting for Open (§2.15, handoff.rs).
+    pub handoff: crate::handoff::Handoff,
     /// Which Do Not Disturb was last handed the Shell, per phone (§2.9).
     focus_seen: crate::phone::FocusSeen,
     /// Where a phone's Do Not Disturb is written for the Shell; see
@@ -208,6 +210,7 @@ impl State {
             clip_echo: crate::clipboard::Echo::default(),
             sharing: crate::share::Sharing::default(),
             files: Arc::default(),
+            handoff: crate::handoff::Handoff::default(),
             focus_seen: crate::phone::FocusSeen::default(),
             focus_file: Mutex::new(None),
             nexd: Mutex::new(None),

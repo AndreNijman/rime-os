@@ -212,7 +212,9 @@ let
     noLoginSessionCgroup = [
       "a_call_dies_with_the_phones_connection_and_revoke_and_a_locked_phone_answers_but_never_dials"
       "a_channel_onto_a_session_that_does_not_exist_is_refused_with_the_daemons_own_words"
+      "a_computer_a_phone_introduced_shows_no_card_until_a_person_allows_it"
       "a_computer_brings_its_phone_to_a_new_computer_as_a_companion_until_a_person_allows_it"
+      "a_computer_whose_cards_are_off_or_that_was_removed_shows_nothing"
       "a_companion_key_minted_over_a_paired_session_reaches_the_device_features_and_not_the_runtime"
       "a_confined_session_is_judged_against_the_confinement_it_actually_has"
       "a_confined_session_is_told_where_its_runtime_directory_is"
@@ -225,6 +227,7 @@ let
       "a_file_sent_to_a_paired_computer_lands_in_its_downloads_under_a_new_name_and_nothing_is_opened"
       "a_killed_session_has_nothing_still_running_under_it"
       "a_launch_that_fails_says_so_and_leaves_the_packet_behind"
+      "a_link_offered_to_a_paired_computer_is_a_card_there_and_opens_only_when_open_is_pressed"
       "a_messages_request_dies_with_the_phones_connection_and_revoke_and_a_locked_phone_cannot_send"
       "a_name_given_at_run_is_on_the_session_the_list_and_the_record"
       "a_narrowed_session_runs_under_its_own_allowlist_and_not_the_runtimes"
