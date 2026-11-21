@@ -88,11 +88,17 @@ pub const KEY_PREFIX: &str = "file:";
 pub const SHOW_ACTION: &str = "show";
 
 /// The grace before a transfer must keep pace, and the pace: bytes a second.
+/// The pace is half a megabit a second, so a file over a slow home uplink
+/// or a phone's hotspot (1 Mbit/s) still arrives; at 256 KiB/s
+/// every file above about 14 MiB was cut on such a link. The stall limit, not
+/// the pace, is what ends a sender that went away.
 const GRACE: Duration = Duration::from_secs(60);
-const PACE: u64 = 256 * 1024;
+const PACE: u64 = 64 * 1024;
 
 /// The whole budget for receiving `len` bytes: a minute, and a second for
-/// every 256 KiB.
+/// every 64 KiB. `rime-agentd`'s budget for the save (300 s and a second per
+/// 64 KiB) and the command's wait (`rime remote computers send`) are both
+/// longer, at every size.
 pub fn budget(len: u64) -> Duration {
     GRACE + Duration::from_secs(len / PACE)
 }
@@ -895,6 +901,12 @@ mod tests {
         assert_eq!(due(GRACE, 0), GRACE);
         assert_eq!(due(GRACE, PACE * 10), GRACE + Duration::from_secs(10));
         assert_eq!(due(GRACE, MAX_FILE_BYTES), budget(MAX_FILE_BYTES));
+        // A link of one megabit a second (125,000 bytes) never falls behind,
+        // up to the largest file there is.
+        for len in [1u64, 16 << 20, 100 << 20, MAX_FILE_BYTES] {
+            let arrives = Duration::from_secs(len / 125_000 + 1);
+            assert!(arrives < due(GRACE, len), "{len} bytes at 1 Mbit/s: {arrives:?} against {:?}", due(GRACE, len));
+        }
     }
 
     #[test]

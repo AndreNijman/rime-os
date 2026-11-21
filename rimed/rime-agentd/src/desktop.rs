@@ -59,9 +59,11 @@ const COPY_SECS: u64 = 5;
 /// Nothing arriving for this long ends an upload.
 const STALL_SECS: u64 = 30;
 
-/// An upload's budget is this, plus one second per [`BYTES_PER_SEC`].
+/// An upload's budget is this, plus one second per [`BYTES_PER_SEC`]: never
+/// less than what rime-remoted gives a file from another computer (60 s and a
+/// second per 64 KiB), or a file over a slow link would be cut here.
 const BASE_SECS: u64 = 300;
-const BYTES_PER_SEC: u64 = 128 * 1024;
+const BYTES_PER_SEC: u64 = 64 * 1024;
 
 /// Copies a numbered name may try before giving up.
 const MAX_COPIES: u32 = 99;
@@ -811,7 +813,11 @@ mod tests {
     #[test]
     fn the_budget_grows_with_the_file() {
         assert_eq!(budget(0), Duration::from_secs(BASE_SECS));
-        assert_eq!(budget(MAX_SAVE_BYTES), Duration::from_secs(BASE_SECS + 2048));
+        assert_eq!(budget(MAX_SAVE_BYTES), Duration::from_secs(BASE_SECS + 4096));
+        // Longer than rime-remoted's schedule for a file between computers, at every size.
+        for len in [1u64, 16 << 20, MAX_SAVE_BYTES] {
+            assert!(budget(len) > Duration::from_secs(60 + len / (64 * 1024)), "{len}");
+        }
     }
 
     #[test]

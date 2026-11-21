@@ -179,7 +179,8 @@ classified. A local client and a paired phone may use them.
 - `len` is at most 256 MiB and at least 1, and the folder's file system must
   have `len` plus 64 MiB free. Nothing arriving for 30 s ends the upload, and
   so does the whole upload taking longer than 300 s plus one second per
-  128 KiB.
+  64 KiB (longer than any sender's own limit: §1.8's phone upload and §2.15's
+  file from another computer).
 
 **Tests never touch the real desktop.** With `RIME_AGENTD_DESKTOP_STUB=<dir>`
 rime-agentd writes the clipboard to `<dir>/clipboard` and saves files into
@@ -1724,9 +1725,11 @@ Data from the receiver, one JSON line each:
   match never gets its name, because `rime-agentd` removes its temporary file
   when the stream ends short. The same happens when the sender closes the
   channel, the session ends (removal ends it), nothing arrives for 30 s, or
-  the transfer falls behind its schedule: 60 s of grace, then 256 KiB/s from
-  the start (byte `n` is due by 60 s + n / 256 KiB, so the whole file by
-  60 s plus 1 s per 256 KiB). A computer that trickles loses its slot once it
+  the transfer falls behind its schedule: 60 s of grace, then 64 KiB/s from
+  the start (byte `n` is due by 60 s + n / 64 KiB, so the whole file by
+  60 s plus 1 s per 64 KiB; a 1 Mbit/s link keeps up at every size).
+  `rime-agentd`'s save budget (§1.8) and the command's wait are longer at
+  every size. A computer that trickles loses its slot once it
   is behind, not at the end. A temporary file a killed
   `rime-agentd` left behind (`.rime-save-<pid>-<seq>-<nanos>.part`, its pid no
   longer running) is removed before its next save. `rime-agentd` saves under
