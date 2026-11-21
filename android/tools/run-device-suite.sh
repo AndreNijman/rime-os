@@ -265,6 +265,10 @@ mkdir -p "$root/notify"
 # player on this desktop's session bus.
 export RIME_REMOTED_MEDIA_STUB=$root/media
 mkdir -p "$root/media"
+# And the phone as a touchpad (contract §2.16): input/actions.jsonl, never
+# a virtual pointer or keyboard in this desktop.
+export RIME_REMOTED_INPUT_STUB=$root/input
+mkdir -p "$root/input"
 
 start_remoted() {
   if [ "${RIME_REMOTED_MACHINE_STUB:-}" != "$root/machine" ]; then
@@ -277,6 +281,10 @@ start_remoted() {
   fi
   if [ "${RIME_REMOTED_MEDIA_STUB:-}" != "$root/media" ]; then
     echo "FAIL: refusing to start rime-remoted without the media stub: it would put a player on this desktop"
+    exit 1
+  fi
+  if [ "${RIME_REMOTED_INPUT_STUB:-}" != "$root/input" ]; then
+    echo "FAIL: refusing to start rime-remoted without the input stub: it would type into this desktop"
     exit 1
   fi
   local extra=()
@@ -439,6 +447,9 @@ def restart():
     if os.environ.get("RIME_REMOTED_MEDIA_STUB") != os.path.join(ROOT, "media"):
         return json.dumps({"reply": "error",
                            "message": "refusing to start rime-remoted without the media stub"})
+    if os.environ.get("RIME_REMOTED_INPUT_STUB") != os.path.join(ROOT, "input"):
+        return json.dumps({"reply": "error",
+                           "message": "refusing to start rime-remoted without the input stub"})
     env = dict(os.environ,
                XDG_RUNTIME_DIR=os.path.join(ROOT, "run"),
                XDG_STATE_HOME=os.path.join(ROOT, "state"))
@@ -1137,7 +1148,7 @@ fi
 # starts, every process is stopped by its pid, nothing is looked up by name,
 # and nothing here touches the desktop's own runtime folder.
 root2=$state/b
-rm -rf "$root2"; mkdir -p "$root2"/run "$root2"/state "$root2"/scratch "$root2"/desk "$root2"/machine "$root2"/notify "$root2"/media
+rm -rf "$root2"; mkdir -p "$root2"/run "$root2"/state "$root2"/scratch "$root2"/desk "$root2"/machine "$root2"/notify "$root2"/media "$root2"/input
 port2=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
 brokerport2=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));print(s.getsockname()[1]);s.close()')
 {
@@ -1147,7 +1158,8 @@ brokerport2=$(python3 -c 'import socket;s=socket.socket();s.bind(("0.0.0.0",0));
   printf 'export RIME_SUITE_SERIAL=%q RIME_SUITE_ADB=%q\n' "$serial" "$adb"
   cat <<'B'
 export RIME_AGENTD_DESKTOP_STUB=$R/desk RIME_REMOTED_MACHINE_STUB=$R/machine \
-  RIME_REMOTED_NOTIFY_STUB=$R/notify RIME_REMOTED_MEDIA_STUB=$R/media
+  RIME_REMOTED_NOTIFY_STUB=$R/notify RIME_REMOTED_MEDIA_STUB=$R/media \
+  RIME_REMOTED_INPUT_STUB=$R/input
 { cat /proc/self/cgroup; echo "session ${XDG_SESSION_ID:-none}"; } > "$R/session.txt"
 XDG_RUNTIME_DIR=$R/run XDG_STATE_HOME=$R/state RIME_AGENT_SCRATCH_ROOT=$R/scratch \
   "$BIN/rime-agentd" >>"$R/agentd.log" 2>&1 &

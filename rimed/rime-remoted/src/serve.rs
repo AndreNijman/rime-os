@@ -1004,6 +1004,19 @@ impl Worker {
                     (ch, reply, Vec::new(), true)
                 })
                 .map_err(crate::proxy::ProxyError::NotTakenOver)
+        } else if crate::input::is_channel(request) {
+            // The phone as a touchpad and keyboard (§2.16): the phone's Data
+            // are input batches, one per frame, so the channel is writable.
+            crate::input::open(&self.state, &self.device_id, self.scope, request)
+                .map(|(stream, reply)| {
+                    let ch = DaemonChannel {
+                        stream,
+                        read_only: false,
+                        _slot: None,
+                    };
+                    (ch, reply, Vec::new(), true)
+                })
+                .map_err(crate::proxy::ProxyError::NotTakenOver)
         } else if crate::nex::is_channel(request) {
             crate::nex::open_channel(&self.state.nexd(), &self.device_id, request)
                 .map(|o| {
@@ -1116,7 +1129,7 @@ fn answered_here(state: &State, device_id: &str, scope: Scope, connection: u64, 
     match cmd.as_deref() {
         // Through the list, so "which verbs does this file take" has one
         // answer a test can read — the same rule `push::control` keeps.
-        Some(c) if VERBS.contains(&c) => Some(remote_hello(state, scope)),
+        Some(c) if VERBS.contains(&c) => Some(remote_hello(state, device_id, scope)),
         // The companion key: minted and forgotten by a full session only.
         Some(c) if crate::companion::VERBS.contains(&c) => crate::companion::control(state, device_id, scope, line),
         // The bridge to nex: the line goes to nexd, never to rime-agentd, and
@@ -1181,7 +1194,7 @@ fn answered_here(state: &State, device_id: &str, scope: Scope, connection: u64, 
 ///
 /// `scope` is which of the device's keys opened this session, so a phone on
 /// its companion key knows what it may ask for.
-fn remote_hello(state: &State, scope: Scope) -> Vec<u8> {
+fn remote_hello(state: &State, device_id: &str, scope: Scope) -> Vec<u8> {
     // `nex` only while nexd answers: a phone that shows nex screens for a
     // machine without it would show nothing but errors. Asked each time, so
     // starting nexd after the phone connected is seen on its next hello.
@@ -1195,15 +1208,24 @@ fn remote_hello(state: &State, scope: Scope) -> Vec<u8> {
     features.extend(crate::photos::FEATURES);
     features.extend(crate::companion::FEATURES);
     features.extend(crate::intro::FEATURES);
+    features.extend(crate::input::FEATURES);
     if crate::nex::available(&state.nexd()) {
         features.push("nex");
     }
+    // This phone's touchpad grant, so the app can say how to turn it on
+    // instead of opening a channel only to be refused (§2.16).
+    let input = state
+        .devices()
+        .ok()
+        .and_then(|s| s.find(device_id).ok().map(|d| d.input_grant()))
+        .unwrap_or(false);
     serde_json::json!({
         "reply": "remote",
         "version": rime_remote_core::REMOTE_PROTOCOL_VERSION,
         "features": features,
         "lan": state.lan_addresses(),
         "scope": scope.as_str(),
+        "input": if input { "on" } else { "off" },
     })
     .to_string()
     .into_bytes()
@@ -1630,10 +1652,13 @@ pub(crate) mod tests {
                                "device_events", "phone_report", "take_offer", "phone_focus", "phone_clipboard",
                                "phone_notifications", "phone_notification_reply",
                                "phone_media", "phone_media_control", "phone_messages", "phone_calls",
-                               "phone_photos", "companion_link", "computer_introductions"]),
+                               "phone_photos", "companion_link", "computer_introductions",
+                               "phone_input"]),
             "{v}"
         );
         assert_eq!(v["scope"], "full", "{v}");
+        // A phone this computer does not know has no touchpad grant.
+        assert_eq!(v["input"], "off", "{v}");
         // The pairing code's list, with the port this listener has — and
         // `host:port` a phone can split, so an IPv6 entry is bracketed.
         let lan: Vec<String> = serde_json::from_value(v["lan"].clone()).expect("strings");
@@ -1712,7 +1737,7 @@ pub(crate) mod tests {
     #[test]
     fn nex_is_a_feature_only_while_nexd_answers() {
         let (state, dir) = a_state("nexfeature");
-        let hello = |s: &State| -> serde_json::Value { serde_json::from_slice(&remote_hello(s, Scope::Full)).expect("json") };
+        let hello = |s: &State| -> serde_json::Value { serde_json::from_slice(&remote_hello(s, "pixel-8", Scope::Full)).expect("json") };
         assert!(!hello(&state)["features"].as_array().unwrap().iter().any(|f| f == "nex"));
         let sock = dir.join("nexd.sock");
         let listener = std::os::unix::net::UnixListener::bind(&sock).expect("bind");
@@ -2095,8 +2120,8 @@ pub(crate) mod tests {
         // the routers' OWN predicates, not a list kept beside them.
         let mut names: Vec<&str> = every_reserved_verb();
         names.extend(crate::companion::ALLOWED_CHANNELS);
-        names.extend([crate::phone::CHANNEL, crate::phone::TAKE, crate::photos::UPLOAD]);
-        names.extend(["attach", "receive", "save_file", "device_events_and_more", "take_offer2", "DEVICE_EVENTS"]);
+        names.extend([crate::phone::CHANNEL, crate::phone::TAKE, crate::photos::UPLOAD, crate::input::CMD]);
+        names.extend(["attach", "receive", "save_file", "device_events_and_more", "take_offer2", "DEVICE_EVENTS", "INPUT", "inputs"]);
         let mut requests: Vec<Vec<u8>> =
             names.iter().map(|n| format!(r#"{{"cmd":"{n}","id":1,"cols":80,"rows":24}}"#).into_bytes()).collect();
         requests.extend(AGENTD_AND_GARBAGE.iter().map(|l| l.as_bytes().to_vec()));
@@ -2106,7 +2131,14 @@ pub(crate) mod tests {
             let phone = crate::phone::is_channel(r) || crate::phone::is_take(r);
             let nex = crate::nex::is_channel(r);
             let upload = crate::photos::is_upload(r);
-            assert!([phone, nex, upload].iter().filter(|c| **c).count() <= 1, "two routers claim {shown}");
+            let input = crate::input::is_channel(r);
+            assert!([phone, nex, upload, input].iter().filter(|c| **c).count() <= 1, "two routers claim {shown}");
+            if input {
+                // The touchpad: a phone's own key only, never a companion
+                // link or another computer (§2.16).
+                assert!(!may_open(Scope::Companion, r), "a touchpad opens on a companion link: {shown}");
+                assert!(!may_open(Scope::Peer, r), "a touchpad opens for another computer: {shown}");
+            }
             if upload {
                 assert!(!may_open(Scope::Companion, r), "a photo upload opens on a companion link: {shown}");
             }

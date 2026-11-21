@@ -34,6 +34,7 @@ mod computers;
 mod control;
 mod dialer;
 mod discovery;
+mod input;
 mod intro;
 mod machine;
 mod media;
@@ -159,7 +160,82 @@ fn listen_on(port: u16, may_move: bool) -> Result<TcpListener, String> {
     ))
 }
 
+/// The write end of the pipe [`on_stop_signal`] wakes the signal thread
+/// through; -1 until it exists.
+static STOP_PIPE: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(-1);
+
+/// SIGTERM or SIGINT: one byte down the pipe, nothing else (all a signal
+/// handler may safely do).
+extern "C" fn on_stop_signal(_: libc::c_int) {
+    let fd = STOP_PIPE.load(std::sync::atomic::Ordering::Relaxed);
+    if fd >= 0 {
+        // SAFETY: errno is saved and put back around write(2), which is
+        // async-signal-safe; the byte is a static.
+        unsafe {
+            let errno = *libc::__errno_location();
+            libc::write(fd, b"s".as_ptr().cast(), 1);
+            *libc::__errno_location() = errno;
+        }
+    }
+}
+
+/// Let go of whatever a phone holds when systemd stops this service.
+///
+/// A handler wakes one thread through a pipe, and that thread ends the live
+/// touchpad channel, waits a bounded moment for its releases to reach the
+/// compositor, and exits: a key held when the process died would otherwise
+/// keep auto-repeating on Hyprland. A handler rather than a blocked mask and
+/// `sigwait`, because a blocked mask is inherited by every child this process
+/// starts (`std::process` keeps it across exec), and a child with SIGTERM
+/// blocked ignores both systemd's stop and the death signal the mDNS
+/// publisher relies on; a handler is reset to the default by exec.
+fn stop_on_signal() {
+    let mut fds = [-1; 2];
+    // SAFETY: pipe2 fills the two-element array it is given.
+    if unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) } != 0 {
+        eprintln!("rime-remoted: no pipe for signals; a stop could leave a phone's keys held");
+        return;
+    }
+    // A full pipe must never block the handler: one byte is all it says.
+    // SAFETY: fcntl on a descriptor just made.
+    unsafe { libc::fcntl(fds[1], libc::F_SETFL, libc::O_NONBLOCK) };
+    // SAFETY: the read end is owned by the File from here on.
+    let mut wake = unsafe { <std::fs::File as std::os::fd::FromRawFd>::from_raw_fd(fds[0]) };
+    let spawned = std::thread::Builder::new().name("rime-signals".into()).spawn(move || {
+        let mut byte = [0u8; 1];
+        loop {
+            match std::io::Read::read(&mut wake, &mut byte) {
+                Ok(1) => break,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+                _ => return,
+            }
+        }
+        input::shutdown(std::time::Duration::from_secs(1));
+        std::process::exit(0);
+    });
+    if let Err(e) = spawned {
+        eprintln!("rime-remoted: no thread for signals ({e}); a stop could leave a phone's keys held");
+        return;
+    }
+    STOP_PIPE.store(fds[1], std::sync::atomic::Ordering::Relaxed);
+    for sig in [libc::SIGTERM, libc::SIGINT] {
+        // SAFETY: a zeroed sigaction with an empty mask and a handler that
+        // only calls async-signal-safe functions.
+        let installed = unsafe {
+            let mut action: libc::sigaction = std::mem::zeroed();
+            action.sa_sigaction = on_stop_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+            action.sa_flags = libc::SA_RESTART;
+            libc::sigemptyset(&mut action.sa_mask);
+            libc::sigaction(sig, &action, std::ptr::null_mut()) == 0
+        };
+        if !installed {
+            eprintln!("rime-remoted: cannot take signal {sig}; a stop could leave a phone's keys held");
+        }
+    }
+}
+
 fn run(args: &[String]) -> Result<(), String> {
+    stop_on_signal();
     let asked_port = flag(args, "--port")
         .map(|v| v.parse::<u16>().map_err(|_| format!("--port {v} is not a port")))
         .transpose()?;
@@ -249,6 +325,10 @@ fn run(args: &[String]) -> Result<(), String> {
     // A phone's photo thumbnails, for the Shell's grid (contract §2.13). This
     // removes whatever an earlier run of this process left there.
     state.photos.set_dir(photos::dir_in(&rime_agent_core::paths::runtime_dir()));
+    // Keys or buttons a phone held when an earlier run of this process died
+    // are let go now (contract §2.16).
+    input::prepare();
+    input::recover_at_start();
 
     // A phone notification the person dismissed here is cancelled on the
     // phone, if the phone said it does that; otherwise it stays there.

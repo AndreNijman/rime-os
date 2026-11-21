@@ -223,6 +223,7 @@ impl Harness {
             // A phone's notifications go to a file, never onto this desktop.
             .env("RIME_REMOTED_NOTIFY_STUB", root.join("notify"))
             .env("RIME_REMOTED_MEDIA_STUB", root.join("media"))
+            .env("RIME_REMOTED_INPUT_STUB", root.join("input"))
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
             .stdout(Stdio::null())
@@ -375,7 +376,7 @@ fn remote_hello_is_answered_by_the_service_and_never_reaches_the_daemon() {
                            "device_events", "phone_report", "take_offer", "phone_focus", "phone_clipboard",
                            "phone_notifications", "phone_notification_reply",
                            "phone_media", "phone_media_control", "phone_messages", "phone_calls",
-                           "phone_photos", "companion_link", "computer_introductions"]),
+                           "phone_photos", "companion_link", "computer_introductions", "phone_input"]),
         "{hello}"
     );
     assert_eq!(hello["scope"], "full", "{hello}");
