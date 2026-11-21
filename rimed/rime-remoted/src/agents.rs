@@ -567,7 +567,10 @@ pub fn agents_of(state: &State, computer: &str) -> Reply {
     let mut unreadable = 0usize;
     for s in given.into_iter().take(MAX_SESSIONS) {
         match serde_json::from_value::<SessionInfo>(s) {
-            Ok(s) => sessions.push(s),
+            Ok(mut s) => {
+                plain_session(&mut s);
+                sessions.push(s)
+            }
             Err(_) => unreadable += 1,
         }
     }
@@ -577,6 +580,58 @@ pub fn agents_of(state: &State, computer: &str) -> Reply {
         sessions,
         truncated: answer["truncated"].as_bool().unwrap_or(false),
         unreadable,
+    }
+}
+
+/// The longest text field kept from another computer's session list.
+pub const FIELD_CAP: usize = 1024;
+
+/// One text field another computer sent, made safe to print or show: no
+/// control characters (so no escape sequences), no bidirectional overrides,
+/// at most [`FIELD_CAP`] characters. Nothing else changes, so a path stays
+/// the path it was.
+pub fn plain(raw: &str) -> String {
+    raw.chars()
+        .filter(|c| !c.is_control() && !crate::mirror::is_bidi_control(*c) && *c != '\u{2028}' && *c != '\u{2029}')
+        .take(FIELD_CAP)
+        .collect()
+}
+
+/// Every text field of a session another computer listed, through [`plain`]:
+/// the CLI prints them and the Shell shows them.
+fn plain_session(s: &mut SessionInfo) {
+    let one = |v: &mut String| *v = plain(v);
+    let maybe = |v: &mut Option<String>| {
+        if let Some(t) = v {
+            *t = plain(t);
+        }
+    };
+    one(&mut s.agent);
+    one(&mut s.program);
+    one(&mut s.cwd);
+    s.args.iter_mut().for_each(one);
+    s.args.truncate(64);
+    maybe(&mut s.project);
+    maybe(&mut s.project_name);
+    maybe(&mut s.name);
+    maybe(&mut s.title);
+    maybe(&mut s.worktree);
+    maybe(&mut s.detail);
+    maybe(&mut s.actor);
+    maybe(&mut s.checkpoint);
+    maybe(&mut s.capsule);
+    maybe(&mut s.native_observed);
+    if let Some(list) = &mut s.allowlist {
+        list.iter_mut().for_each(one);
+        list.truncate(64);
+    }
+    if let Some(t) = &mut s.telemetry {
+        maybe(&mut t.model);
+    }
+    s.children.truncate(64);
+    for c in &mut s.children {
+        one(&mut c.id);
+        one(&mut c.label);
     }
 }
 
@@ -1028,8 +1083,21 @@ mod tests {
         assert!(truncated);
         assert!(serde_json::to_vec(&kept).expect("json").len() <= MAX_LIST_BYTES);
         assert!(!kept.is_empty());
-        let (kept, truncated) = fit(vec![one; 3], MAX_SESSIONS, MAX_LIST_BYTES);
+        let (kept, truncated) = fit(vec![one.clone(); 3], MAX_SESSIONS, MAX_LIST_BYTES);
         assert_eq!((kept.len(), truncated), (3, false));
+
+        // What another computer listed loses every escape and override
+        // before the CLI prints it or the Shell shows it.
+        let mut hostile = one;
+        hostile.name = Some("\u{1b}]52;c;aGk=\u{7}evil\u{202e}txt".into());
+        hostile.cwd = "/tmp/\u{1b}[2J\u{9b}31m".into();
+        hostile.args = vec!["a\u{0}b".into(); 500];
+        hostile.title = Some("t".repeat(5000));
+        plain_session(&mut hostile);
+        assert_eq!(hostile.name.as_deref(), Some("]52;c;aGk=eviltxt"));
+        assert_eq!(hostile.cwd, "/tmp/[2J31m");
+        assert_eq!((hostile.args.len(), hostile.args[0].as_str()), (64, "ab"));
+        assert_eq!(hostile.title.map(|t| t.chars().count()), Some(FIELD_CAP));
     }
 
     #[test]
