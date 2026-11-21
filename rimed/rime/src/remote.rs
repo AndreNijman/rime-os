@@ -2339,10 +2339,10 @@ fn computers_share(req: Request) -> Result<i32> {
 }
 
 /// How long `rime remote computers send` waits for one file: the other
-/// computer gives a transfer 60 s plus a second per 256 KiB, the dial and the
+/// computer gives a transfer 60 s plus a second per 64 KiB, the dial and the
 /// last answer get the rest.
 fn computer_send_wait(len: u64) -> std::time::Duration {
-    std::time::Duration::from_secs(240 + len / (256 * 1024))
+    std::time::Duration::from_secs(240 + len / (64 * 1024))
 }
 
 fn computers_send(computer: &str, files: &[PathBuf], via: Via) -> Result<i32> {
@@ -3630,7 +3630,10 @@ mod tests {
             serde_json::from_str(r#"{"reply":"computer_sent","id":"d","name":"desk","file":"a (1).txt","bytes":12}"#).expect("sent");
         assert!(matches!(r, Reply::ComputerSent { bytes: 12, .. }));
         // A big file gets longer than the other computer's own budget for it.
-        assert!(computer_send_wait(256 * 1024 * 1024) > std::time::Duration::from_secs(60 + 1024 + 150));
+        // (60 s and a second per 64 KiB, then 150 s for the outcome.)
+        for len in [1u64, 16 << 20, 256 * 1024 * 1024] {
+            assert!(computer_send_wait(len) > std::time::Duration::from_secs(60 + len / (64 * 1024) + 150), "{len}");
+        }
     }
 
     #[test]
