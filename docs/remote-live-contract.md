@@ -2424,9 +2424,10 @@ whole to a temporary file and renamed into place, like `focus.json`):
 - **Who may.** Both verbs are on the local control socket only, and need a
   process of this user (`SO_PEERCRED` uid), of **any** origin, agents and
   scheduled jobs included: the `revoke` rule, and wider than
-  `device_grant`'s. Stopping only ever takes access away (the worst an agent
-  can do with it is make the person tap Allow on the phone again), and the
-  Stop button must work from whatever the Shell runs as. Another user and a
+  `device_grant`'s. Stopping only ever takes access away: the worst an agent
+  can do with it is stop the touchpad again and again, keeping that phone
+  off 30 s at a time until a person here raises its grant, and it gains
+  nothing by it. The Stop button must work from whatever the Shell runs as. Another user and a
   connection without peer credentials are refused. No phone, companion or
   peer session reaches either verb: the session control path answers
   neither (a phone's unknown line goes to rime-agentd, which has no such
