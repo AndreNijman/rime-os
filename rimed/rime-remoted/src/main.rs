@@ -34,6 +34,7 @@ mod computers;
 mod control;
 mod dialer;
 mod discovery;
+mod input;
 mod intro;
 mod machine;
 mod media;
@@ -159,7 +160,41 @@ fn listen_on(port: u16, may_move: bool) -> Result<TcpListener, String> {
     ))
 }
 
+/// Let go of whatever a phone holds when systemd stops this service.
+///
+/// SIGTERM and SIGINT are blocked here, before any other thread exists, so
+/// every thread inherits the mask and only the one below ever takes them
+/// (a child process gets an empty mask back from `std::process`). It ends
+/// the live touchpad channel, waits a bounded moment for its releases to
+/// reach the compositor, and exits: a key held when the process died would
+/// otherwise keep auto-repeating on Hyprland.
+fn stop_on_signal() {
+    // SAFETY: plain signal-set calls on a set owned by this frame.
+    let set = unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGTERM);
+        libc::sigaddset(&mut set, libc::SIGINT);
+        if libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()) != 0 {
+            eprintln!("rime-remoted: cannot take SIGTERM; a stop could leave a phone's keys held");
+            return;
+        }
+        set
+    };
+    let spawned = std::thread::Builder::new().name("rime-signals".into()).spawn(move || {
+        let mut sig = 0;
+        // SAFETY: sigwait on the set blocked above.
+        while unsafe { libc::sigwait(&set, &mut sig) } != 0 {}
+        input::shutdown(std::time::Duration::from_secs(1));
+        std::process::exit(0);
+    });
+    if let Err(e) = spawned {
+        eprintln!("rime-remoted: no thread for signals ({e}); a stop could leave a phone's keys held");
+    }
+}
+
 fn run(args: &[String]) -> Result<(), String> {
+    stop_on_signal();
     let asked_port = flag(args, "--port")
         .map(|v| v.parse::<u16>().map_err(|_| format!("--port {v} is not a port")))
         .transpose()?;
@@ -249,6 +284,10 @@ fn run(args: &[String]) -> Result<(), String> {
     // A phone's photo thumbnails, for the Shell's grid (contract §2.13). This
     // removes whatever an earlier run of this process left there.
     state.photos.set_dir(photos::dir_in(&rime_agent_core::paths::runtime_dir()));
+    // Keys or buttons a phone held when an earlier run of this process died
+    // are let go now (contract §2.16).
+    input::prepare();
+    input::recover_at_start();
 
     // A phone notification the person dismissed here is cancelled on the
     // phone, if the phone said it does that; otherwise it stays there.

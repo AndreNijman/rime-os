@@ -223,6 +223,7 @@ impl Harness {
             // A phone's notifications go to a file, never onto this desktop.
             .env("RIME_REMOTED_NOTIFY_STUB", root.join("notify"))
             .env("RIME_REMOTED_MEDIA_STUB", root.join("media"))
+            .env("RIME_REMOTED_INPUT_STUB", root.join("input"))
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
             .stdout(Stdio::null())

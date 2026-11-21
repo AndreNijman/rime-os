@@ -201,7 +201,7 @@ fn screen_locked() -> bool {
     counts_as_locked(crate::machine::backend().locked(Instant::now() + crate::machine::BUDGET))
 }
 
-fn counts_as_locked(locked: Option<bool>) -> bool {
+pub(crate) fn counts_as_locked(locked: Option<bool>) -> bool {
     locked != Some(false)
 }
 

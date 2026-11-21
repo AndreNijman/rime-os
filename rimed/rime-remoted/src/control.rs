@@ -90,6 +90,10 @@ pub enum Request {
     /// Give a phone another computer brought (introduced) the full scope.
     /// A person at this machine only.
     DeviceAllow { device: String },
+    /// Whether a paired phone may use this computer as a touchpad and
+    /// keyboard: `on` or `off` (§2.16). A person at this machine only;
+    /// lowering it ends the phone's live input channel at once.
+    DeviceGrant { device: String, input: String },
     /// Make a paired phone ring, by id or name.
     Ring { device: String },
     /// Set Do Not Disturb on every connected phone that said it follows this
@@ -385,6 +389,9 @@ pub enum Reply {
         why: Option<String>,
     },
     DeviceAllowed { id: String, name: String },
+    /// Whether a phone may now use this computer as a touchpad and keyboard;
+    /// `stopped` when lowering it ended a live input channel.
+    DeviceGranted { id: String, name: String, input: String, stopped: bool },
     /// Another computer saved a file sent to it, as `file` in its Downloads.
     ComputerSent { id: String, name: String, file: String, bytes: u64 },
     /// Another computer answered `peer_hello`: what it calls itself, its
@@ -546,6 +553,7 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
         },
         Request::Revoke { device } => revoke(state, &device),
         Request::DeviceAllow { device } => allow_device(state, &device),
+        Request::DeviceGrant { device, input } => grant_device(state, &device, &input),
         Request::Ring { device } => ring(state, &device),
         Request::Focus { dnd } => focus(state, dnd),
         Request::Clipboard { text, sensitive } => {
@@ -707,6 +715,10 @@ fn authorized_by(
         // Allowing gives an introduced device the authority of one paired
         // here: a person's decision, like pairing.
         Request::DeviceAllow { .. } | Request::ComputerAllow { .. } => computers_caller(peer, observe, may_allow),
+        // Letting a phone move the pointer and type here is a person's
+        // decision, like pairing: an agent could otherwise give itself hands
+        // on this desktop through a phone (§2.16).
+        Request::DeviceGrant { .. } => computers_caller(peer, observe, may_grant_input),
         // What is shared with another computer, and from it: a person's
         // decision, like pairing. An agent could otherwise turn a computer's
         // clipboard into a feed.
@@ -826,6 +838,18 @@ pub fn may_grant_agents(origin: RequestOrigin) -> Result<(), String> {
     Err(format!(
         "a {origin} request cannot let another computer into this computer's agent sessions: only a person at \
          this machine may. Run `rime remote computers grant` from a terminal"
+    ))
+}
+
+/// `device_grant`'s rule over a value: whether a phone may type and click on
+/// this desktop is a person's decision.
+pub fn may_grant_input(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot let a phone use this computer as a touchpad and keyboard: only a person at \
+         this machine may. Run `rime remote devices grant` from a terminal"
     ))
 }
 
@@ -1105,6 +1129,50 @@ fn allow_device(state: &State, device: &str) -> Reply {
     Reply::DeviceAllowed { id: d.id, name: d.name }
 }
 
+/// `rime remote devices grant <phone> input on|off` (§2.16). Lowering it
+/// stops the phone's live input channel before the reply: everything it
+/// held is released and the channel closes.
+fn grant_device(state: &State, device: &str, input: &str) -> Reply {
+    let on = match input {
+        "on" => true,
+        "off" => false,
+        other => {
+            let shown: String = other.chars().filter(|c| !c.is_control()).take(40).collect();
+            return Reply::error(format!("'{shown}' is not an input setting: say on or off"));
+        }
+    };
+    let mut store = match state.devices() {
+        Ok(s) => s,
+        Err(e) => return Reply::error(e.to_string()),
+    };
+    let (d, _lowered) = match store.set_phone_input(device, on) {
+        Ok(x) => x,
+        Err(e) => return Reply::error(e.to_string()),
+    };
+    if let Err(e) = state.save_devices(&store) {
+        // A grant that is not on disk is not given: the live store, which
+        // every frame reads, goes back to off. A lowered one stays lowered.
+        if on {
+            let _ = store.set_phone_input(&d.id, false);
+        }
+        drop(store);
+        if !on {
+            crate::input::stop_for(&d.id, crate::input::Why::NotAllowed);
+        }
+        return Reply::error(format!("the device was not written: {e}"));
+    }
+    drop(store);
+    // Whenever it is off, not only when this call lowered it: stopping a
+    // channel that is not there costs nothing.
+    let stopped = !on && crate::input::stop_for(&d.id, crate::input::Why::NotAllowed);
+    Reply::DeviceGranted {
+        id: d.id,
+        name: d.name,
+        input: if on { "on" } else { "off" }.into(),
+        stopped,
+    }
+}
+
 pub fn revoke(state: &State, device: &str) -> Reply {
     let mut store = match state.devices() {
         Ok(s) => s,
@@ -1118,6 +1186,9 @@ pub fn revoke(state: &State, device: &str) -> Reply {
     if let Err(e) = state.save_devices(&store) {
         return Reply::error(format!("the device was not written: {e}"));
     }
+    // A touchpad it is driving lets go first: whatever it holds is released
+    // before anything else happens (§2.16).
+    crate::input::stop_for(&revoked.id, crate::input::Why::NotAllowed);
     // What waits on the phone fails as revoked BEFORE its connection is shut:
     // a request keeps the first outcome it is given, and the connection's own
     // thread would otherwise get there first with "disconnected".
@@ -1782,6 +1853,7 @@ mod tests {
             Request::ComputerPing { computer: "desk".into(), via: None },
             Request::ComputerAllow { computer: "laptop".into() },
             Request::DeviceAllow { device: "pixel".into() },
+            Request::DeviceGrant { device: "pixel".into(), input: "on".into() },
             Request::ComputerClipboard { computer: "desk".into(), send: true, receive: true },
             Request::ComputerFiles { computer: "desk".into(), on: true },
             Request::ComputerSend { computer: "desk".into(), name: "a.txt".into(), via: None },
@@ -1883,6 +1955,11 @@ mod tests {
                 Request::ComputerGrant { .. } => assert_eq!(
                     verdict.is_ok(),
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_grant_agents(o).is_ok()),
+                    "{req:?} stopped asking the origin rule"
+                ),
+                Request::DeviceGrant { .. } => assert_eq!(
+                    verdict.is_ok(),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_grant_input(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
                 Request::ComputerAgents { .. }
@@ -1991,6 +2068,43 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&Request::ComputerAgentPeek { computer: "d".into(), id: 2, bytes: None }).unwrap(),
             r#"{"cmd":"computer_agent_peek","computer":"d","id":2}"#
+        );
+    }
+
+    #[test]
+    fn only_a_person_here_may_let_a_phone_use_this_computer_as_a_touchpad() {
+        let me = crate::peer::Peer {
+            pid: std::process::id() as libc::pid_t,
+            uid: unsafe { libc::getuid() },
+            gid: unsafe { libc::getgid() },
+        };
+        // Raising AND lowering: an agent may not even turn it off, so it can
+        // never learn the grant's state by flipping it.
+        let gated = [
+            Request::DeviceGrant { device: "pixel".into(), input: "on".into() },
+            Request::DeviceGrant { device: "pixel".into(), input: "off".into() },
+        ];
+        for o in RequestOrigin::ALL {
+            for req in &gated {
+                let verdict = authorized_by(req, Some(me), |_| Ok(*o));
+                assert_eq!(verdict.is_ok(), o.is_local(), "{o} {req:?}: {verdict:?}");
+                if let Err(why) = verdict {
+                    assert!(why.contains(o.as_str()) && why.contains("rime remote devices grant"), "{why}");
+                }
+            }
+        }
+        for req in &gated {
+            assert!(authorized_by(req, Some(me), |_| Err("no cgroup".into())).is_err());
+            assert!(authorized_by(req, None, |_| Ok(RequestOrigin::LocalTerminal)).is_err());
+        }
+        assert_eq!(
+            serde_json::to_string(&gated[0]).unwrap(),
+            r#"{"cmd":"device_grant","device":"pixel","input":"on"}"#
+        );
+        let r = Reply::DeviceGranted { id: "i".into(), name: "Pixel".into(), input: "off".into(), stopped: true };
+        assert_eq!(
+            serde_json::to_string(&r).unwrap(),
+            r#"{"reply":"device_granted","id":"i","name":"Pixel","input":"off","stopped":true}"#
         );
     }
 

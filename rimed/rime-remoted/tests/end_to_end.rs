@@ -236,6 +236,7 @@ impl Harness {
             // A phone's notifications land in a file, never on this desktop.
             .env("RIME_REMOTED_NOTIFY_STUB", root.join("notify"))
             .env("RIME_REMOTED_MEDIA_STUB", root.join("media"))
+            .env("RIME_REMOTED_INPUT_STUB", root.join("input"))
             .stdout(Stdio::null())
             .stderr(std::fs::File::create(&log).ok()?)
             .spawn()
@@ -3592,7 +3593,12 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
         other => panic!("a peer's Open was answered with {other:?}"),
     }
     // Nor the phone channels, where pushed events and rings travel.
-    for (channel, request) in [(8u32, r#"{"cmd":"device_events"}"#), (9, r#"{"cmd":"take_offer","id":1}"#)] {
+    for (channel, request) in [
+        (8u32, r#"{"cmd":"device_events"}"#),
+        (9, r#"{"cmd":"take_offer","id":1}"#),
+        // Nor the touchpad (§2.16).
+        (10, r#"{"cmd":"input","v":1}"#),
+    ] {
         peer.send(Frame::Open { channel, request: request.as_bytes().to_vec() });
         loop {
             match peer.recv() {
@@ -3602,7 +3608,7 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
                     break;
                 }
                 // The refused channels' own closes, in whatever order.
-                Frame::Close { channel: c, .. } if [7, 8, 9].contains(&c) => {}
+                Frame::Close { channel: c, .. } if [7, 8, 9, 10].contains(&c) => {}
                 other => panic!("a peer's {request} was answered with {other:?}"),
             }
         }
@@ -3616,7 +3622,7 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
     assert_eq!(clipped["reached"], 0, "{clipped}");
     assert_eq!(peer.call(r#"{"cmd":"peer_hello"}"#)["reply"], "peer_hello");
     let unasked: Vec<&Frame> =
-        peer.pending.iter().filter(|f| !matches!(f, Frame::Close { channel: 7..=9, .. })).collect();
+        peer.pending.iter().filter(|f| !matches!(f, Frame::Close { channel: 7..=10, .. })).collect();
     assert!(unasked.is_empty(), "a peer session was sent something unasked: {unasked:?}");
     // rime-agentd saw no session from it: the only remote origin it could
     // have recorded is the proxy's, and nothing was proxied.
@@ -5237,4 +5243,225 @@ fn an_introduced_computer_has_no_agents_grant_until_a_person_allows_it_and_then_
     let (rc, table) = rime_remote(&a, &["computers", "list"], b"");
     assert_eq!(rc, 0, "{table}");
     assert!(table.contains("it may view agents here"), "{table}");
+}
+
+// ── the phone as a touchpad (§2.16), on the input stub ──────────────────────
+
+/// What the input stub was asked to do, oldest first.
+fn input_actions(h: &Harness) -> Vec<serde_json::Value> {
+    std::fs::read_to_string(h.root.join("input/actions.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json"))
+        .collect()
+}
+
+/// Wait until the stub's actions after the first `from` satisfy `done`, and
+/// return those.
+fn input_actions_until(
+    h: &Harness,
+    from: usize,
+    what: &str,
+    done: impl Fn(&[serde_json::Value]) -> bool,
+) -> Vec<serde_json::Value> {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let all = input_actions(h);
+        let new = all.get(from..).unwrap_or_default().to_vec();
+        if done(&new) {
+            return new;
+        }
+        assert!(Instant::now() < deadline, "never saw {what}: {new:?}");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The lock sources the stub reports (logind and the compositor).
+fn input_sources(h: &Harness, sources: serde_json::Value) {
+    std::fs::create_dir_all(h.root.join("input")).expect("mkdir");
+    let tmp = h.root.join("input/sources.json.tmp");
+    std::fs::write(&tmp, sources.to_string()).expect("write");
+    std::fs::rename(&tmp, h.root.join("input/sources.json")).expect("rename");
+}
+
+/// Open the input channel on `channel`: the reply line.
+fn open_input(session: &mut Session, channel: u32) -> serde_json::Value {
+    session.send(Frame::Open { channel, request: br#"{"cmd":"input","v":1}"#.to_vec() });
+    loop {
+        match session.recv() {
+            Frame::Control(line) => return serde_json::from_slice(&line).expect("json"),
+            other => session.pending.push(other),
+        }
+    }
+}
+
+fn input_batch(session: &mut Session, channel: u32, seq: u64, ev: serde_json::Value) {
+    let bytes = serde_json::json!({"seq": seq, "ev": ev}).to_string().into_bytes();
+    session.send(Frame::Data { channel, bytes });
+}
+
+fn has(actions: &[serde_json::Value], want: serde_json::Value) -> bool {
+    actions.iter().any(|a| want.as_object().expect("object").iter().all(|(k, v)| &a[k] == v))
+}
+
+/// Wait for the desktop to close `channel`, keeping anything else.
+fn closed(session: &mut Session, channel: u32) {
+    if session.closed_unasked(channel).is_some() {
+        return;
+    }
+    loop {
+        match session.recv() {
+            Frame::Close { channel: c, .. } if c == channel => return,
+            other => session.pending.push(other),
+        }
+    }
+}
+
+#[test]
+fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_lost_connection_lets_go() {
+    let h = harness!("touchpad");
+    let Some(offer) = open_offer(&h) else { return };
+    let phone = Device::new();
+    assert_eq!(phone.pair(&h, &offer, "pixel-8")["ok"], true);
+    let mut p = phone.connect(&h).expect("the phone's session");
+
+    // Off until a person here turns it on, and the hello says so.
+    let hello = p.call(r#"{"cmd":"remote_hello"}"#);
+    assert_eq!(hello["input"], "off", "{hello}");
+    assert!(hello["features"].as_array().expect("features").iter().any(|f| f == "phone_input"), "{hello}");
+    let r = open_input(&mut p, 5);
+    assert_eq!(r["code"], "not_allowed", "{r}");
+    assert!(r["message"].as_str().unwrap_or_default().contains("rime remote devices grant pixel-8 input on"), "{r}");
+    closed(&mut p, 5);
+    assert!(input_actions(&h).is_empty(), "a refused channel touched the desktop");
+
+    let granted = h.control(r#"{"cmd":"device_grant","device":"pixel-8","input":"on"}"#);
+    // Pairing worked, so this process counts as a person here: the same rule.
+    assert_eq!(granted["reply"], "device_granted", "{granted}");
+    assert_eq!(p.call(r#"{"cmd":"remote_hello"}"#)["input"], "on");
+
+    // Nothing known about the lock: locked, refused.
+    let r = open_input(&mut p, 6);
+    assert_eq!(r["code"], "locked", "{r}");
+    closed(&mut p, 6);
+    input_sources(&h, serde_json::json!({"locked_hint": false}));
+    let r = open_input(&mut p, 7);
+    assert_eq!(r["reply"], "input_ready", "{r}");
+    // One input channel on this computer at a time.
+    let r = open_input(&mut p, 8);
+    assert_eq!(r["code"], "busy", "{r}");
+    closed(&mut p, 8);
+
+    // Events land, in order, and what is held is on disk before it is pressed.
+    input_batch(&mut p, 7, 1, serde_json::json!([
+        {"t": "m", "dx": 12.5, "dy": -3}, {"t": "k", "code": 30, "p": true}, {"t": "b", "b": "left", "p": true},
+        {"t": "s", "dx": 0, "dy": -40, "src": "finger", "stop": true}, {"t": "text", "s": "é"}
+    ]));
+    let got = input_actions_until(&h, 0, "the first batch", |a| has(a, serde_json::json!({"a": "text_key", "p": false})));
+    let kinds: Vec<&str> = got.iter().map(|a| a["a"].as_str().unwrap()).collect();
+    assert_eq!(kinds, ["open", "warm", "motion", "key", "button", "scroll", "text_keymap", "text_key", "text_key"], "{got:?}");
+    let held: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(h.root.join("run/rime-remote/input-held.json")).expect("held file")).expect("json");
+    assert_eq!((held["keys"].clone(), held["buttons"].clone()), (serde_json::json!([30]), serde_json::json!([272])), "{held}");
+
+    // Locked by logind with nothing from the phone: everything is let go and
+    // the phone is told; what it sends meanwhile is dropped.
+    let n = input_actions(&h).len();
+    input_sources(&h, serde_json::json!({"locked_hint": true}));
+    assert_eq!(events_on(&mut p, 7, 1)[0], serde_json::json!({"event": "input_paused", "why": "locked"}));
+    let got = input_actions_until(&h, n, "the releases", |a| has(a, serde_json::json!({"a": "button", "p": false})));
+    assert!(has(&got, serde_json::json!({"a": "key", "code": 30, "p": false})), "{got:?}");
+    input_batch(&mut p, 7, 2, serde_json::json!([{"t": "text", "s": "hunter2"}, {"t": "k", "code": 31, "p": true}]));
+    // The Shell's file locks too, whatever logind says, and so do a Lock
+    // signal and the compositor's notifier: still nothing. Each change keeps
+    // one source locked at every moment, since a batch may be read late.
+    std::fs::create_dir_all(h.root.join("run/rime-remote")).expect("mkdir");
+    std::fs::write(h.root.join("run/rime-remote/lock.json"), r#"{"locked":true}"#).expect("lock file");
+    input_sources(&h, serde_json::json!({"locked_hint": false}));
+    input_batch(&mut p, 7, 3, serde_json::json!([{"t": "k", "code": 32, "p": true}]));
+    input_sources(&h, serde_json::json!({"locked_hint": false, "lock_signal": true}));
+    std::fs::remove_file(h.root.join("run/rime-remote/lock.json")).expect("rm");
+    input_batch(&mut p, 7, 4, serde_json::json!([{"t": "k", "code": 33, "p": true}]));
+    input_sources(&h, serde_json::json!({"locked_hint": false, "lock_signal": true, "notifier": true}));
+    input_sources(&h, serde_json::json!({"locked_hint": false, "notifier": true}));
+    input_batch(&mut p, 7, 5, serde_json::json!([{"t": "k", "code": 34, "p": true}]));
+    // Every batch above has reached the session (a reply after them on the
+    // same connection) and been read (well within the wait) while locked.
+    assert_eq!(p.call(r#"{"cmd":"remote_hello"}"#)["reply"], "remote");
+    std::thread::sleep(Duration::from_millis(500));
+    // Unlocked: it resumes, and the next event goes through.
+    input_sources(&h, serde_json::json!({"locked_hint": false}));
+    assert_eq!(events_on(&mut p, 7, 1)[0], serde_json::json!({"event": "input_resumed"}));
+    let n2 = input_actions(&h).len();
+    input_batch(&mut p, 7, 6, serde_json::json!([{"t": "m", "dx": 1, "dy": 1}]));
+    input_actions_until(&h, n2, "the motion after unlocking", |a| has(a, serde_json::json!({"a": "motion"})));
+    let while_locked = &input_actions(&h)[n..n2];
+    assert!(
+        !while_locked.iter().any(|a| a["p"] == true || a["a"] == "text_keymap" || a["a"] == "motion"),
+        "input reached a locked desktop: {while_locked:?}"
+    );
+
+    // Held, then nothing from the phone for longer than the lease.
+    let n = input_actions(&h).len();
+    input_batch(&mut p, 7, 7, serde_json::json!([{"t": "k", "code": 35, "p": true}]));
+    assert_eq!(events_on(&mut p, 7, 1)[0], serde_json::json!({"event": "input_released", "why": "lease"}));
+    let got = input_actions_until(&h, n, "the lease release", |a| has(a, serde_json::json!({"a": "key", "code": 35, "p": false})));
+    assert!(has(&got, serde_json::json!({"a": "key", "code": 35, "p": true})), "{got:?}");
+
+    // Lowered by a person here: the live channel ends at once and lets go.
+    input_batch(&mut p, 7, 8, serde_json::json!([{"t": "k", "code": 36, "p": true}]));
+    input_actions_until(&h, n, "the press", |a| has(a, serde_json::json!({"a": "key", "code": 36, "p": true})));
+    let n = input_actions(&h).len();
+    let lowered = h.control(r#"{"cmd":"device_grant","device":"pixel-8","input":"off"}"#);
+    assert_eq!((lowered["reply"].clone(), lowered["stopped"].clone()), (serde_json::json!("device_granted"), serde_json::json!(true)), "{lowered}");
+    let said = events_on(&mut p, 7, 1).remove(0);
+    assert_eq!((said["event"].clone(), said["why"].clone()), (serde_json::json!("input_closed"), serde_json::json!("not_allowed")), "{said}");
+    closed(&mut p, 7);
+    let got = input_actions_until(&h, n, "the close", |a| has(a, serde_json::json!({"a": "close"})));
+    assert!(has(&got, serde_json::json!({"a": "key", "code": 36, "p": false})), "{got:?}");
+    assert!(!h.root.join("run/rime-remote/input-held.json").exists(), "nothing is held any more");
+    assert_eq!(open_input(&mut p, 9)["code"], "not_allowed");
+    closed(&mut p, 9);
+
+    // A phone's companion key never opens it, grant or not.
+    assert_eq!(h.control(r#"{"cmd":"device_grant","device":"pixel-8","input":"on"}"#)["reply"], "device_granted");
+    let companion = Device::new();
+    let r = p.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["reply"], "ok", "{r}");
+    let mut c = companion.connect(&h).expect("the companion session");
+    let r = open_input(&mut c, 5);
+    assert_eq!(r["kind"], "not_allowed", "{r}");
+    closed(&mut c, 5);
+
+    // What an earlier run left held is let go when the next channel opens,
+    // before anything new; a button only gets its click while unlocked.
+    std::fs::write(h.root.join("run/rime-remote/input-held.json"), r#"{"keys":[50],"buttons":[273]}"#).expect("held");
+    let n = input_actions(&h).len();
+    assert_eq!(open_input(&mut p, 10)["reply"], "input_ready");
+    let got = input_actions_until(&h, n, "the recovery", |a| has(a, serde_json::json!({"a": "button", "code": 273, "p": false})));
+    let kinds: Vec<String> = got.iter().map(|a| format!("{} {} {}", a["a"], a["code"], a["p"])).collect();
+    assert_eq!(
+        &kinds[2..],
+        ["\"key\" 50 false", "\"mods\" null null", "\"button\" 273 true", "\"button\" 273 false"],
+        "{kinds:?}"
+    );
+
+    // The phone's connection drops with a key held: let go.
+    input_batch(&mut p, 10, 1, serde_json::json!([{"t": "k", "code": 37, "p": true}]));
+    input_actions_until(&h, n, "the press", |a| has(a, serde_json::json!({"a": "key", "code": 37, "p": true})));
+    let n = input_actions(&h).len();
+    drop(p);
+    let got = input_actions_until(&h, n, "the release on disconnect", |a| has(a, serde_json::json!({"a": "close"})));
+    assert!(has(&got, serde_json::json!({"a": "key", "code": 37, "p": false})), "{got:?}");
+
+    // And when this service is stopped with a key held.
+    let mut p = phone.connect(&h).expect("reconnect");
+    assert_eq!(open_input(&mut p, 5)["reply"], "input_ready");
+    let n = input_actions(&h).len();
+    input_batch(&mut p, 5, 1, serde_json::json!([{"t": "k", "code": 38, "p": true}]));
+    input_actions_until(&h, n, "the press", |a| has(a, serde_json::json!({"a": "key", "code": 38, "p": true})));
+    let pid = h.remoted.id().to_string();
+    assert!(Command::new("kill").args(["-TERM", &pid]).status().expect("kill").success());
+    let got = input_actions_until(&h, n, "the release on SIGTERM", |a| has(a, serde_json::json!({"a": "close"})));
+    assert!(has(&got, serde_json::json!({"a": "key", "code": 38, "p": false})), "{got:?}");
 }

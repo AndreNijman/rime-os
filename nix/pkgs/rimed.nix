@@ -245,6 +245,7 @@ let
       "a_phone_reports_its_battery_rings_over_its_link_and_revoke_forgets_both"
       "a_phone_that_allows_control_gets_each_call_on_its_events_channel_and_nothing_it_did_not_allow"
       "a_phone_that_leaves_gives_the_desktop_its_size_back"
+      "a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_lost_connection_lets_go"
       "a_phones_call_rings_here_is_answered_from_the_notification_and_history_hangup_and_dial_go_through_the_cli"
       "a_phones_clipboard_follows_this_computers_only_where_it_asked_and_never_comes_straight_back"
       "a_phones_do_not_disturb_reaches_the_shell_on_a_change_and_the_computers_reaches_the_phones_that_follow_it"
