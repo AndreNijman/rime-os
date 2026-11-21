@@ -500,17 +500,25 @@ pub fn send(state: &State, computer: &str, url: &str, title: Option<&str>) -> Re
             return told(false, Some("offline"));
         }
     };
-    // Only the fixed words are passed on, never the other computer's own.
+    match outcome(&name, &answer) {
+        Ok((shown, why)) => told(shown, why),
+        Err(message) => Reply::Error { message },
+    }
+}
+
+/// What the other computer's answer to `peer_handoff` means: shown, or not
+/// and why. Only the fixed words are passed on, never the other computer's
+/// own; its error text only made printable.
+fn outcome(name: &str, answer: &Value) -> Result<(bool, Option<&'static str>), String> {
     match (answer["reply"].as_str(), answer["shown"].as_bool(), answer["why"].as_str()) {
-        (Some(PEER_VERB), Some(true), _) => told(true, None),
-        (Some(PEER_VERB), Some(false), Some(why @ ("off" | "busy"))) => told(false, Some(why)),
-        (Some("error"), _, _) => Reply::Error {
-            message: format!(
-                "'{name}' refused the link: {}",
-                crate::dialer::printable(answer["message"].as_str().unwrap_or("no reason given"))
-            ),
-        },
-        _ => Reply::Error { message: format!("'{name}' answered in a way this computer does not understand") },
+        (Some(PEER_VERB), Some(true), _) => Ok((true, None)),
+        (Some(PEER_VERB), Some(false), Some("off")) => Ok((false, Some("off"))),
+        (Some(PEER_VERB), Some(false), Some("busy")) => Ok((false, Some("busy"))),
+        (Some("error"), _, _) => Err(format!(
+            "'{name}' refused the link: {}",
+            crate::dialer::printable(answer["message"].as_str().unwrap_or("no reason given"))
+        )),
+        _ => Err(format!("'{name}' answered in a way this computer does not understand")),
     }
 }
 
@@ -638,6 +646,11 @@ mod tests {
             assert!(checked_url(raw).is_err(), "taken: {raw:?}");
         }
         assert!(checked_url(&format!("{longest}a")).is_err(), "one byte over the limit");
+        // A user name is refused as one, before the host is read.
+        for raw in ["http://@example.com", "https://user:pw@example.com/", "https://good.com@evil.com", "http://[2001:db8::1]@x/"] {
+            let why = checked_url(raw).unwrap_err();
+            assert!(why.contains("user name or password"), "{raw}: {why}");
+        }
     }
 
     #[test]
@@ -795,6 +808,12 @@ mod tests {
         let r = answer_with(&state, &desk.id, &card("https://example.com/x"), later + SPACING * 3, |_| false);
         assert_eq!(serde_json::from_slice::<Value>(&r).expect("json"), busy);
         assert_eq!(state.handoff.waiting(&desk.id), 2);
+        // Ten minutes on, the cards still up are closed when the next comes.
+        let (v, jobs) = ask(&state, &desk.id, &card("https://example.com/y"), later + LIFETIME * 2);
+        assert_eq!(v["shown"], true, "{v}");
+        let closed: Vec<&str> =
+            jobs.iter().filter_map(|j| if let Job::Remove { key, .. } = j { Some(key.as_str()) } else { None }).collect();
+        assert_eq!(closed, ["handoff:1", "handoff:3"], "{jobs:?}");
     }
 
     #[test]
@@ -866,6 +885,26 @@ mod tests {
         on_gone(&state, "handoff:6");
         assert_eq!(state.handoff.waiting(&other.id), 0);
         assert!(press(&other.id, "handoff:6", OPEN_ACTION, t0).1.is_empty());
+    }
+
+    #[test]
+    fn the_sender_passes_on_only_the_fixed_words_of_the_answer() {
+        let shown = json!({"reply": PEER_VERB, "shown": true});
+        assert_eq!(outcome("desk", &shown), Ok((true, None)));
+        for why in ["off", "busy"] {
+            assert_eq!(outcome("desk", &json!({"reply": PEER_VERB, "shown": false, "why": why})), Ok((false, Some(why))));
+        }
+        for odd in [
+            json!({"reply": PEER_VERB, "shown": false, "why": "\u{1b}[2Jclick here"}),
+            json!({"reply": PEER_VERB, "shown": false}),
+            json!({"reply": PEER_VERB, "shown": "yes"}),
+            json!({"reply": "peer_clipboard", "shown": true}),
+            json!({}),
+        ] {
+            assert!(outcome("desk", &odd).unwrap_err().contains("does not understand"), "{odd}");
+        }
+        let refused = outcome("desk", &json!({"reply": "error", "message": "bad\u{1b}[31m\nline"})).unwrap_err();
+        assert!(refused.starts_with("'desk' refused the link: ") && !refused.chars().any(char::is_control), "{refused:?}");
     }
 
     #[test]
