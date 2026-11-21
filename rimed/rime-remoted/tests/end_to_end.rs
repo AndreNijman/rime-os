@@ -5661,6 +5661,17 @@ fn a_touchpad_stopped_at_the_computer_lets_go_tells_the_phone_and_holds_it_off()
         assert_ne!(r["reply"], "input_stopped", "{r}");
         assert_ne!(r["reply"], "input_status", "{r}");
     }
+    // Nor can the phone's companion key.
+    let companion = Device::new();
+    let r = input_call(&mut p, &format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    assert_eq!(r["reply"], "ok", "{r}");
+    let mut c = companion.connect(&h).expect("the companion session");
+    for line in [r#"{"cmd":"input_stop"}"#, r#"{"cmd":"input_status"}"#, r#"{"cmd":"input_stop","device":null}"#] {
+        let r = input_call(&mut c, line);
+        assert_ne!(r["reply"], "input_stopped", "{r}");
+        assert_ne!(r["reply"], "input_status", "{r}");
+    }
+    drop(c);
     assert_eq!(input_status_file(&h).0["live"], true);
     assert!(!std::fs::read_to_string(h.root.join("run/rime-remote/input.json")).unwrap().contains("hunter2"));
 
