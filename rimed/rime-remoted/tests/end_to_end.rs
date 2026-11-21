@@ -5335,10 +5335,18 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     closed(&mut p, 5);
     assert!(input_actions(&h).is_empty(), "a refused channel touched the desktop");
 
+    // The CLI asks a person at a terminal before raising it, never a pipe.
+    let (code, said) = rime_remote(&h, &["devices", "grant", "pixel-8", "input", "on", "--yes"], b"pixel-8\n");
+    assert_eq!(code, 1, "{said}");
+    assert!(said.contains("asked about at a terminal"), "{said}");
     let granted = h.control(r#"{"cmd":"device_grant","device":"pixel-8","input":"on"}"#);
     // Pairing worked, so this process counts as a person here: the same rule.
     assert_eq!(granted["reply"], "device_granted", "{granted}");
     assert_eq!(p.call(r#"{"cmd":"remote_hello"}"#)["input"], "on");
+    let (code, said) = rime_remote(&h, &["devices", "--json"], b"");
+    assert_eq!(code, 0, "{said}");
+    let listed: serde_json::Value = serde_json::from_str(&said).expect("json");
+    assert_eq!(listed[0]["input"], "on", "{listed}");
 
     // Nothing known about the lock: locked, refused.
     let r = open_input(&mut p, 6);
@@ -5412,8 +5420,10 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     input_batch(&mut p, 7, 8, serde_json::json!([{"t": "k", "code": 36, "p": true}]));
     input_actions_until(&h, n, "the press", |a| has(a, serde_json::json!({"a": "key", "code": 36, "p": true})));
     let n = input_actions(&h).len();
-    let lowered = h.control(r#"{"cmd":"device_grant","device":"pixel-8","input":"off"}"#);
-    assert_eq!((lowered["reply"].clone(), lowered["stopped"].clone()), (serde_json::json!("device_granted"), serde_json::json!(true)), "{lowered}");
+    // Lowering needs no terminal: anything a person here does to stop it.
+    let (code, said) = rime_remote(&h, &["devices", "grant", "pixel-8", "input", "off"], b"");
+    assert_eq!(code, 0, "{said}");
+    assert!(said.contains("may not use this computer as a touchpad") && said.contains("was stopped"), "{said}");
     let said = events_on(&mut p, 7, 1).remove(0);
     assert_eq!((said["event"].clone(), said["why"].clone()), (serde_json::json!("input_closed"), serde_json::json!("not_allowed")), "{said}");
     closed(&mut p, 7);

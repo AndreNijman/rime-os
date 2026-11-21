@@ -240,6 +240,34 @@ pub enum DevicesCmd {
         #[arg(allow_hyphen_values = true)]
         device: String,
     },
+    /// Whether a phone may use this computer as a touchpad and keyboard.
+    ///
+    /// Off for every phone until you turn it on. On, the phone's Touchpad
+    /// screen moves the pointer, clicks, scrolls and types here, as if it
+    /// were a keyboard and mouse plugged into this computer, while this
+    /// computer is unlocked (never on the lock screen, and never in Gaming
+    /// Mode). Raising it asks you to type the phone's name. Turning it off
+    /// ends a touchpad in use at once. Only you, at this machine, can
+    /// change it; an agent cannot.
+    Grant {
+        /// Device id, or its name when that names exactly one.
+        #[arg(allow_hyphen_values = true)]
+        device: String,
+        #[arg(value_enum)]
+        what: DeviceGrantWhat,
+        #[arg(value_enum)]
+        setting: OnOff,
+        /// Do not ask for the phone's name (still only from a terminal).
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
+/// What `rime remote devices grant` changes.
+#[derive(clap::ValueEnum, Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceGrantWhat {
+    /// Using this computer as a touchpad and keyboard.
+    Input,
 }
 
 /// `rime remote computers`.
@@ -628,6 +656,7 @@ enum Request {
     Pair,
     Devices,
     DeviceAllow { device: String },
+    DeviceGrant { device: String, input: &'static str },
     Revoke { device: String },
     Ring { device: String },
     Focus { dnd: bool },
@@ -986,6 +1015,13 @@ enum Reply {
         id: String,
         name: String,
     },
+    DeviceGranted {
+        id: String,
+        name: String,
+        input: String,
+        #[serde(default)]
+        stopped: bool,
+    },
     ComputerPong {
         id: String,
         name: String,
@@ -1040,6 +1076,9 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
     let result = match cmd {
         RemoteCmd::Pair { text } => pair(text),
         RemoteCmd::Devices { action: Some(DevicesCmd::Allow { device }), .. } => devices_allow(&device),
+        RemoteCmd::Devices { action: Some(DevicesCmd::Grant { device, what: DeviceGrantWhat::Input, setting, yes }), .. } => {
+            devices_grant(&device, setting == OnOff::On, yes)
+        }
         RemoteCmd::Devices { action: None, json } => devices(json),
         RemoteCmd::Revoke { device } => revoke(&device),
         RemoteCmd::Ring { device } => ring(&device),
@@ -1268,6 +1307,15 @@ fn devices(json: bool) -> Result<i32> {
             gated.join(", ")
         );
     }
+    let touchpads: Vec<&str> =
+        devices.iter().filter(|d| d.input_grant()).map(|d| d.name.as_str()).collect();
+    if !touchpads.is_empty() {
+        println!(
+            "\n{} may use this computer as a touchpad and keyboard while it is unlocked \
+             (`rime remote devices grant <phone> input off` stops that).",
+            touchpads.join(", ")
+        );
+    }
     let lasting = companion_names(&devices, &companions);
     if !lasting.is_empty() {
         println!(
@@ -1319,6 +1367,9 @@ fn with_phones(
                 "companion".into(),
                 serde_json::Value::Bool(d.is_active() && companions.contains(&d.id)),
             );
+            // Whether it may use this computer as a touchpad (§2.16), said
+            // for every device so a reader need not know the default.
+            obj.insert("input".into(), (if d.input_grant() { "on" } else { "off" }).into());
             if let Some(p) = phones.get(&d.id).filter(|_| d.is_active()) {
                 obj.insert("phone".into(), serde_json::to_value(p)?);
             }
@@ -2819,6 +2870,75 @@ fn computers_ping(computer: &str, via: Via, json: bool) -> Result<i32> {
     }
 }
 
+/// The id and name of one active paired phone, when `device` names exactly
+/// one (an id, or a name only one has).
+fn named_device(device: &str) -> Option<(String, String)> {
+    let Ok(Reply::Devices { devices, .. }) = call(&Request::Devices) else {
+        return None;
+    };
+    let active: Vec<_> = devices.iter().filter(|d| d.is_active()).collect();
+    if let Some(d) = active.iter().find(|d| d.id == device) {
+        return Some((d.id.clone(), d.name.clone()));
+    }
+    let mut named = active.iter().filter(|d| d.name == device);
+    match (named.next(), named.next()) {
+        (Some(d), None) => Some((d.id.clone(), d.name.clone())),
+        _ => None,
+    }
+}
+
+fn devices_grant(device: &str, on: bool, yes: bool) -> Result<i32> {
+    use std::io::IsTerminal;
+    // As with `computers grant`: raising it is asked about at a terminal
+    // every time. The service refuses anyone who is not a person at this
+    // machine whatever this says; this is for the person, not the gate.
+    if on {
+        if !std::io::stdin().is_terminal() {
+            bail!(
+                "letting a phone use this computer as a touchpad and keyboard is asked about at a \
+                 terminal; run it in one (with --yes to skip typing the name)"
+            );
+        }
+        if !yes {
+            let Some((id, name)) = named_device(device) else {
+                bail!("no paired phone is called {device}: `rime remote devices` shows them");
+            };
+            eprintln!(
+                "{name} will be able to move the pointer, click, scroll and type on this computer, as \
+                 if a keyboard and mouse were plugged in, whenever this computer is unlocked: \
+                 whatever you can do at this desktop, a person holding {name} unlocked can do too."
+            );
+            eprint!("Type the phone's name ({name}) to allow it: ");
+            std::io::stderr().flush().ok();
+            let mut line = String::new();
+            std::io::stdin().lock().read_line(&mut line).context("reading the name")?;
+            if !typed_names(&line, &id, &name) {
+                eprintln!("rime: that is not {name}; nothing changed.");
+                return Ok(1);
+            }
+        }
+    }
+    let input = if on { "on" } else { "off" };
+    match call(&Request::DeviceGrant { device: device.to_string(), input })? {
+        Reply::DeviceGranted { id, name, input, stopped } => {
+            if input == "on" {
+                eprintln!("rime: {name} ({id}) may use this computer as a touchpad and keyboard while it is unlocked.");
+            } else {
+                eprintln!("rime: {name} ({id}) may not use this computer as a touchpad and keyboard.");
+            }
+            if stopped {
+                eprintln!("rime: the touchpad it was using was stopped, and everything it held was let go.");
+            }
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
 fn devices_allow(device: &str) -> Result<i32> {
     match call(&Request::DeviceAllow { device: device.to_string() })? {
         Reply::DeviceAllowed { id, name } => {
@@ -3187,6 +3307,18 @@ mod tests {
         let line = phone_line("Pixel", &phone).expect("line");
         assert!(line.starts_with("Pixel: battery 62%, charging, reported "), "{line}");
         assert_eq!(phone_line("Pixel", &Phone { battery: None, ..phone.clone() }), None);
+    }
+
+    #[test]
+    fn devices_json_says_which_phones_may_use_this_computer_as_a_touchpad() {
+        let devices: Vec<rime_remote_core::device::Device> = serde_json::from_str(
+            r#"[{"id":"aaaa","name":"Pixel","public_key":"k","paired_ms":1,"share":{"input":true}},
+                {"id":"bbbb","name":"Old","public_key":"k2","paired_ms":2,"revoked_ms":3,"share":{"input":true}},
+                {"id":"cccc","name":"Tab","public_key":"k3","paired_ms":4}]"#,
+        )
+        .expect("devices");
+        let v = with_phones(&devices, &Default::default(), &[]).expect("json");
+        assert_eq!((v[0]["input"].as_str(), v[1]["input"].as_str(), v[2]["input"].as_str()), (Some("on"), Some("off"), Some("off")));
     }
 
     #[test]
@@ -3919,7 +4051,9 @@ mod tests {
         let crate::Cmd::Remote { cmd } = crate::Cli::try_parse_from(argv).ok()?.command else { return None };
         match cmd {
             RemoteCmd::Revoke { device } | RemoteCmd::Ring { device } | RemoteCmd::Send { device, .. } => Some(device),
-            RemoteCmd::Devices { action: Some(DevicesCmd::Allow { device }), .. } => Some(device),
+            RemoteCmd::Devices { action: Some(DevicesCmd::Allow { device } | DevicesCmd::Grant { device, .. }), .. } => {
+                Some(device)
+            }
             RemoteCmd::Computers { action } => match action {
                 ComputersCmd::Remove { computer }
                 | ComputersCmd::Allow { computer }
@@ -3956,6 +4090,34 @@ mod tests {
     }
 
     #[test]
+    fn a_phones_touchpad_grant_parses_and_goes_over_the_wire_as_on_or_off() {
+        use clap::Parser;
+        let argv = |args: &[&str]| {
+            let argv = ["rime", "remote"].into_iter().chain(args.iter().copied());
+            crate::Cli::try_parse_from(argv).map(|c| c.command)
+        };
+        match argv(&["devices", "grant", "Pixel 8", "input", "on", "--yes"]).expect("grant") {
+            crate::Cmd::Remote {
+                cmd: RemoteCmd::Devices { action: Some(DevicesCmd::Grant { device, what: DeviceGrantWhat::Input, setting, yes }), .. },
+            } => assert_eq!((device.as_str(), setting, yes), ("Pixel 8", OnOff::On, true)),
+            _ => panic!("not a devices grant"),
+        }
+        assert!(argv(&["devices", "grant", "p", "input"]).is_err(), "on or off is needed");
+        assert!(argv(&["devices", "grant", "p", "agents", "on"]).is_err(), "a phone has no agents grant");
+        assert!(argv(&["devices", "grant", "p", "input", "control"]).is_err());
+        let wire = |r: &Request| serde_json::to_string(r).unwrap();
+        assert_eq!(
+            wire(&Request::DeviceGrant { device: "p".into(), input: "on" }),
+            r#"{"cmd":"device_grant","device":"p","input":"on"}"#
+        );
+        let r: Reply = serde_json::from_str(r#"{"reply":"device_granted","id":"i","name":"P","input":"off","stopped":true}"#)
+            .expect("granted");
+        assert!(matches!(r, Reply::DeviceGranted { stopped: true, ref input, .. } if input == "off"));
+        let r: Reply = serde_json::from_str(r#"{"reply":"device_granted","id":"i","name":"P","input":"on"}"#).expect("granted");
+        assert!(matches!(r, Reply::DeviceGranted { stopped: false, .. }));
+    }
+
+    #[test]
     fn an_id_that_starts_with_a_dash_is_an_id_for_every_verb_that_takes_one() {
         // An id is the first 16 characters of a base64url key, so about one in
         // 64 starts with `-` (and one in 4,096 with `--`). Each of these was
@@ -3973,6 +4135,8 @@ mod tests {
             &["revoke", "--", ID],
             &["computers", "forget", "--", ID],
             &["devices", "allow", ID],
+            &["devices", "grant", ID, "input", "on"],
+            &["devices", "grant", ID, "input", "off", "--yes"],
             &["computers", "remove", ID],
             &["computers", "allow", ID],
             &["computers", "forget", ID],
