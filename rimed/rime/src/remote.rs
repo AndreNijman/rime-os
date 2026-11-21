@@ -261,6 +261,33 @@ pub enum DevicesCmd {
         #[arg(long)]
         yes: bool,
     },
+    /// Whether a phone is using this computer as a touchpad and keyboard
+    /// right now, and `stop` to end it.
+    ///
+    /// `stop` lets go of everything the phone was holding and leaves its
+    /// setting as it is. That phone cannot connect again for 30 seconds,
+    /// unless you turn its setting on again with `rime remote devices grant
+    /// <phone> input on`. Any program you run can stop it; only you can let a
+    /// phone use it.
+    #[command(args_conflicts_with_subcommands = true)]
+    Touchpad {
+        #[command(subcommand)]
+        action: Option<TouchpadCmd>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+/// `rime remote devices touchpad`.
+#[derive(Subcommand, Debug)]
+pub enum TouchpadCmd {
+    /// End the touchpad in use now, and keep that phone off it for 30 s.
+    Stop {
+        /// Only this phone's (device id, or its name when that names exactly
+        /// one).
+        #[arg(allow_hyphen_values = true)]
+        device: Option<String>,
+    },
 }
 
 /// What `rime remote devices grant` changes.
@@ -657,6 +684,11 @@ enum Request {
     Devices,
     DeviceAllow { device: String },
     DeviceGrant { device: String, input: &'static str },
+    InputStop {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        device: Option<String>,
+    },
+    InputStatus,
     Revoke { device: String },
     Ring { device: String },
     Focus { dnd: bool },
@@ -1022,6 +1054,18 @@ enum Reply {
         #[serde(default)]
         stopped: bool,
     },
+    InputStopped {
+        stopped: bool,
+    },
+    InputStatus {
+        live: bool,
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        name: Option<String>,
+        #[serde(default)]
+        since_ms: Option<u64>,
+    },
     ComputerPong {
         id: String,
         name: String,
@@ -1078,6 +1122,10 @@ pub fn remote(cmd: RemoteCmd) -> i32 {
         RemoteCmd::Devices { action: Some(DevicesCmd::Allow { device }), .. } => devices_allow(&device),
         RemoteCmd::Devices { action: Some(DevicesCmd::Grant { device, what: DeviceGrantWhat::Input, setting, yes }), .. } => {
             devices_grant(&device, setting == OnOff::On, yes)
+        }
+        RemoteCmd::Devices { action: Some(DevicesCmd::Touchpad { action: None, json }), .. } => touchpad(json),
+        RemoteCmd::Devices { action: Some(DevicesCmd::Touchpad { action: Some(TouchpadCmd::Stop { device }), .. }), .. } => {
+            touchpad_stop(device)
         }
         RemoteCmd::Devices { action: None, json } => devices(json),
         RemoteCmd::Revoke { device } => revoke(&device),
@@ -2939,6 +2987,55 @@ fn devices_grant(device: &str, on: bool, yes: bool) -> Result<i32> {
     }
 }
 
+/// `rime remote devices touchpad`: which phone, if any, is using this
+/// computer as a touchpad (§2.16).
+fn touchpad(json: bool) -> Result<i32> {
+    let Reply::InputStatus { live, device, name, since_ms } = call(&Request::InputStatus)? else {
+        return unexpected();
+    };
+    if json {
+        let mut out = serde_json::json!({"live": live});
+        if live {
+            out["device"] = serde_json::json!(device);
+            out["name"] = serde_json::json!(name);
+            out["since_ms"] = serde_json::json!(since_ms);
+        }
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(0);
+    }
+    match (live, device, name) {
+        (true, Some(id), Some(name)) => println!(
+            "{name} ({id}) is using this computer as a touchpad and keyboard{}. \
+             `rime remote devices touchpad stop` ends it.",
+            since_ms.map(|ms| format!(" (started {})", ago(ms))).unwrap_or_default()
+        ),
+        _ => println!("No phone is using this computer as a touchpad."),
+    }
+    Ok(0)
+}
+
+/// `rime remote devices touchpad stop [<phone>]`.
+fn touchpad_stop(device: Option<String>) -> Result<i32> {
+    match call(&Request::InputStop { device })? {
+        Reply::InputStopped { stopped: true } => {
+            eprintln!(
+                "rime: the touchpad was stopped, and everything the phone held was let go. That phone can \
+                 connect again in 30 s, or at once after `rime remote devices grant <phone> input on`."
+            );
+            Ok(0)
+        }
+        Reply::InputStopped { stopped: false } => {
+            eprintln!("rime: no phone was using this computer as a touchpad.");
+            Ok(0)
+        }
+        Reply::Error { message } => {
+            eprintln!("rime: {message}");
+            Ok(1)
+        }
+        _ => unexpected(),
+    }
+}
+
 fn devices_allow(device: &str) -> Result<i32> {
     match call(&Request::DeviceAllow { device: device.to_string() })? {
         Reply::DeviceAllowed { id, name } => {
@@ -4054,6 +4151,9 @@ mod tests {
             RemoteCmd::Devices { action: Some(DevicesCmd::Allow { device } | DevicesCmd::Grant { device, .. }), .. } => {
                 Some(device)
             }
+            RemoteCmd::Devices {
+                action: Some(DevicesCmd::Touchpad { action: Some(TouchpadCmd::Stop { device }), .. }), ..
+            } => device,
             RemoteCmd::Computers { action } => match action {
                 ComputersCmd::Remove { computer }
                 | ComputersCmd::Allow { computer }
@@ -4105,6 +4205,34 @@ mod tests {
         assert!(argv(&["devices", "grant", "p", "input"]).is_err(), "on or off is needed");
         assert!(argv(&["devices", "grant", "p", "agents", "on"]).is_err(), "a phone has no agents grant");
         assert!(argv(&["devices", "grant", "p", "input", "control"]).is_err());
+        // The touchpad: what is going on, and stopping it (any phone, or one).
+        assert!(matches!(
+            argv(&["devices", "touchpad"]).expect("touchpad"),
+            crate::Cmd::Remote { cmd: RemoteCmd::Devices { action: Some(DevicesCmd::Touchpad { action: None, json: false }), .. } }
+        ));
+        assert!(matches!(
+            argv(&["devices", "touchpad", "--json"]).expect("touchpad --json"),
+            crate::Cmd::Remote { cmd: RemoteCmd::Devices { action: Some(DevicesCmd::Touchpad { action: None, json: true }), .. } }
+        ));
+        match argv(&["devices", "touchpad", "stop"]).expect("stop") {
+            crate::Cmd::Remote {
+                cmd: RemoteCmd::Devices { action: Some(DevicesCmd::Touchpad { action: Some(TouchpadCmd::Stop { device }), .. }), .. },
+            } => assert_eq!(device, None),
+            _ => panic!("touchpad stop did not parse as itself"),
+        }
+        let wire = |r: &Request| serde_json::to_string(r).unwrap();
+        assert_eq!(wire(&Request::InputStop { device: None }), r#"{"cmd":"input_stop"}"#);
+        assert_eq!(wire(&Request::InputStop { device: Some("p".into()) }), r#"{"cmd":"input_stop","device":"p"}"#);
+        assert_eq!(wire(&Request::InputStatus), r#"{"cmd":"input_status"}"#);
+        let r: Reply = serde_json::from_str(r#"{"reply":"input_stopped","stopped":true}"#).expect("stopped");
+        assert!(matches!(r, Reply::InputStopped { stopped: true }));
+        let r: Reply = serde_json::from_str(r#"{"reply":"input_status","live":false}"#).expect("status");
+        assert!(matches!(r, Reply::InputStatus { live: false, device: None, .. }));
+        let r: Reply = serde_json::from_str(
+            r#"{"reply":"input_status","live":true,"device":"d","name":"Pixel","since_ms":5}"#,
+        )
+        .expect("live");
+        assert!(matches!(r, Reply::InputStatus { live: true, since_ms: Some(5), .. }));
         let wire = |r: &Request| serde_json::to_string(r).unwrap();
         assert_eq!(
             wire(&Request::DeviceGrant { device: "p".into(), input: "on" }),
@@ -4137,6 +4265,7 @@ mod tests {
             &["devices", "allow", ID],
             &["devices", "grant", ID, "input", "on"],
             &["devices", "grant", ID, "input", "off", "--yes"],
+            &["devices", "touchpad", "stop", ID],
             &["computers", "remove", ID],
             &["computers", "allow", ID],
             &["computers", "forget", ID],

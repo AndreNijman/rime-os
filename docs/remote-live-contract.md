@@ -2196,7 +2196,7 @@ slow control requests:
 ```text
 Open {"cmd":"input","v":1}
 → Control {"reply":"input_ready"}                                  then Data both ways
-→ Control {"reply":"error","kind":"not_allowed"|"locked"|"unavailable"|"busy"|"bad_request","message":"…"}, Close
+→ Control {"reply":"error","kind":"not_allowed"|"stopped"|"locked"|"unavailable"|"busy"|"bad_request","message":"…"}, Close
 ```
 
 Refused, in this order:
@@ -2207,12 +2207,15 @@ Refused, in this order:
    leave `input` out, and the channel checks the scope again where it is
    made, so neither check alone is the wall.
 2. `bad_request`: `v` is not 1.
-3. `unavailable`: Gaming Mode is running (gamescope: a `gamescope-N-ei`
+3. `stopped`: a person stopped this phone's touchpad at the computer less
+   than 30 s ago (`input_stop`, below). The message says how many seconds
+   are left and names the command that lifts it at once.
+4. `unavailable`: Gaming Mode is running (gamescope: a `gamescope-N-ei`
    socket answers in the runtime dir), nobody is logged in to a graphical
    session, no compositor socket of that session answers (or more than one
    does, below), or the compositor offers no virtual pointer or keyboard.
-4. `busy`: another phone has the channel. One input channel per computer.
-5. `locked`: the gate says locked (below), checked before and again after
+5. `busy`: another phone has the channel. One input channel per computer.
+6. `locked`: the gate says locked (below), checked before and again after
    the compositor connection exists, since only then is its lock notifier
    known.
 
@@ -2289,7 +2292,7 @@ frame: `{"seq":N,"ev":[…]}`.
 {"event":"input_paused","why":"locked"}
 {"event":"input_resumed"}
 {"event":"input_released","why":"lease"}
-{"event":"input_closed","why":"not_allowed"|"unavailable"|"refused"|"stopping","message":"…"}
+{"event":"input_closed","why":"not_allowed"|"stopped"|"unavailable"|"refused"|"stopping","message":"…"}
 ```
 
 `input_closed` comes before the channel's Close when the computer ends it.
@@ -2377,6 +2380,62 @@ SIGINT (rime-remoted lets go and then exits, `input_closed` with
   starts. A panic on the session thread still lets go of what is held and
   gives the slot back.
 
+**Shown at the computer, and stopped there.** So the Shell can say "in use as
+a touchpad" with a Stop button, rime-remoted keeps
+`$XDG_RUNTIME_DIR/rime-remote/input.json` (folder 0700, file 0600, written
+whole to a temporary file and renamed into place, like `focus.json`):
+
+```json
+{"v":1,"live":true,"device":"<id>","name":"Pixel 8","since_ms":1795000000000}
+{"v":1,"live":false}
+```
+
+- `live:false` is written when rime-remoted starts, before anything else
+  about the touchpad, so a file a killed daemon left saying `live:true` never
+  outlives it. The file is kept, never removed.
+- `live:true` is written when a channel becomes live (after every refusal
+  above), and `live:false` when it ends, for any reason, after everything
+  held was let go. A panic on the session thread writes it too.
+- `name` is the phone's own choice, so it is cleaned where it is written:
+  control characters, zero-width marks and direction overrides are dropped,
+  it is trimmed, kept to 64 characters, and an empty result is `a phone`.
+  The file never carries anything about what was typed, clicked or moved.
+
+```json
+{"cmd":"input_status"}
+→ {"reply":"input_status","live":true,"device":"<id>","name":"Pixel 8","since_ms":N}
+→ {"reply":"input_status","live":false}
+{"cmd":"input_stop"}                      or {"cmd":"input_stop","device":"<id or name>"}
+→ {"reply":"input_stopped","stopped":true|false}
+```
+
+- `input_stop` ends the live channel the way lowering the grant does
+  (everything held let go, `input_closed` with `stopped` and the message
+  "stopped at the computer", then Close), but the **grant is unchanged**.
+  With `device`, only that phone's channel is stopped; a phone that is not
+  paired is an error. `stopped` says whether a channel was running.
+- **Cool-down.** The stopped phone is refused with `stopped` for 30 s, so
+  a phone that reconnects on its own cannot take the desktop straight back.
+  A person raising its grant again (`device_grant … input:"on"`, even when
+  it is already on) lifts it at once. The cool-down is in memory: a restart
+  of rime-remoted forgets it, which is fine, since the restart already
+  ended the channel.
+- The start's recovery of `input-held.json` is never stopped this way.
+- **Who may.** Both verbs are on the local control socket only, and need a
+  process of this user (`SO_PEERCRED` uid), of **any** origin, agents and
+  scheduled jobs included: the `revoke` rule, and wider than
+  `device_grant`'s. Stopping only ever takes access away: the worst an agent
+  can do with it is stop the touchpad again and again, keeping that phone
+  off 30 s at a time until a person here raises its grant, and it gains
+  nothing by it. The Stop button must work from whatever the Shell runs as. Another user and a
+  connection without peer credentials are refused. No phone, companion or
+  peer session reaches either verb: the session control path answers
+  neither (a phone's unknown line goes to rime-agentd, which has no such
+  verb), and neither is in the companion or peer allow-lists.
+- `rime remote devices touchpad [--json]` prints which phone is using the
+  computer and since when; `rime remote devices touchpad stop [<phone>]`
+  stops it (exit 0 whether or not one was running).
+
 **The journal.** One line when a channel opens and one when it ends, on
 rime-remoted's stderr (the user journal):
 
@@ -2415,6 +2474,8 @@ quickshell or python3 is missing.
 
 ```text
 rime remote devices grant <phone> input on|off [--yes]
+rime remote devices touchpad [--json]
+rime remote devices touchpad stop [<phone>]
 ```
 
 ## 3. The phone

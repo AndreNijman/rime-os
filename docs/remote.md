@@ -648,6 +648,24 @@ computer would get, while the computer is unlocked. So:
 Turning it off, or revoking the phone, stops a touchpad that is in use
 straight away.
 
+To see whether a phone is using it right now, and stop it without changing
+what the phone is allowed:
+
+```
+$ rime remote devices touchpad
+Pixel 8 (d-…) is using this computer as a touchpad and keyboard (started 2m ago). `rime remote devices touchpad stop` ends it.
+$ rime remote devices touchpad stop
+rime: the touchpad was stopped, and everything the phone held was let go. …
+```
+
+The phone is told it was stopped at the computer, and cannot start again for
+30 s. Turning it on again (`rime remote devices grant <phone> input on`)
+lets it start at once. `--json` prints `live`, `device`, `name` and
+`since_ms`. The Rime Shell reads the same thing from
+`$XDG_RUNTIME_DIR/rime-remote/input.json`. Any program running as you can
+stop the touchpad this way, an agent included; only a person at a terminal
+can turn it on.
+
 Each use leaves two lines in your journal (`journalctl --user -u
 rime-remoted`): which phone started, and when it stopped,
 why, how long it lasted and how many moves, clicks and keys it sent. Never
