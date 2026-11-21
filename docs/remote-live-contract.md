@@ -217,7 +217,10 @@ features". `lan` is the current list of addresses this machine listens on
   as control is safe; the phone may then stop dialling a connection per
   terminal.
 - `liveness`: the session ping (15 s) now expects pongs; 3 missed → close the
-  connection (the phone reconnects).
+  connection (the phone reconnects). Any other frame from the device counts as
+  a sign of life too (it is sealed by the session, so it is the device, now),
+  and only pings sent after the last sign of life count as missed: a pong
+  queued behind a file the device is sending is late, not missing.
 - Relay waiting socket: a read deadline (no frame for 75 s despite 30 s pings →
   re-dial); re-dial backoff capped at **10 s** (was 60); a `409` meaning "a host
   is already waiting" is not counted as a failure.
@@ -1706,6 +1709,11 @@ Data from the receiver, one JSON line each:
   keeps at most 4 MiB unacknowledged, and while it waits it reads its frames
   and answers the receiver's pings, so a long transfer keeps its session alive
   over the LAN and the relay alike, and a slow disk slows the sender. The
+  file's own frames keep the session alive on the receiver (§2.2
+  `liveness`), so a pong that waits behind up to 4 MiB on a slow link does
+  not close it. While its bytes are on the way the sender waits up to 45 s
+  (three of the receiver's pings) for any frame, not the 10 s it gives other
+  answers: below about 0.8 Mbit/s a MiB takes longer than 10 s to cross. The
   sender gives the whole transfer the receiver's budget plus 150 s for the
   outcome.
 - Saved: a notification "<computer> sent you <name>", "Saved in Downloads.

@@ -71,6 +71,18 @@ impl Stream for RelayPipe {
 /// computer syncs up to [`crate::files::MAX_FILE_BYTES`] to disk first.
 const OUTCOME: Duration = Duration::from_secs(150);
 
+/// How long a sender waits for any one frame while its file is on the way:
+/// the window the receiver itself gives a silent peer (three of its pings).
+///
+/// Not [`READ`]. A receiver that is alive writes a progress line every
+/// [`crate::files::WINDOW`] and a ping every [`crate::serve::PING_INTERVAL`],
+/// and nothing else: below about 0.8 Mbit/s a MiB takes longer than ten
+/// seconds to cross, so a healthy transfer could pass ten seconds with
+/// neither and was given up as "no answer". A receiver that is really gone
+/// is still noticed here, and the whole transfer keeps its deadline.
+const UPLOADING: Duration =
+    Duration::from_secs(crate::serve::PING_INTERVAL.as_secs() * crate::serve::LIVENESS_MISSES as u64);
+
 /// An open session to another computer.
 pub struct Link {
     stream: Box<dyn Stream>,
@@ -272,6 +284,7 @@ impl Link {
         if accepted["reply"] != crate::files::FILE_VERB || accepted["len"].as_u64() != Some(len) {
             return Ok(accepted);
         }
+        self.stream.wait(UPLOADING).map_err(|e| e.to_string())?;
         let mut lines = Lines::default();
         let mut sent = 0u64;
         let mut acked = 0u64;
@@ -597,6 +610,17 @@ mod tests {
         assert!(reached.join().expect("thread"), "this computer's own relay was not dialled");
         assert_eq!(theirs.load(std::sync::atomic::Ordering::SeqCst), 0, "the relay the other computer named was dialled");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sender_waits_for_a_frame_as_long_as_the_receiver_waits_for_a_pong() {
+        // A live receiver is heard from at least once a ping interval, and
+        // it lets a silent sender go after LIVENESS_MISSES of them; the
+        // sender must not give up on it sooner, or a link slow enough that a
+        // MiB takes longer than the old ten seconds fails a healthy transfer.
+        assert!(UPLOADING > crate::serve::PING_INTERVAL);
+        assert_eq!(UPLOADING, crate::serve::PING_INTERVAL * crate::serve::LIVENESS_MISSES as u32);
+        assert!(UPLOADING > READ);
     }
 
     #[test]

@@ -630,6 +630,14 @@ fn read_frames(
                 .map_err(|e| ServeError::Protocol(e.to_string()))?
         };
         let frame = Frame::decode(&plaintext).map_err(|e| ServeError::Protocol(e.to_string()))?;
+        // Any frame but a pong is a sign of life ([`Outstanding`]), counted
+        // as soon as it is read and before it is routed, since handing
+        // `Data` to a channel can wait on that channel's reader.
+        if !matches!(frame, Frame::Pong { .. }) {
+            if let Ok(mut o) = outstanding.lock() {
+                o.alive();
+            }
+        }
         match frame {
             Frame::Ping { token } => send(sealer, Frame::Pong { token })?,
             // The other half of the measurement. A token that was never sent
@@ -1169,6 +1177,17 @@ fn remote_hello(state: &State, scope: Scope) -> Vec<u8> {
 /// Pings that have gone out and not come back, and when the device was last
 /// heard from.
 ///
+/// "Heard from" is a valid pong OR any other frame the device sent: every
+/// frame that reaches [`read_frames`] has been opened by this session's Noise
+/// channel, so it was sealed by the device, now, and cannot be a replay. A
+/// pong is the only measurement of the round trip, but it is not the only
+/// sign of life, and treating it as one closed healthy connections: the
+/// device's pongs travel in the same ordered stream as everything else it
+/// sends, so on a connection carrying a file (up to
+/// [`crate::files::IN_FLIGHT`] ahead of the pong) over a slow link or a busy
+/// computer, the pong arrived after the liveness window while the file's
+/// own frames were arriving all along.
+///
 /// Bounded on purpose. A device that answers nothing would otherwise make
 /// this grow by one entry every interval for as long as the connection is
 /// open, which is a slow leak driven by the far end — exactly the shape of
@@ -1223,14 +1242,24 @@ impl Outstanding {
         Some(at.elapsed())
     }
 
+    /// A frame from the device that is not a pong: alive, but no
+    /// measurement. The pings still out stay out, so a pong for one of them
+    /// is still timed.
+    fn alive(&mut self) {
+        self.heard = Instant::now();
+    }
+
     /// How long the device has been silent, once that is long enough to
     /// close the connection; `None` while it is not.
     ///
-    /// Both halves: [`LIVENESS_MISSES`] pings in a row with no answer, and at
-    /// least [`LIVENESS_FLOOR`] since the last one that was answered.
+    /// Both halves: [`LIVENESS_MISSES`] pings sent since the device was last
+    /// heard from, none answered, and at least [`LIVENESS_FLOOR`] of that
+    /// silence. Only pings sent AFTER the last sign of life count: one that
+    /// went out before it is not a miss the device has had time to answer.
     fn silent(&self) -> Option<Duration> {
         let quiet = self.heard.elapsed();
-        (self.sent.len() >= LIVENESS_MISSES && quiet >= LIVENESS_FLOOR).then_some(quiet)
+        let missed = self.sent.iter().filter(|(_, at)| *at > self.heard).count();
+        (missed >= LIVENESS_MISSES && quiet >= LIVENESS_FLOOR).then_some(quiet)
     }
 }
 
@@ -1709,6 +1738,34 @@ pub(crate) mod tests {
             o.sent(t);
         }
         assert_eq!(o.silent(), None, "closed inside the floor");
+    }
+
+    #[test]
+    fn any_frame_but_a_pong_is_a_sign_of_life_and_only_later_pings_are_misses() {
+        let ago = |s: u64| Instant::now().checked_sub(Duration::from_secs(s)).expect("an old clock");
+        // Three pings unanswered, then a frame that is not a pong (a file's
+        // `Data`): the device is alive though its pongs are still on the way.
+        let mut o = Outstanding::new();
+        o.heard = ago(60);
+        for t in 1..=3 {
+            o.sent(t);
+        }
+        assert!(o.silent().is_some());
+        o.alive();
+        assert_eq!(o.silent(), None, "a device whose frames were arriving was called silent");
+        // And its late pong is still a measurement.
+        assert!(o.answered(3).is_some(), "a frame cost the round trip of a ping still out");
+
+        // Pings sent before the last sign of life are not misses; three sent
+        // after it are, once the floor has passed.
+        let mut o = Outstanding::new();
+        o.sent = [(1, ago(70)), (2, ago(65)), (3, ago(62))].into_iter().collect();
+        o.heard = ago(60);
+        o.sent(4);
+        o.sent(5);
+        assert_eq!(o.silent(), None, "pings sent before its last frame were counted as misses");
+        o.sent(6);
+        assert!(o.silent().is_some(), "three misses after the last frame were not silence");
     }
 
     #[test]
