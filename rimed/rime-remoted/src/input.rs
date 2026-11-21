@@ -722,6 +722,61 @@ pub enum Step {
     End(Why, String),
 }
 
+/// What a session did, by kind, for the journal line at its end: counts
+/// only, never a key code, a character or a position.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub frames: u64,
+    pub motion: u64,
+    pub button: u64,
+    pub scroll: u64,
+    pub key: u64,
+    pub tap: u64,
+    pub text: u64,
+    pub hold: u64,
+    /// Events that arrived while locked, and were dropped.
+    pub dropped: u64,
+}
+
+impl Counts {
+    fn add(&mut self, ev: &Ev) {
+        let n = match ev {
+            Ev::Motion { .. } => &mut self.motion,
+            Ev::Button { .. } => &mut self.button,
+            Ev::Scroll { .. } => &mut self.scroll,
+            Ev::Key { .. } => &mut self.key,
+            Ev::Tap { .. } => &mut self.tap,
+            Ev::Text(_) => &mut self.text,
+            Ev::Hold => &mut self.hold,
+        };
+        *n += 1;
+    }
+}
+
+/// The journal line when a phone starts using this computer as a touchpad.
+fn audit_open(device: &str, name: &str) -> String {
+    format!("rime-remoted: touchpad: {name:?} ({device}) started using this computer as a touchpad and keyboard")
+}
+
+/// The journal line when it stops: who, why, for how long, and how many
+/// events of each kind. Never what was typed or pressed.
+fn audit_close(device: &str, name: &str, why: &str, lasted: Duration, c: &Counts) -> String {
+    format!(
+        "rime-remoted: touchpad: {name:?} ({device}) stopped ({why}) after {}s; frames={} motion={} \
+         button={} scroll={} key={} tap={} text={} hold={} dropped_while_locked={}",
+        lasted.as_secs(),
+        c.frames,
+        c.motion,
+        c.button,
+        c.scroll,
+        c.key,
+        c.tap,
+        c.text,
+        c.hold,
+        c.dropped
+    )
+}
+
 /// Frames, text and text keymaps in the current second.
 struct Rate {
     start: Instant,
@@ -786,6 +841,7 @@ pub struct Session {
     /// The text keyboard's keymap: key `1 + i` types `text_map[i]`.
     text_map: Vec<char>,
     crash: Option<PathBuf>,
+    counts: Counts,
 }
 
 impl Session {
@@ -823,7 +879,13 @@ impl Session {
             },
             text_map: Vec::new(),
             crash,
+            counts: Counts::default(),
         }
+    }
+
+    /// What it has done so far, by kind.
+    pub fn counts(&self) -> Counts {
+        self.counts
     }
 
     #[cfg(test)]
@@ -1019,23 +1081,28 @@ impl Session {
             return Step::Go;
         }
         self.last_seq = Some(seq);
+        self.counts.frames += 1;
         self.shell = self.gate.shell_file();
         if self.paused {
             if self.locked_now() {
+                self.counts.dropped += events.len() as u64;
                 return Step::Go;
             }
             self.paused = false;
             (self.out)(json!({"event": "input_resumed"}));
         }
-        for ev in events {
+        let total = events.len();
+        for (n, ev) in events.into_iter().enumerate() {
             // Before EVERY event: a frame that started unlocked can end
             // after the screen locked.
             if self.locked_now() {
+                self.counts.dropped += (total - n) as u64;
                 return match self.pause() {
                     Ok(()) => Step::Go,
                     Err(e) => gone(e),
                 };
             }
+            self.counts.add(&ev);
             if let Err(e) = self.apply(ev) {
                 return gone(e);
             }
@@ -1450,10 +1517,16 @@ pub fn open(
         Instant::now(),
     );
     let (stop2, done2) = (Arc::clone(&stop), Arc::clone(&done));
+    let who = (
+        device.to_string(),
+        name.unwrap_or_else(|| device.to_string()),
+    );
+    let opened_line = audit_open(&who.0, &who.1);
     std::thread::Builder::new()
         .name("rime-input".into())
-        .spawn(move || run(session, mine, stop2, done2, token))
+        .spawn(move || run(session, mine, stop2, done2, token, who))
         .map_err(|e| error("unavailable", &format!("no thread for the touchpad: {e}")))?;
+    eprintln!("{opened_line}");
     *guard = Some(Live {
         token,
         device: device.to_string(),
@@ -1475,7 +1548,9 @@ fn run(
     stop: Arc<AtomicU8>,
     done: Arc<(Mutex<bool>, Condvar)>,
     token: u64,
+    who: (String, String),
 ) {
+    let opened = Instant::now();
     let mut buf = vec![0u8; MAX_FRAME_BYTES + 1];
     let ended = loop {
         if let Some(why) = Why::from_u8(stop.load(Ordering::SeqCst)) {
@@ -1519,7 +1594,12 @@ fn run(
         };
         (why, message)
     });
+    let word = ended.as_ref().map_or("disconnected", |(why, _)| why.word());
     session.end(ended);
+    eprintln!(
+        "{}",
+        audit_close(&who.0, &who.1, word, opened.elapsed(), &session.counts())
+    );
     drop(session);
     drop(sock);
     {
@@ -3262,6 +3342,62 @@ mod tests {
         );
         f.refuse(&["sync"]);
         assert_eq!(recover(&mut f.clone(), &held, true), held);
+    }
+
+    #[test]
+    fn the_journal_hears_who_why_how_long_and_how_many_never_what() {
+        let mut r = rig("audit");
+        r.frame(
+            0,
+            1,
+            json!([{"t": "m", "dx": 1, "dy": 2}, {"t": "k", "code": 47, "p": true},
+                   {"t": "k", "code": 47, "p": false}, {"t": "text", "s": "hunter2"},
+                   {"t": "tap", "code": 46, "mods": ["ctrl"]}, {"t": "hold"}]),
+        );
+        // A resend is not counted twice.
+        r.frame(5, 1, json!([{"t": "m", "dx": 1, "dy": 2}]));
+        r.lock(Some(true), false);
+        r.frame(
+            10,
+            2,
+            json!([{"t": "text", "s": "secret"}, {"t": "b", "b": "left", "p": true}]),
+        );
+        let c = r.session.counts();
+        assert_eq!(
+            c,
+            Counts {
+                frames: 2,
+                motion: 1,
+                key: 2,
+                text: 1,
+                tap: 1,
+                hold: 1,
+                dropped: 2,
+                ..Counts::default()
+            }
+        );
+        let line = audit_close(
+            "d1f2",
+            "Andre\u{1b}[31m's Pixel",
+            "lease",
+            Duration::from_secs(75),
+            &c,
+        );
+        assert!(
+            line.contains("\"Andre\\u{1b}[31m's Pixel\" (d1f2) stopped (lease) after 75s"),
+            "{line}"
+        );
+        assert!(
+            line.contains("key=2")
+                && line.contains("text=1")
+                && line.contains("dropped_while_locked=2"),
+            "{line}"
+        );
+        for secret in ["hunter2", "secret", "47", "46", "dx", "\u{1b}"] {
+            assert!(!line.contains(secret), "{secret} in {line}");
+        }
+        let line = audit_open("d1f2", "Pixel");
+        assert!(line.contains("\"Pixel\" (d1f2) started"), "{line}");
     }
 
     #[test]

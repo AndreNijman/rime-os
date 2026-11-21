@@ -5527,6 +5527,14 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     let got = input_actions_until(&h, n, "the close", |a| has(a, serde_json::json!({"a": "close"})));
     assert!(has(&got, serde_json::json!({"a": "key", "code": 36, "p": false})), "{got:?}");
     assert!(!h.root.join("run/rime-remote/input-held.json").exists(), "nothing is held any more");
+    // The journal has one line when it started and one when it stopped,
+    // with counts and never what was typed.
+    let journal = std::fs::read_to_string(h.root.join("remoted.log")).unwrap_or_default();
+    let lines: Vec<&str> = journal.lines().filter(|l| l.contains("rime-remoted: touchpad: ")).collect();
+    assert_eq!(lines.len(), 2, "{journal}");
+    assert!(lines[0].contains("started using this computer as a touchpad"), "{journal}");
+    assert!(lines[1].contains("stopped (not_allowed) after") && lines[1].contains("text=1"), "{journal}");
+    assert!(!journal.contains("hunter2") && !journal.contains('é'), "{journal}");
     assert_eq!(open_input(&mut p, 9)["kind"], "not_allowed");
     closed(&mut p, 9);
 
