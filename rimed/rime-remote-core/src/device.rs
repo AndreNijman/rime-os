@@ -197,17 +197,19 @@ pub struct Device {
     /// which time it is trusted like one paired here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allowed_ms: Option<u64>,
-    /// For another computer only: what this computer shares with it. Set by
-    /// a person here (`rime remote computers clipboard|files|handoff`) and by nothing
-    /// else: never read from another computer or a phone, never sent to one,
-    /// and cleared when the computer is removed. See [`Share`].
+    /// What this computer shares with another computer, or lets a phone do.
+    /// Set by a person here (`rime remote computers clipboard|files|handoff|grant`,
+    /// `rime remote devices grant`) and by nothing else: never read from
+    /// another computer or a phone, never sent to one, and cleared when the
+    /// computer is removed or the phone revoked. See [`Share`].
     #[serde(default, skip_serializing_if = "Share::is_default")]
     pub share: Share,
 }
 
-/// What this computer shares with one other computer (§2.15).
+/// What this computer shares with one other computer (§2.15), and the one
+/// switch a phone has: `input` (§2.16).
 ///
-/// Each switch is this computer's half: a copy goes from A to B only when A's
+/// Each computer switch is this computer's half: a copy goes from A to B only when A's
 /// `clipboard_send` for B and B's `clipboard_receive` for A are both on. None
 /// of them counts for a computer that is removed, or introduced and not
 /// allowed yet ([`Device::trusted`]); see [`Device::sends_clipboard`] and its
@@ -237,6 +239,12 @@ pub struct Share {
     /// about its own grant.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agents: Option<AgentGrant>,
+    /// For a phone only: it may move this computer's pointer and type on its
+    /// keyboard (contract §2.16). Off unless a person here turned it on
+    /// (`device_grant`); never set by anything a phone sends, cleared when
+    /// the phone is revoked, and read only through [`Device::input_grant`].
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub input: bool,
 }
 
 /// How far another computer may reach into this computer's agent sessions.
@@ -431,6 +439,15 @@ impl Device {
             None
         }
     }
+
+    /// Whether this phone may use this computer as a touchpad and keyboard:
+    /// a person here turned it on, and the phone is still paired and trusted
+    /// (an introduced phone not allowed yet never has it, whatever its record
+    /// says). The only reader of `share.input`. The scope of the session
+    /// asking is checked separately: a companion key never has it.
+    pub fn input_grant(&self) -> bool {
+        self.is_active() && self.trusted() && self.share.input
+    }
 }
 
 /// Why a device store operation failed.
@@ -462,6 +479,11 @@ pub enum StoreError {
     NotAllowedYet(String),
     /// Sharing with a removed computer.
     NotShared(String),
+    /// Raising a phone's input grant before a person here allowed the phone
+    /// another computer brought.
+    PhoneNotAllowedYet(String),
+    /// Raising a revoked phone's input grant.
+    PhoneRevoked(String),
 }
 
 impl std::fmt::Display for StoreError {
@@ -489,6 +511,14 @@ impl std::fmt::Display for StoreError {
                  run `rime remote computers allow` for it first"
             ),
             StoreError::NotShared(name) => write!(f, "'{name}' was removed from this computer, so nothing is shared with it"),
+            StoreError::PhoneNotAllowedYet(name) => write!(
+                f,
+                "'{name}' was added by another of your computers and is not allowed yet; run \
+                 `rime remote devices allow` for it first"
+            ),
+            StoreError::PhoneRevoked(name) => {
+                write!(f, "'{name}' is revoked, so it cannot use this computer as a touchpad")
+            }
             StoreError::KeyInUse => write!(
                 f,
                 "that key is already known to this machine; generate a new one"
@@ -1368,7 +1398,32 @@ impl DeviceStore {
         if d.revoked_ms.is_none() {
             d.revoked_ms = Some(now_ms);
         }
+        // A revoked phone's touchpad grant goes with it, and does not come
+        // back if the phone is ever paired again (a new pairing starts clean).
+        d.share.input = false;
         Ok(d.clone())
+    }
+
+    /// `rime remote devices grant <phone> input on|off`: whether this phone
+    /// may use this computer as a touchpad and keyboard (§2.16). Turning it
+    /// on is refused for a revoked phone and for one another computer
+    /// brought and nobody here allowed yet; turning it off is always
+    /// allowed. Returns the phone and whether the grant went down, which is
+    /// what ends a live input channel.
+    pub fn set_phone_input(&mut self, id_or_name: &str, on: bool) -> Result<(Device, bool), StoreError> {
+        let id = self.resolve(id_or_name)?;
+        let d = self.devices.get_mut(&id).expect("resolved");
+        if on {
+            if !d.is_active() {
+                return Err(StoreError::PhoneRevoked(d.name.clone()));
+            }
+            if !d.trusted() {
+                return Err(StoreError::PhoneNotAllowedYet(d.name.clone()));
+            }
+        }
+        let lowered = d.share.input && !on;
+        d.share.input = on;
+        Ok((d.clone(), lowered))
     }
 
     /// Record a completed handshake.
@@ -2337,6 +2392,44 @@ mod tests {
         s.revoke("pixel", 60).expect("revoke");
         assert!(matches!(s.allow_phone("pixel", 70), Err(StoreError::Revoked(_))));
         assert!(s.authenticate(&key(1)).is_none());
+    }
+
+    #[test]
+    fn a_phones_input_grant_is_off_by_default_set_here_only_raised_for_a_trusted_phone_and_cleared_by_revoke() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let p = s.pair(&key(1), "pixel", 10, false).expect("paired");
+        assert!(!p.input_grant(), "a new phone may type here");
+        // Off is written as no field at all.
+        assert!(!serde_json::to_string(&p).expect("json").contains("input"));
+        let (d, lowered) = s.set_phone_input("pixel", true).expect("on");
+        assert!(d.input_grant() && !lowered);
+        assert!(serde_json::to_string(&d).expect("json").contains(r#""input":true"#));
+        // On again changes nothing and lowers nothing; off says it went down.
+        assert!(!s.set_phone_input(&p.id, true).expect("on again").1);
+        let (d, lowered) = s.set_phone_input(&p.id, false).expect("off");
+        assert!(!d.input_grant() && lowered);
+        assert!(!s.set_phone_input(&p.id, false).expect("off again").1, "off twice lowered it twice");
+        // A revoke clears it, raising is refused after, and a new pairing of
+        // the same key starts clean.
+        s.set_phone_input(&p.id, true).expect("on");
+        let gone = s.revoke(&p.id, 20).expect("revoke");
+        assert!(!gone.share.input && !gone.input_grant(), "a revoke kept the grant");
+        assert!(matches!(s.set_phone_input(&p.id, true), Err(StoreError::PhoneRevoked(_))));
+        assert!(s.set_phone_input(&p.id, false).is_ok(), "turning it off is always allowed");
+        assert!(!s.pair(&key(1), "pixel", 30, false).expect("paired again").input_grant());
+        // A phone another computer brought: refused until a person allows
+        // it, and a grant smuggled into its record does nothing until then.
+        let brought = s.pair_introduced(&key(2), "brought", by("desk"), 40, false).expect("brought");
+        assert!(matches!(s.set_phone_input("brought", true), Err(StoreError::PhoneNotAllowedYet(_))));
+        let mut smuggled = brought.clone();
+        smuggled.share.input = true;
+        assert!(!smuggled.input_grant(), "an introduced phone not allowed yet may type here");
+        s.allow_phone("brought", 50).expect("allowed");
+        assert!(s.set_phone_input("brought", true).expect("on").0.input_grant());
+        // A computer is not a phone: there is no input grant to set on one.
+        let desk = s.pair_computer(&raw(7), &own, "desk", vec![], None, 60).expect("desk");
+        assert!(matches!(s.set_phone_input(&desk.id, true), Err(StoreError::NoSuchDevice(_))));
     }
 
     #[test]
