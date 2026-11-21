@@ -845,6 +845,12 @@ mod tests {
             self.waits.lock().expect("waits").push(d);
             self.inner.set_read_timeout(Some(d))
         }
+        fn writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
+            Ok(Box::new(self.inner.try_clone()?))
+        }
+        fn socket(&self) -> std::io::Result<TcpStream> {
+            self.inner.try_clone()
+        }
     }
 
     /// A link to a receiver on loopback that takes a `len`-byte file (its
