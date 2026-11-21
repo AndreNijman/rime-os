@@ -3077,4 +3077,335 @@ mod tests {
             .expect("refused");
         assert!(err.contains("does not take virtual input"), "{err}");
     }
+
+    // ── a real compositor ────────────────────────────────────────────────
+
+    /// Runs inside foot: every input chunk (keys, SGR mouse reports) as a
+    /// Python bytes literal per line.
+    const RECV_PY: &str = r#"import os, sys, termios, tty, select, time
+log = open(sys.argv[1], "w", buffering=1)
+fd = sys.stdin.fileno()
+tty.setraw(fd)
+sys.stdout.write("\x1b[?1003h\x1b[?1006h"); sys.stdout.flush()
+log.write("READY\n")
+end = time.monotonic() + 120
+while time.monotonic() < end:
+    r, _, _ = select.select([fd], [], [], 0.5)
+    if r:
+        log.write(repr(os.read(fd, 4096)) + "\n")
+"#;
+
+    /// A test-only lock screen (ext-session-lock, no PAM) that logs what it
+    /// receives. The same protocol every real Rime lock screen uses.
+    const LOCK_QML: &str = r#"import QtQuick
+import Quickshell
+import Quickshell.Wayland
+ShellRoot {
+    WlSessionLock {
+        id: lock
+        locked: true
+        onSecureStateChanged: console.warn("LOCKTEST secure=" + lock.secure)
+        WlSessionLockSurface {
+            color: "black"
+            Item {
+                anchors.fill: parent
+                focus: true
+                Keys.onPressed: (e) => console.warn("LOCKTEST key text=" + JSON.stringify(e.text))
+                MouseArea {
+                    anchors.fill: parent
+                    hoverEnabled: true
+                    onPressed: console.warn("LOCKTEST press")
+                }
+            }
+        }
+    }
+}
+"#;
+
+    fn need(bin: &str) {
+        let found = std::env::var_os("PATH")
+            .map(|p| std::env::split_paths(&p).any(|d| d.join(bin).is_file()))
+            .unwrap_or(false);
+        assert!(
+            found,
+            "{bin} is not installed: this test needs labwc, foot, quickshell and python3"
+        );
+    }
+
+    fn wait_for(what: &str, within: Duration, log: &Path, mut done: impl FnMut() -> bool) {
+        let deadline = Instant::now() + within;
+        while !done() {
+            if Instant::now() >= deadline {
+                let seen = std::fs::read_to_string(log).unwrap_or_default();
+                panic!("never saw {what}; {} says:\n{seen}", log.display());
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// Children stopped by their own PIDs, and the private runtime dir
+    /// removed, however the test ends.
+    struct Bed {
+        rt: PathBuf,
+        kids: Vec<std::process::Child>,
+    }
+
+    impl Drop for Bed {
+        fn drop(&mut self) {
+            for k in self.kids.iter_mut().rev() {
+                let _ = k.kill();
+                let _ = k.wait();
+            }
+            let _ = std::fs::remove_dir_all(&self.rt);
+        }
+    }
+
+    impl Bed {
+        /// A client of the private compositor, with nothing of this
+        /// session's environment.
+        fn client(&self, program: &str) -> std::process::Command {
+            let mut c = std::process::Command::new(program);
+            c.env_clear()
+                .env("HOME", self.rt.join("home"))
+                .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+                .env("XDG_RUNTIME_DIR", &self.rt)
+                .env("WAYLAND_DISPLAY", "wayland-0")
+                .env("LANG", "C.UTF-8");
+            c
+        }
+    }
+
+    /// Keys, motion, clicks, scrolls and Unicode text reach a real window
+    /// through a headless labwc started here, in its own runtime dir (never
+    /// this machine's desktop). Then a real ext-session-lock screen: with
+    /// the gate saying locked nothing reaches it, and the negative control,
+    /// the gate saying unlocked while the compositor is locked, shows that
+    /// injected input DOES reach a lock screen, so the gate is what stops it.
+    ///
+    /// Needs labwc, foot, quickshell and python3, and fails without them:
+    /// `--ignored --exact input::tests::a_real_compositor_gets_the_input_and_a_lock_screen_gets_none_of_it`.
+    #[test]
+    #[ignore = "starts a headless labwc, foot and quickshell"]
+    fn a_real_compositor_gets_the_input_and_a_lock_screen_gets_none_of_it() {
+        for b in ["labwc", "foot", "quickshell", "python3"] {
+            need(b);
+        }
+        // Short: a socket path is limited to 108 bytes.
+        let rt = PathBuf::from(format!("/tmp/rime-in-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&rt);
+        std::fs::create_dir_all(rt.join("home/.config/labwc")).expect("mkdir");
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&rt, std::fs::Permissions::from_mode(0o700)).expect("chmod");
+        std::fs::write(rt.join("home/.config/labwc/autostart"), "").expect("autostart");
+        std::fs::write(
+            rt.join("home/.config/labwc/rc.xml"),
+            "<?xml version=\"1.0\"?>\n<labwc_config></labwc_config>\n",
+        )
+        .expect("rc");
+        std::fs::write(rt.join("recv.py"), RECV_PY).expect("recv");
+        std::fs::create_dir_all(rt.join("lockqs")).expect("mkdir");
+        std::fs::write(rt.join("lockqs/shell.qml"), LOCK_QML).expect("qml");
+        let mut bed = Bed {
+            rt: rt.clone(),
+            kids: Vec::new(),
+        };
+
+        let labwc = std::process::Command::new("labwc")
+            .env_clear()
+            .env("HOME", rt.join("home"))
+            .env("PATH", std::env::var_os("PATH").unwrap_or_default())
+            .env("XDG_RUNTIME_DIR", &rt)
+            .env("WLR_BACKENDS", "headless")
+            .env("WLR_RENDERER", "pixman")
+            .env("WLR_LIBINPUT_NO_DEVICES", "1")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(rt.join("labwc.log")).expect("log"))
+            .spawn()
+            .expect("labwc");
+        bed.kids.push(labwc);
+        let socket = rt.join("wayland-0");
+        wait_for(
+            "labwc's socket",
+            Duration::from_secs(15),
+            &rt.join("labwc.log"),
+            || UnixStream::connect(&socket).is_ok(),
+        );
+
+        let recv_log = rt.join("recv.log");
+        let foot = bed
+            .client("foot")
+            .args(["-o", "font=monospace:size=8", "python3"])
+            .arg(rt.join("recv.py"))
+            .arg(&recv_log)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::fs::File::create(rt.join("foot.log")).expect("log"))
+            .spawn()
+            .expect("foot");
+        bed.kids.push(foot);
+        let read = |p: &Path| std::fs::read_to_string(p).unwrap_or_default();
+        wait_for(
+            "the receiver",
+            Duration::from_secs(15),
+            &rt.join("foot.log"),
+            || read(&recv_log).contains("READY"),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+
+        let hint = Arc::new(Mutex::new((Some(false), false)));
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let (h, sd) = (Arc::clone(&hint), Arc::clone(&said));
+        let backend = wayland::Wayland::connect(&socket, &wayland::Layout::from_names("us", ""))
+            .expect("virtual devices");
+        assert_eq!(
+            backend.compositor_locked(),
+            None,
+            "labwc has no lock notifier"
+        );
+        let mut session = Session::new(
+            Box::new(backend),
+            Gate {
+                logind: Box::new(move || *h.lock().expect("h")),
+                shell: None,
+            },
+            Box::new(|| true),
+            Box::new(|| Ok(())),
+            Box::new(move |v| sd.lock().expect("s").push(v)),
+            Some(rt.join("input-held.json")),
+            Instant::now(),
+        );
+        let mut seq = 0u64;
+        let mut send = |session: &mut Session, ev: Value| {
+            seq += 1;
+            let step = session.frame(
+                json!({"seq": seq, "ev": ev}).to_string().as_bytes(),
+                Instant::now(),
+            );
+            assert_eq!(step, Step::Go);
+            std::thread::sleep(Duration::from_millis(30));
+        };
+
+        // Into the window: over it, keys (with Shift), text, a click, a wheel.
+        for _ in 0..4 {
+            send(&mut session, json!([{"t": "m", "dx": 60, "dy": 40}]));
+        }
+        send(
+            &mut session,
+            json!([{"t": "tap", "code": 35}, {"t": "tap", "code": 23, "mods": ["shift"]}]),
+        );
+        send(&mut session, json!([{"t": "text", "s": "é✓"}]));
+        send(&mut session, json!([{"t": "b", "b": "left", "p": true}]));
+        send(&mut session, json!([{"t": "b", "b": "left", "p": false}]));
+        send(
+            &mut session,
+            json!([{"t": "s", "dx": 0, "dy": 15, "src": "wheel"}]),
+        );
+        // Motion with no button held, now that the pointer is over the
+        // window: a report foot sends only for a real move.
+        for _ in 0..3 {
+            send(&mut session, json!([{"t": "m", "dx": 12, "dy": 9}]));
+        }
+        // The receiver logs each read as a bytes literal; join them.
+        let typed = |p: &Path| -> String {
+            read(p)
+                .lines()
+                .filter_map(|l| l.strip_prefix("b'").and_then(|l| l.strip_suffix('\'')))
+                .collect()
+        };
+        let want = [
+            "hI",
+            r"\xc3\xa9\xe2\x9c\x93",
+            r"\x1b[<0;",
+            r"\x1b[<65;",
+            r"\x1b[<35;",
+        ];
+        wait_for(
+            "every kind of input in the window",
+            Duration::from_secs(5),
+            &recv_log,
+            || {
+                let got = typed(&recv_log);
+                want.iter().all(|w| got.contains(w))
+            },
+        );
+
+        // Locking, as logind says: a key held at that moment is let go and
+        // the phone is told. The gate turns before the lock screen exists,
+        // as the Shell's file makes it do on a real machine.
+        send(&mut session, json!([{"t": "k", "code": 31, "p": true}]));
+        *hint.lock().expect("h") = (Some(true), false);
+        assert_eq!(session.tick(Instant::now()), Step::Go);
+        assert!(said
+            .lock()
+            .expect("s")
+            .iter()
+            .any(|v| v["event"] == "input_paused"));
+        assert!(session.held().is_empty());
+
+        // A real lock screen.
+        let lock_log = rt.join("lock.log");
+        let lock = bed
+            .client("quickshell")
+            .env("QT_QPA_PLATFORM", "wayland")
+            // pixman labwc offers no GPU buffers: draw in software.
+            .env("QT_QUICK_BACKEND", "software")
+            .arg("-p")
+            .arg(rt.join("lockqs/shell.qml"))
+            // Quickshell writes its log (the QML warnings) to stdout.
+            .stdout(std::fs::File::create(&lock_log).expect("log"))
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("quickshell");
+        bed.kids.push(lock);
+        wait_for(
+            "the lock screen",
+            Duration::from_secs(20),
+            &lock_log,
+            || read(&lock_log).contains("LOCKTEST secure=true"),
+        );
+        std::thread::sleep(Duration::from_millis(300));
+        let before = read(&recv_log);
+
+        // Locked: nothing gets through.
+        send(
+            &mut session,
+            json!([{"t": "tap", "code": 30}, {"t": "text", "s": "secret"}]),
+        );
+        send(
+            &mut session,
+            json!([{"t": "b", "b": "left", "p": true}, {"t": "b", "b": "left", "p": false}]),
+        );
+        std::thread::sleep(Duration::from_millis(500));
+        let locked = read(&lock_log);
+        assert!(
+            !locked.contains("LOCKTEST key") && !locked.contains("LOCKTEST press"),
+            "input reached the lock screen while the gate said locked:\n{locked}"
+        );
+
+        // The negative control: the gate wrongly saying unlocked. The same
+        // events now reach the lock screen, so it is the gate that kept them
+        // out above.
+        *hint.lock().expect("h") = (Some(false), false);
+        send(&mut session, json!([{"t": "tap", "code": 30}]));
+        send(
+            &mut session,
+            json!([{"t": "b", "b": "left", "p": true}, {"t": "b", "b": "left", "p": false}]),
+        );
+        wait_for(
+            "input on the lock screen with the gate open",
+            Duration::from_secs(5),
+            &lock_log,
+            || {
+                let l = read(&lock_log);
+                l.contains("LOCKTEST key text=\"a\"") && l.contains("LOCKTEST press")
+            },
+        );
+        // And none of it reached the window behind the lock.
+        assert_eq!(
+            read(&recv_log),
+            before,
+            "input reached a window behind the lock screen"
+        );
+        session.end(None);
+        drop(bed);
+    }
 }
