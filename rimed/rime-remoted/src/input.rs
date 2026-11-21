@@ -674,6 +674,8 @@ pub struct Session {
     last_frame: Instant,
     last_seq: Option<u64>,
     last_available: Instant,
+    /// When the tick's checks last ran, by a tick or after a frame.
+    last_tick: Instant,
     rate: Rate,
     crash: Option<PathBuf>,
 }
@@ -704,6 +706,7 @@ impl Session {
             last_frame: now,
             last_seq: None,
             last_available: now,
+            last_tick: now,
             rate: Rate {
                 start: now,
                 frames: 0,
@@ -805,8 +808,18 @@ impl Session {
         Ok(())
     }
 
-    /// One frame from the phone.
+    /// One frame from the phone, then the tick's checks when they are due.
+    /// A phone that keeps sending frames (empty ones too) never lets the
+    /// session thread's read time out, so without this it could keep a key
+    /// held across a lock, or keep typing into Gaming Mode.
     pub fn frame(&mut self, bytes: &[u8], now: Instant) -> Step {
+        match self.take_frame(bytes, now) {
+            Step::Go if now.duration_since(self.last_tick) >= self.tick_every() => self.tick(now),
+            step => step,
+        }
+    }
+
+    fn take_frame(&mut self, bytes: &[u8], now: Instant) -> Step {
         // The grant on EVERY frame: lowering it ends the channel even if the
         // hook that stops a live channel never ran.
         if !(self.granted)() {
@@ -984,6 +997,7 @@ impl Session {
     /// Time passing with nothing from the phone: the grant, the compositor,
     /// the gate and the lease.
     pub fn tick(&mut self, now: Instant) -> Step {
+        self.last_tick = now;
         if !(self.granted)() {
             return Step::End(
                 Why::NotAllowed,
@@ -2697,6 +2711,23 @@ mod tests {
         fn gone(&self) -> Option<String> {
             None
         }
+    }
+
+    #[test]
+    fn frames_that_never_stop_coming_still_let_go_of_a_held_key_when_it_locks() {
+        let mut r = rig("flood");
+        assert_eq!(r.frame(0, 1, json!([{"t":"k","code":30,"p":true}])), Step::Go);
+        r.fake.take();
+        r.lock(Some(true), false);
+        // Empty batches every 5 ms: no event to check the gate before, and
+        // the session thread's read never times out, so no tick() either.
+        for i in 0..10 {
+            assert_eq!(r.frame(5 + 5 * i, 2 + i, json!([])), Step::Go);
+        }
+        assert!(r.session.held().is_empty(), "a key stayed held across the lock");
+        let got = r.fake.take();
+        assert!(got.contains(&"key 30 false".to_string()), "{got:?}");
+        assert_eq!(r.said(), [json!({"event": "input_paused", "why": "locked"})]);
     }
 
     #[test]
