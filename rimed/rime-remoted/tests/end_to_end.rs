@@ -3557,7 +3557,15 @@ fn two_computers_pair_with_a_code_ping_each_other_and_a_peer_reaches_nothing_but
     assert_eq!(hello["scope"], "peer", "{hello}");
     assert_eq!(
         hello["features"],
-        serde_json::json!(["peer_hello", "peer_tombstones", "peer_presence", "peer_offer", "peer_clipboard", "peer_file"]),
+        serde_json::json!([
+            "peer_hello",
+            "peer_tombstones",
+            "peer_presence",
+            "peer_offer",
+            "peer_clipboard",
+            "peer_file",
+            "peer_handoff"
+        ]),
         "{hello}"
     );
     assert_eq!(peer.call(r#"{"cmd":"peer_hello"}"#)["reply"], "peer_hello");
@@ -4528,4 +4536,234 @@ fn a_peer_offering_a_bad_name_a_wrong_hash_or_half_a_file_leaves_nothing_behind(
     drop(peer);
     // ...and gone once A is.
     assert!(soon(|| downloads_of(&b) == ["profile", "second.txt"]), "{:?}", downloads_of(&b));
+}
+
+/// The handoff cards (`summary` "Open a link from …?") B's stub holds.
+fn handoff_cards(h: &Harness) -> Vec<serde_json::Value> {
+    notify_lines(h, 0)
+        .into_iter()
+        .filter(|l| l["op"] == "notify" && l["summary"].as_str().is_some_and(|s| s.starts_with("Open a link from ")))
+        .collect()
+}
+
+/// The links B's stub was asked to open.
+fn opened_links(h: &Harness) -> Vec<String> {
+    notify_lines(h, 0)
+        .into_iter()
+        .filter(|l| l["op"] == "open_uri")
+        .map(|l| l["uri"].as_str().unwrap_or("").to_string())
+        .collect()
+}
+
+/// One card taken from a computer every two seconds (handoff.rs SPACING).
+fn after_spacing() {
+    std::thread::sleep(Duration::from_millis(2100));
+}
+
+#[test]
+fn a_link_offered_to_a_paired_computer_is_a_card_there_and_opens_only_when_open_is_pressed() {
+    let a = harness!("handoff-a");
+    let mut b = harness!("handoff-b");
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+    let a_name = computer_on(&b, &a_on_b)["name"].as_str().expect("a name").to_string();
+    let hello = identity_of(&a).connect(&b).expect("a peer session").call(r#"{"cmd":"remote_hello"}"#);
+    assert!(hello["features"].as_array().unwrap().iter().any(|f| f == "peer_handoff"), "{hello}");
+
+    // `HTTP://ok` is a link: its scheme in any case.
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "HTTP://ok/path?q=1", "--title", "<b>Notes</b>", "--json"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let reply: serde_json::Value = serde_json::from_str(said.lines().next().unwrap_or("")).expect("json");
+    assert_eq!((reply["shown"].clone(), reply["id"].clone()), (serde_json::json!(true), serde_json::json!(b_on_a)), "{reply}");
+    let cards = handoff_cards(&b);
+    assert_eq!(cards.len(), 1, "{cards:?}");
+    // B's own name for A, the host first, the title as plain text, one button.
+    assert_eq!(cards[0]["summary"], format!("Open a link from {a_name}?"));
+    assert_eq!(cards[0]["body"], "ok\n“‹b›Notes‹/b›”\nhttp://ok/path?q=1", "{}", cards[0]);
+    assert_eq!(cards[0]["actions"], serde_json::json!([["open", "Open"]]));
+    assert_eq!(cards[0]["expires_ms"], 600_000);
+    // Nothing is opened without the button.
+    std::thread::sleep(Duration::from_millis(1000));
+    assert!(opened_links(&b).is_empty(), "opened before a press: {:?}", notify_lines(&b, 0));
+    press_here(&b, &cards[0]["id"], "open");
+    assert!(soon(|| !opened_links(&b).is_empty()), "Open opened nothing");
+    assert_eq!(opened_links(&b), ["http://ok/path?q=1"]);
+
+    // From standard input. Dismissed: gone, and a press after it opens nothing.
+    after_spacing();
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "-"], b"https://example.com/stdin\n");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("shows the link"), "{said}");
+    let cards = handoff_cards(&b);
+    assert_eq!(cards.len(), 2, "{cards:?}");
+    assert!(cards[1]["body"].as_str().unwrap().starts_with("example.com\n"), "{}", cards[1]);
+    close_here(&b, &cards[1]["id"], 2);
+    press_here(&b, &cards[1]["id"], "open");
+    std::thread::sleep(Duration::from_millis(1000));
+    assert_eq!(opened_links(&b), ["http://ok/path?q=1"], "a dismissed card opened");
+
+    // The sender refuses what is not a plain web link before it dials.
+    for (url, words) in [
+        ("file:///etc/passwd", "only http and https"),
+        ("javascript:alert(1)", "only http and https"),
+        ("intent://scan/#Intent;scheme=zxing;end", "only http and https"),
+        ("https://user:pw@example.com/", "user name or password"),
+    ] {
+        let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, url], b"");
+        assert_eq!(rc, 1, "{url}: {said}");
+        assert!(said.contains(words), "{url}: {said}");
+    }
+    // And the receiver refuses the same from a hostile sender, whole.
+    let mut peer = identity_of(&a).connect(&b).expect("a peer session");
+    let long = format!("https://example.com/{}", "a".repeat(2049 - 20));
+    for card in [
+        serde_json::json!({"cmd": "peer_handoff", "url": "file:///etc/passwd"}),
+        serde_json::json!({"cmd": "peer_handoff", "url": "javascript:alert(1)"}),
+        serde_json::json!({"cmd": "peer_handoff", "url": "intent://scan/#Intent;scheme=zxing;end"}),
+        serde_json::json!({"cmd": "peer_handoff", "url": "https://user:pw@example.com/"}),
+        serde_json::json!({"cmd": "peer_handoff", "url": "https://good.example@evil.example/"}),
+        serde_json::json!({"cmd": "peer_handoff", "url": "https://moc.\u{202E}elgoog.example/"}),
+        serde_json::json!({"cmd": "peer_handoff", "url": "https://example.com/", "title": "invoice\u{202E}fdp.exe"}),
+        serde_json::json!({"cmd": "peer_handoff", "url": "https://example.com/", "title": "a\nb"}),
+        serde_json::json!({"cmd": "peer_handoff", "url": long}),
+        serde_json::json!({"cmd": "peer_handoff", "url": "https://example.com/", "title": "x".repeat(201)}),
+        serde_json::json!({"cmd": "peer_handoff", "url": 5}),
+        serde_json::json!({"cmd": "peer_handoff"}),
+    ] {
+        let r = peer.call(&card.to_string());
+        assert_eq!(r["kind"], "bad_request", "{card}: {r}");
+    }
+    assert_eq!(handoff_cards(&b).len(), 2, "garbage was shown");
+
+    // Flood: three waiting from one computer, one every two seconds.
+    let card = |n: u32| serde_json::json!({"cmd": "peer_handoff", "url": format!("https://example.com/{n}")}).to_string();
+    for n in 1..=3 {
+        after_spacing();
+        let r = peer.call(&card(n));
+        assert_eq!(r, serde_json::json!({"reply": "peer_handoff", "shown": true}), "card {n}");
+    }
+    after_spacing();
+    assert_eq!(peer.call(&card(4)), serde_json::json!({"reply": "peer_handoff", "shown": false, "why": "busy"}));
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "https://example.com/5", "--json"], b"");
+    assert_eq!(rc, 1, "{said}");
+    let reply: serde_json::Value = serde_json::from_str(said.lines().next().unwrap_or("")).expect("json");
+    assert_eq!((reply["shown"].clone(), reply["why"].clone()), (serde_json::json!(false), serde_json::json!("busy")), "{reply}");
+    // The same link again replaces its card in place.
+    let before = handoff_cards(&b);
+    assert_eq!(peer.call(&card(1)), serde_json::json!({"reply": "peer_handoff", "shown": true}));
+    let after = handoff_cards(&b);
+    assert_eq!(after.len(), before.len() + 1, "{after:?}");
+    assert_eq!(after.last().unwrap()["replaces"], before[before.len() - 3]["id"], "{after:?}");
+    // And too soon after that.
+    assert_eq!(peer.call(&card(1))["why"], "busy");
+    assert_eq!(opened_links(&b), ["http://ok/path?q=1"], "something opened by itself");
+    // B gone: A says it could not be reached, and nothing waits to be sent.
+    drop(peer);
+    let _ = b.remoted.kill();
+    let _ = b.remoted.wait();
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "https://example.com/later", "--json"], b"");
+    assert_eq!(rc, 1, "{said}");
+    let reply: serde_json::Value = serde_json::from_str(said.lines().next().unwrap_or("")).expect("json");
+    assert_eq!((reply["shown"].clone(), reply["why"].clone()), (serde_json::json!(false), serde_json::json!("offline")), "{reply}");
+}
+
+#[test]
+fn a_computer_whose_cards_are_off_or_that_was_removed_shows_nothing() {
+    let a = harness!("handoff-off-a");
+    let b = harness!("handoff-off-b");
+    let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
+
+    // On by default, and listed so.
+    let (rc, said) = rime_remote(&b, &["computers", "list", "--json"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let listed: serde_json::Value = serde_json::from_str(&said).expect("json");
+    assert_eq!(listed[0]["handoff"], true, "{listed}");
+    let (rc, said) = rime_remote(&b, &["computers", "handoff", &a_on_b, "off"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("links refused"), "{said}");
+    let (rc, said) = rime_remote(&b, &["computers", "list"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("links refused"), "{said}");
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "https://example.com/", "--json"], b"");
+    assert_eq!(rc, 1, "{said}");
+    let reply: serde_json::Value = serde_json::from_str(said.lines().next().unwrap_or("")).expect("json");
+    assert_eq!((reply["shown"].clone(), reply["why"].clone()), (serde_json::json!(false), serde_json::json!("off")), "{reply}");
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "https://example.com/"], b"");
+    assert_eq!(rc, 1, "{said}");
+    assert!(said.contains("does not show links from this computer"), "{said}");
+    assert!(handoff_cards(&b).is_empty(), "shown while off");
+
+    // On again: shown. Then B removes A: the card waiting from A is closed,
+    // and A's next is not shown.
+    let (rc, said) = rime_remote(&b, &["computers", "handoff", &a_on_b, "on"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert!(said.contains("links shown"), "{said}");
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "https://example.com/waiting"], b"");
+    assert_eq!(rc, 0, "{said}");
+    let card = handoff_cards(&b).pop().expect("a card");
+    let removed = b.control(&serde_json::json!({"cmd": "computer_remove", "computer": a_on_b}).to_string());
+    assert_eq!(removed["reply"], "computer_removed", "{removed}");
+    assert!(
+        soon(|| notify_lines(&b, 0).iter().any(|l| l["op"] == "close" && l["id"] == card["id"])),
+        "the removed computer's card stayed: {:?}",
+        notify_lines(&b, 0)
+    );
+    press_here(&b, &card["id"], "open");
+    after_spacing();
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "https://example.com/after"], b"");
+    assert_eq!(rc, 1, "{said}");
+    assert_eq!(handoff_cards(&b).len(), 1, "a removed computer's card was shown");
+    // A learns it was removed: it sends nothing more.
+    let _ = until_computer(&a, &b_on_a, Duration::from_secs(15), |c| c["revoked_ms"].is_u64());
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "https://example.com/after"], b"");
+    assert_eq!(rc, 1, "{said}");
+    assert!(said.contains("removed"), "{said}");
+    std::thread::sleep(Duration::from_millis(500));
+    assert!(opened_links(&b).is_empty(), "a removed computer's card opened: {:?}", notify_lines(&b, 0));
+}
+
+#[test]
+fn a_computer_a_phone_introduced_shows_no_card_until_a_person_allows_it() {
+    let a = harness!("handoff-intro-a");
+    let b = harness!("handoff-intro-b");
+    let phone = Device::new();
+    let Some(offer) = open_offer(&a) else { return };
+    assert_eq!(phone.pair(&a, &offer, "pixel-8")["ok"], true);
+    let Some(offer) = open_offer(&b) else { return };
+    assert_eq!(phone.pair(&b, &offer, "pixel-8")["ok"], true);
+    let mut on_a = phone.connect(&a).expect("a session on A");
+    let mut on_b = phone.connect(&b).expect("a session on B");
+    for s in [&mut on_a, &mut on_b] {
+        assert_eq!(s.call(r#"{"cmd":"phone_report","can":["ring","join"]}"#)["reply"], "ok");
+    }
+    let card_a = on_a.call(r#"{"cmd":"computer_card"}"#);
+    let card_b = on_b.call(r#"{"cmd":"computer_card"}"#);
+    let added = on_a.call(&serde_json::json!({"cmd": "computer_introduce", "card": card_b["card"]}).to_string());
+    assert_eq!(added["outcome"], "added", "{added}");
+    let b_on_a = added["id"].as_str().expect("id").to_string();
+    let added = on_b.call(&serde_json::json!({"cmd": "computer_introduce", "card": card_a["card"]}).to_string());
+    assert_eq!(added["outcome"], "added", "{added}");
+    let a_on_b = added["id"].as_str().expect("id").to_string();
+
+    // Not allowed on A: A sends nothing. Not allowed on B: a card A sends
+    // anyway is not shown, and B's list says its links are refused.
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "https://example.com/"], b"");
+    assert_eq!(rc, 1, "{said}");
+    assert!(said.contains("not allowed yet"), "{said}");
+    let mut a_as_peer = identity_of(&a).connect(&b).expect("A reaches B as a peer");
+    let r = a_as_peer.call(r#"{"cmd":"peer_handoff","url":"https://example.com/"}"#);
+    assert_eq!(r, serde_json::json!({"reply": "peer_handoff", "shown": false, "why": "off"}));
+    let (rc, said) = rime_remote(&b, &["computers", "handoff", &a_on_b, "on"], b"");
+    assert_eq!(rc, 1, "turned on for a computer not allowed yet: {said}");
+    assert_eq!(computer_on(&b, &a_on_b)["handoff"], false);
+    assert!(handoff_cards(&b).is_empty(), "an introduced computer's card was shown");
+
+    // Allowed by a person on both: shown.
+    for (h, id) in [(&a, &b_on_a), (&b, &a_on_b)] {
+        let (rc, said) = rime_remote(h, &["computers", "allow", id], b"");
+        assert_eq!(rc, 0, "{said}");
+    }
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "https://example.com/allowed"], b"");
+    assert_eq!(rc, 0, "{said}");
+    assert_eq!(handoff_cards(&b).len(), 1);
+    assert!(opened_links(&b).is_empty());
 }

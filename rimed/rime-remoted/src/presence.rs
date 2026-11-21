@@ -280,6 +280,7 @@ fn record(state: &State, sender: &str, list: &[Tombstone], keep: Option<&str>) {
     }
     for id in &applied.removed {
         state.presence.forget(id);
+        crate::handoff::forget(state, id);
         if Some(id.as_str()) != keep {
             state.drop_connections_for(id);
         }

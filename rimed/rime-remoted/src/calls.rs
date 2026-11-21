@@ -558,6 +558,7 @@ pub fn ringing(phone: &str, call: &Call, can_answer: bool) -> Shown {
         reply: None,
         actions,
         sticky: true,
+        expires_ms: None,
     }
 }
 
@@ -575,6 +576,7 @@ pub fn not_done(action: &str, why: &Refusal, phone: &str) -> Shown {
         reply: None,
         actions: Vec::new(),
         sticky: false,
+        expires_ms: None,
     }
 }
 

@@ -208,6 +208,10 @@ pub struct Shown {
     /// Shown until closed (expire timeout 0) rather than for the server's
     /// own time: a call rings until the phone says it stopped.
     pub sticky: bool,
+    /// Shown for this long, then closed by the server (its expire timeout),
+    /// rather than for the server's own time. Ignored when `sticky`. A
+    /// handoff card lives ten minutes (handoff.rs).
+    pub expires_ms: Option<u32>,
 }
 
 /// Turn a `phone_notification` body into what is posted, or refuse it.
@@ -225,7 +229,7 @@ pub fn shown(phone: &str, v: &Value) -> Result<(String, Shown), String> {
     let summary = if title.is_empty() { app.clone() } else { title };
     let reply = clean(field(v, "reply")?, REPLY_LABEL_CAP, 0, false);
     let reply = (!reply.is_empty()).then_some(reply);
-    Ok((key, Shown { app_name, summary, body: text, reply, actions: Vec::new(), sticky: false }))
+    Ok((key, Shown { app_name, summary, body: text, reply, actions: Vec::new(), sticky: false, expires_ms: None }))
 }
 
 /// A reply typed here, as the phone gets it: the person's own words, so
@@ -284,6 +288,13 @@ pub trait Backend: Send + Sync {
     fn show_item(&self, _path: &Path) -> Result<(), String> {
         Err("this desktop cannot show a file in its folder".into())
     }
+    /// Open an `http`/`https` link the person chose to open (Open pressed on
+    /// a handoff card, handoff.rs), through the desktop portal's
+    /// `org.freedesktop.portal.OpenURI`: the user's own default browser, on
+    /// the user's own session bus, nothing privileged.
+    fn open_uri(&self, _uri: &str) -> Result<(), String> {
+        Err("this desktop cannot open a link".into())
+    }
 }
 
 /// A signal from the notification server's current owner.
@@ -303,6 +314,9 @@ pub type Hear = Box<dyn Fn(Heard) + Send + Sync>;
 const NAME: &str = "org.freedesktop.Notifications";
 const FILE_MANAGER: &str = "org.freedesktop.FileManager1";
 const FILE_MANAGER_PATH: &str = "/org/freedesktop/FileManager1";
+const PORTAL: &str = "org.freedesktop.portal.Desktop";
+const PORTAL_PATH: &str = "/org/freedesktop/portal/desktop";
+const OPEN_URI: &str = "org.freedesktop.portal.OpenURI";
 
 /// `path` as a `file://` URI, every byte but the unreserved ones escaped.
 pub fn file_uri(path: &Path) -> String {
@@ -324,6 +338,7 @@ enum Call {
     Close(u32, SyncSender<Result<(), String>>),
     Owner(SyncSender<Option<String>>),
     ShowItems(String, SyncSender<Result<(), String>>),
+    OpenUri(String, SyncSender<Result<(), String>>),
 }
 
 /// The desktop's notification server, over the session bus.
@@ -475,6 +490,7 @@ impl Bus {
                 Call::Close(_, r) => drop(r.send(Err(why.into()))),
                 Call::Owner(r) => drop(r.send(None)),
                 Call::ShowItems(_, r) => drop(r.send(Err(why.into()))),
+                Call::OpenUri(_, r) => drop(r.send(Err(why.into()))),
             }
             return false;
         };
@@ -496,7 +512,11 @@ impl Bus {
                 if let Some(label) = label {
                     hints.insert("x-kde-reply-placeholder-text", zbus::zvariant::Value::from(label));
                 }
-                let expire = if s.sticky { 0i32 } else { -1i32 };
+                let expire = match (s.sticky, s.expires_ms) {
+                    (true, _) => 0i32,
+                    (false, Some(ms)) => i32::try_from(ms).unwrap_or(i32::MAX),
+                    (false, None) => -1i32,
+                };
                 let body = (&s.app_name, replaces, ICON, &s.summary, &s.body, actions, hints, expire);
                 let got = Bus::within(by, l.notifications.call::<_, _, u32>("Notify", &body)).await;
                 let gone = matches!(got, Err((_, true)));
@@ -520,6 +540,18 @@ impl Bus {
                         "ShowItems",
                         &(vec![uri.as_str()], ""),
                     ),
+                )
+                .await;
+                let gone = matches!(got, Err((_, true)));
+                let _ = reply.send(got.map(|_| ()).map_err(|(e, _)| e));
+                gone
+            }
+            Call::OpenUri(uri, reply) => {
+                let conn = l.notifications.connection().clone();
+                let options: HashMap<&str, zbus::zvariant::Value<'_>> = HashMap::new();
+                let got = Bus::within(
+                    by,
+                    conn.call_method(Some(PORTAL), PORTAL_PATH, Some(OPEN_URI), "OpenURI", &("", uri.as_str(), options)),
                 )
                 .await;
                 let gone = matches!(got, Err((_, true)));
@@ -563,6 +595,11 @@ impl Backend for Bus {
     fn show_item(&self, path: &Path) -> Result<(), String> {
         let uri = file_uri(path);
         self.ask(|r| Call::ShowItems(uri, r)).unwrap_or_else(|| Err("the file manager did not answer in time".into()))
+    }
+
+    fn open_uri(&self, uri: &str) -> Result<(), String> {
+        let uri = uri.to_string();
+        self.ask(|r| Call::OpenUri(uri, r)).unwrap_or_else(|| Err("the desktop portal did not answer in time".into()))
     }
 }
 
@@ -609,6 +646,9 @@ impl Backend for Stub {
         if s.sticky {
             line["sticky"] = json!(true);
         }
+        if let Some(ms) = s.expires_ms {
+            line["expires_ms"] = json!(ms);
+        }
         self.record(line)?;
         Ok(id)
     }
@@ -625,6 +665,10 @@ impl Backend for Stub {
     fn show_item(&self, path: &Path) -> Result<(), String> {
         self.record(json!({"op": "show_item", "uri": file_uri(path)}))
     }
+
+    fn open_uri(&self, uri: &str) -> Result<(), String> {
+        self.record(json!({"op": "open_uri", "uri": uri}))
+    }
 }
 
 // ── The mirror ──────────────────────────────────────────────────────────────
@@ -640,6 +684,8 @@ pub enum Job {
     Notice(Shown),
     /// Show a saved file in its folder (a button pressed on its notification).
     ShowItem(PathBuf),
+    /// Open a link a person chose to open (Open pressed on a handoff card).
+    OpenUri(String),
     /// The server's `NotificationClosed`, `NotificationReplied` or `ActionInvoked`.
     Heard(Heard),
 }
@@ -657,6 +703,11 @@ pub fn own_key(key: &str) -> bool {
 
 /// Told `(device, key)` when the person dismissed a phone's notification here.
 pub type Dismissed = Box<dyn Fn(&str, &str) + Send + Sync>;
+
+/// Told `(device, key)` when a notification this process made itself (an
+/// own key) is gone from the desktop, whatever the reason: closed, expired,
+/// or its server replaced (a new server holds none of the old ones).
+pub type OwnGone = Box<dyn Fn(&str, &str) + Send + Sync>;
 
 /// Told `(device, key, text)` when the person replied to one here; answers
 /// whether it went to the phone.
@@ -688,6 +739,7 @@ pub fn not_sent(why: NotSent, text: &str) -> Shown {
         reply: None,
         actions: Vec::new(),
         sticky: false,
+        expires_ms: None,
     }
 }
 
@@ -707,6 +759,7 @@ pub struct Mirror {
     dismissed: OnceLock<Dismissed>,
     replied: OnceLock<Replied>,
     acted: OnceLock<Acted>,
+    own_gone: OnceLock<OwnGone>,
     /// Ids replied to here whose close has not come yet: the server closes a
     /// notification once it is answered, and that close is not a dismissal.
     answered: Mutex<VecDeque<u32>>,
@@ -722,6 +775,7 @@ impl Mirror {
             dismissed: OnceLock::new(),
             replied: OnceLock::new(),
             acted: OnceLock::new(),
+            own_gone: OnceLock::new(),
             answered: Mutex::new(VecDeque::new()),
         }
     }
@@ -739,6 +793,11 @@ impl Mirror {
     /// Where button presses go (once; later calls are ignored).
     pub fn on_action(&self, f: Acted) {
         let _ = self.acted.set(f);
+    }
+
+    /// Where the end of this process's own notifications goes (once).
+    pub fn on_own_gone(&self, f: OwnGone) {
+        let _ = self.own_gone.set(f);
     }
 
     fn answered(&self) -> std::sync::MutexGuard<'_, VecDeque<u32>> {
@@ -764,11 +823,19 @@ impl Mirror {
         let now = self.backend.owner();
         let mut server = self.server.lock().unwrap_or_else(|e| e.into_inner());
         if *server != now {
-            for p in self.phones().values_mut() {
+            let mut own = Vec::new();
+            for (device, p) in self.phones().iter_mut() {
+                own.extend(p.ids.iter().filter(|(k, _)| own_key(k)).map(|(k, _)| (device.clone(), k.clone())));
                 p.ids.clear();
             }
             self.answered().clear();
             *server = now;
+            drop(server);
+            if let Some(tell) = self.own_gone.get() {
+                for (device, key) in own {
+                    tell(&device, &key);
+                }
+            }
         }
     }
 
@@ -805,6 +872,11 @@ impl Mirror {
             Job::ShowItem(path) => {
                 if let Err(why) = self.backend.show_item(&path) {
                     eprintln!("rime-remoted: a file was not shown in its folder: {why}");
+                }
+            }
+            Job::OpenUri(uri) => {
+                if let Err(why) = self.backend.open_uri(&uri) {
+                    eprintln!("rime-remoted: a link was not opened: {why}");
                 }
             }
             Job::Heard(Heard::Action { id, key: action }) => {
@@ -864,7 +936,10 @@ impl Mirror {
                     })
                 };
                 // A notification of this process's own was never the phone's:
-                // closing it tells the phone nothing.
+                // closing it tells the phone nothing, and tells its maker.
+                if let (Some((device, key)), Some(tell)) = (owner.as_ref().filter(|(_, k)| own_key(k)), self.own_gone.get()) {
+                    tell(device, key);
+                }
                 let owner = owner.filter(|(_, key)| !own_key(key));
                 if let (Some((device, key)), DISMISSED, false) = (owner, reason, answered) {
                     if let Some(tell) = self.dismissed.get() {
@@ -1154,6 +1229,7 @@ mod tests {
             reply: None,
             actions,
             sticky: true,
+            expires_ms: None,
         };
         let buttons = vec![("answer".to_string(), "Answer".to_string())];
         m.handle(Job::Post { device: "dev".into(), key: "call:ringing".into(), shown: shown(buttons) });
@@ -1178,13 +1254,52 @@ mod tests {
     }
 
     #[test]
+    fn its_maker_hears_when_its_own_notification_is_gone_and_a_link_is_opened_only_when_asked() {
+        let s = scratch("own-gone");
+        let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
+        let (tx, rx) = std::sync::mpsc::channel();
+        m.on_own_gone(Box::new(move |d, k| tx.send((d.to_string(), k.to_string())).unwrap()));
+        let (dtx, drx) = std::sync::mpsc::channel();
+        m.on_dismissed(Box::new(move |d, k| dtx.send((d.to_string(), k.to_string())).unwrap()));
+        let shown = |expires_ms| Shown {
+            app_name: "Rime Remote".into(),
+            summary: "Open a link from desk?".into(),
+            body: "example.com".into(),
+            reply: None,
+            actions: vec![("open".into(), "Open".into())],
+            sticky: false,
+            expires_ms,
+        };
+        m.handle(Job::Post { device: "desk".into(), key: "handoff:1".into(), shown: shown(Some(600_000)) });
+        m.handle(Job::Post { device: "desk".into(), key: "handoff:2".into(), shown: shown(None) });
+        m.handle(Job::Post { device: "dev".into(), key: "k1".into(), shown: shown(None) });
+        let l = lines(&s.0);
+        assert_eq!(l[0]["expires_ms"], 600_000, "{}", l[0]);
+        assert!(l[1].get("expires_ms").is_none(), "{}", l[1]);
+        // Dismissed or expired: its maker hears it; the phone is not told.
+        m.handle(Job::Heard(Heard::Closed { id: 1, reason: DISMISSED }));
+        m.handle(Job::Heard(Heard::Closed { id: 3, reason: 1 }));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![("desk".into(), "handoff:1".into())]);
+        assert_eq!(drx.try_iter().count(), 0, "the phone's expiry is no dismissal");
+        // The server goes away: every own notification still up is gone.
+        std::fs::write(s.0.join("owner"), ":1.99").unwrap();
+        m.handle(Job::Notice(shown(None)));
+        assert_eq!(rx.try_iter().collect::<Vec<_>>(), vec![("desk".into(), "handoff:2".into())]);
+        // Nothing above opened anything; only an OpenUri job does.
+        assert!(lines(&s.0).iter().all(|l| l["op"] != "open_uri"));
+        m.handle(Job::OpenUri("https://example.com/a".into()));
+        let opened: Vec<Value> = lines(&s.0).into_iter().filter(|l| l["op"] == "open_uri").collect();
+        assert_eq!(opened, vec![json!({"op": "open_uri", "uri": "https://example.com/a"})]);
+    }
+
+    #[test]
     fn a_burst_of_phone_notifications_never_pushes_out_a_ringing_call() {
         let s = scratch("evict");
         let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
         let post = |key: String| Job::Post {
             device: "dev".into(),
             key,
-            shown: Shown { app_name: "P".into(), summary: "t".into(), body: String::new(), reply: None, actions: vec![], sticky: false },
+            shown: Shown { app_name: "P".into(), summary: "t".into(), body: String::new(), reply: None, actions: vec![], sticky: false, expires_ms: None },
         };
         m.handle(post("call:ringing".into()));
         for k in 0..(KEPT_IDS * 2) {
@@ -1201,7 +1316,7 @@ mod tests {
         let post = |key: &str, title: &str| Job::Post {
             device: "dev".into(),
             key: key.into(),
-            shown: Shown { app_name: "P · A".into(), summary: title.into(), body: String::new(), reply: None, actions: vec![], sticky: false },
+            shown: Shown { app_name: "P · A".into(), summary: title.into(), body: String::new(), reply: None, actions: vec![], sticky: false, expires_ms: None },
         };
         m.handle(post("k1", "first"));
         m.handle(post("k2", "other"));
@@ -1222,7 +1337,7 @@ mod tests {
         let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
         for (dev, key) in [("a", "k1"), ("b", "k1"), ("a", "k2")] {
             m.handle(Job::Post { device: dev.into(), key: key.into(),
-                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false } });
+                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false, expires_ms: None } });
         }
         m.handle(Job::Forget { device: "a".into() });
         assert!(m.phones().get("a").is_none());
@@ -1237,7 +1352,7 @@ mod tests {
         let post = |key: &str| Job::Post {
             device: "dev".into(),
             key: key.into(),
-            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false },
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false, expires_ms: None },
         };
         m.handle(post("k1"));
         m.handle(post("k2"));
@@ -1261,7 +1376,7 @@ mod tests {
         let m = Mirror::new(Box::new(Stub::new(s.0.clone())));
         for i in 0..(KEPT_IDS + 5) {
             m.handle(Job::Post { device: "d".into(), key: format!("k{i}"),
-                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false } });
+                                 shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false, expires_ms: None } });
         }
         assert_eq!(m.phones().get("d").unwrap().ids.len(), KEPT_IDS);
         assert_eq!(m.id_of("d", "k0"), None);
@@ -1401,7 +1516,7 @@ mod tests {
         let post = |dev: &str, key: &str| Job::Post {
             device: dev.into(),
             key: key.into(),
-            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false },
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false, expires_ms: None },
         };
         m.handle(post("a", "expired")); // id 1
         m.handle(post("a", "closed-by-call")); // id 2
@@ -1437,7 +1552,7 @@ mod tests {
         assert!(m.submit(Job::Post {
             device: "dev".into(),
             key: "k".into(),
-            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false },
+            shown: Shown { app_name: "x".into(), summary: "y".into(), body: String::new(), reply: None, actions: vec![], sticky: false, expires_ms: None },
         }));
         let deadline = Instant::now() + Duration::from_secs(5);
         while m.id_of("dev", "k").is_none() {
@@ -1566,6 +1681,7 @@ mod tests {
             reply: None,
             actions: vec![("answer".into(), "Answer".into()), ("decline".into(), "Decline".into())],
             sticky: true,
+            expires_ms: None,
         };
         assert!(m.submit(Job::Post { device: "dev".into(), key: "call:ringing".into(), shown: ringing }));
         let deadline = Instant::now() + Duration::from_secs(5);

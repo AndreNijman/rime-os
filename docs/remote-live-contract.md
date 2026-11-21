@@ -610,7 +610,11 @@ expiry, a close sent before the post's reply, a stranger's fake signal, and
 replies, against a server that offers `"inline-reply"` and one that does not).
 A stub line `{"id":N,"reply":"text"}` in `closed.jsonl` is read as
 `NotificationReplied`; the stub records a post's `reply` label as given, and
-the device suite's broker writes one with `notify_reply`.
+the device suite's broker writes one with `notify_reply`. A handoff card
+(§2.15) carries `"expires_ms"` in its stub line; the stub records Open's link
+as `{"op":"open_uri","uri":"…"}` and a file shown in its folder as
+`{"op":"show_item","uri":"file://…"}`, and a line `{"id":N,"action":"key"}` in
+`closed.jsonl` is read as `ActionInvoked`.
 
 ### 2.8 From the phone to the computer: what it is playing
 
@@ -1524,9 +1528,14 @@ removed computer is refused as a computer.
 → {"reply":"computer_pong","id","name","machine","version","build","path":"lan"|"relay","rtt_ms"}
 {"cmd":"computer_clipboard","computer":"<id or name>","send":true,"receive":false}
 {"cmd":"computer_files","computer":"<id or name>","on":false}
-→ {"reply":"computer_shared","id","name","clipboard_send","clipboard_receive","files"}
+{"cmd":"computer_handoff_switch","computer":"<id or name>","on":false}
+→ {"reply":"computer_shared","id","name","clipboard_send","clipboard_receive","files","handoff"}
 {"cmd":"computer_send","computer":"<id or name>","name":"notes.txt","via":"lan"|"relay"}  + one fd (SCM_RIGHTS)
 → {"reply":"computer_sent","id","name","file":"notes (2).txt","bytes":1234}
+{"cmd":"computer_handoff","computer":"<id or name>","url":"https://…","title":"…"}   title optional
+→ {"reply":"computer_handoff","id","name","shown":true}
+→ {"reply":"computer_handoff","id","name","shown":false,"why":"off"|"busy"|"offline"|"unsupported"}
+→ {"reply":"error","message":"…"}
 ```
 
 - `computer_show`, `computer_add`, `computer_remove` and `computer_forget`
@@ -1544,12 +1553,14 @@ removed computer is refused as a computer.
   are memory only and absent for a removed computer.
 - `computer_ping` runs the exchange below after `peer_hello`; a failed
   exchange is logged, not the ping's error.
-- `computer_clipboard`, `computer_files` and `computer_send` need a §7 local
-  origin, like pairing: what is shared with another computer, and sending it
-  a file, are a person's decisions, never an agent's. A switch cannot be
+- `computer_clipboard`, `computer_files`, `computer_handoff_switch`,
+  `computer_send` and `computer_handoff` need a §7 local origin, like pairing:
+  what is shared with another computer, sending it a file, and putting a link
+  in front of the person at it, are a person's decisions, never an agent's. A switch cannot be
   turned on for a removed computer or for an introduced one not allowed yet
   (`not allowed yet`); turning one off always works. `computers` lists each
-  record's `clipboard_send`, `clipboard_receive` and `files` (below).
+  record's `clipboard_send`, `clipboard_receive`, `files` and `handoff`
+  (below).
 
 **Stored.** `computers.json` beside `devices.json` (0600, same directory),
 `{"computers": {<id>: <device record, plus "addresses" and "relay">}}`,
@@ -1580,11 +1591,11 @@ is a paired, not removed computer is scope `peer`.
 
 | | allowed |
 | --- | --- |
-| control verbs | `remote_hello`, `peer_hello`, `peer_tombstones`, `peer_presence`, `peer_offer`, `peer_clipboard` |
+| control verbs | `remote_hello`, `peer_hello`, `peer_tombstones`, `peer_presence`, `peer_offer`, `peer_clipboard`, `peer_handoff` |
 | channels (`Open`) | `peer_file` |
 
 ```json
-{"cmd":"remote_hello"} → {"reply":"remote","version":1,"features":["peer_hello","peer_tombstones","peer_presence","peer_offer","peer_clipboard","peer_file"],"scope":"peer"}
+{"cmd":"remote_hello"} → {"reply":"remote","version":1,"features":["peer_hello","peer_tombstones","peer_presence","peer_offer","peer_clipboard","peer_file","peer_handoff"],"scope":"peer"}
 {"cmd":"peer_hello"}   → {"reply":"peer_hello","name":"desk","version":1,"build":"0.1.0"}
 {"cmd":"peer_tombstones","tombstones":[{"key":"<b64url>","removed_ms":…,"name":"old"}]}
                        → {"reply":"peer_tombstones","tombstones":[…]}
@@ -1602,7 +1613,8 @@ as a control line is refused too). A peer's line or channel reaches
 `rime-agentd` never: rime-remoted builds exactly two requests itself from
 fields it checked, `clipboard_write` (for `peer_clipboard`) and `save_file`
 (for `peer_file`), as actor `computer:<id>`, and forwards no byte of a peer's
-line to it, nor any of `rime-agentd`'s words back to the peer. The companion
+line to it, nor any of `rime-agentd`'s words back to the peer. `peer_handoff`
+reaches no other process at all until a person presses Open (below). The companion
 allow list refuses `peer` too, as a second lock. A session presenting this machine's own key is refused at the handshake
 whatever `devices.json` or `computers.json` says.
 
@@ -1618,8 +1630,9 @@ set only through the control verbs above and cleared on removal:
 | `clipboard_send` | false | this computer's copies go to that one |
 | `clipboard_receive` | false | that computer's copies are put on this clipboard |
 | `files` | absent = on | files from that computer are saved here |
+| `handoff` | absent = on | links that computer offers are shown here as cards (M3b, below) |
 
-An introduced computer counts as none of the three until it is allowed,
+An introduced computer counts as none of these until it is allowed,
 whatever the file says. An older daemon ignores the fields; a rollback keeps
 them.
 
@@ -1720,6 +1733,76 @@ Data from the receiver, one JSON line each:
   256 MiB, hashed first, then sent by offset), and needs the other computer's
   `features` to list `peer_file`. Nothing is queued: a computer that cannot be
   reached is an error now.
+
+**Handoff cards (M3b, feature `peer_handoff`).** One computer offers another a
+web link (`rime remote computers open <computer> <url>`, or Rime Shell); the
+other shows it as a card, and opens it only when a person there presses Open.
+Nothing is ever opened without that press.
+
+```json
+{"cmd":"peer_handoff","url":"https://example.com/notes","title":"Notes"}   title optional
+→ {"reply":"peer_handoff","shown":true}
+→ {"reply":"peer_handoff","shown":false,"why":"off"|"busy"}
+→ {"reply":"error","kind":"bad_request"|"unavailable","message":"refused, nothing was shown: …"}
+```
+
+- Checked in this order. The sender is a paired computer, not removed,
+  trusted (paired with a code, or introduced and allowed), with `handoff` on
+  (absent = on): otherwise `off`, before the line is read, so a computer
+  whose cards are not shown learns nothing more. Then the line, whole:
+  anything that fails is `bad_request` and shows nothing. Then the flood cap:
+  at most 3 cards waiting from one computer and one taken every 2 s from it
+  (`busy`; a refused line does not count). The same link from the same
+  computer while its card waits replaces that card (same notification id)
+  and counts as one taken. Cards are memory only.
+- **The link** (checked by the sender too, before it dials): `http` or
+  `https`, the scheme in any case (`HTTP://ok` is a link) and parsed, not
+  prefix-matched, followed by `//` and a host; at most 2,048 bytes; no user
+  name or password (`@` anywhere before the path); no space, `\`, `<`, `>`,
+  `"`, control character, or invisible or direction-changing character
+  (Unicode 17 Cf, Zl, Zp, as for file names). The host is ASCII letters,
+  digits, `.`, `-`, `_` (no lookalike letters; a punycode `xn--` name is
+  taken and shown as it is), at most 253 bytes in labels of 1 to 63; a host
+  whose last label is a number must be a plain dotted IPv4 address
+  (`0x7f.1` and `2130706433` are refused, so the card shows the address that
+  opens); an IPv6 literal must parse (no zone). The port, if any, is 1 to
+  65535. This computer's own loopback is refused (`localhost`,
+  `*.localhost`, 127/8, 0/8, `::1`, `::`, `::ffff:127.0.0.1`): the
+  sender's `localhost` is not this one's, so such a card could only aim at a
+  service here. What is opened is the link as given with its scheme in
+  lower case.
+- **The title**: plain text, at most 200 characters, no control,
+  invisible or direction-changing character (refused, not cleaned); blank is
+  none. It is shown in quotes with markup escaped, never as markup.
+- **The card**: a notification from "Rime Remote", summary "Open a link from
+  <name>?" where the name is this computer's own record of the sender, never
+  a field of the line; body the host (with the port) first, then the title
+  in quotes, then the link cut to 160 characters, all escaped. A host longer
+  than 48 characters is cut from the LEFT (`…login.evil.example:8443`), at a
+  whole label while a dot is still left after it, so its end shows and never
+  only a top-level label; the link line then carries the same cut host, so
+  it does not lead with the part cut away. One button,
+  Open; it expires after 10 minutes (the server's expire timeout).
+  Dismissed, expired, gone with its notification server, or its computer
+  removed (here, or by a removal another computer passed on): the card is
+  closed and its link dropped.
+- **Open**: heard only from the notification server's current bus owner, on
+  a card this process posted, under the card's own computer. The link is
+  taken from this process's own table by the card's number, never from the
+  notification, once (a second press opens nothing), only within its 10
+  minutes, and only while its computer is still paired, trusted and shown
+  here. It is opened through the desktop portal
+  (`org.freedesktop.portal.OpenURI.OpenURI`), which hands it to the default
+  browser. Cards are shown on a locked screen like any notification
+  (the lock screen shows none, §2.7); Open can only be pressed once it is
+  unlocked.
+- **The sender** (`computer_handoff`) checks the link and title first, then
+  refuses a removed computer and one not allowed yet (errors, nothing
+  dialled), then dials (LAN, then relay): a computer that cannot be reached
+  is `offline`, one whose `features` lack `peer_handoff` is `unsupported`.
+  Only `off` and `busy` are passed on from the other computer's answer; its
+  error text is shown made printable; anything else is an error. Nothing is
+  queued.
 
 **The exchange.** The computer that dialled (for `computer_ping`, the
 refresh, or a tell) sends `remote_hello`, then `peer_tombstones` and

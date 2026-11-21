@@ -210,6 +210,18 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         via: Option<String>,
     },
+    /// Offer another computer a web link as a card ("Open a link from
+    /// <this>?"). It opens there only when a person presses Open. A person
+    /// at this machine only.
+    ComputerHandoff {
+        computer: String,
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+    },
+    /// Whether links another computer offers are shown here as cards. A
+    /// person at this machine only.
+    ComputerHandoffSwitch { computer: String, on: bool },
 }
 
 /// What it answers.
@@ -340,6 +352,16 @@ pub enum Reply {
         clipboard_send: bool,
         clipboard_receive: bool,
         files: bool,
+        handoff: bool,
+    },
+    /// Whether another computer showed a link as a card, or why not:
+    /// `off`, `busy`, `offline` or `unsupported`.
+    ComputerHandoff {
+        id: String,
+        name: String,
+        shown: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        why: Option<String>,
     },
     DeviceAllowed { id: String, name: String },
     /// Another computer saved a file sent to it, as `file` in its Downloads.
@@ -510,6 +532,12 @@ fn dispatch(req: Request, fds: Vec<OwnedFd>, peer: Option<crate::peer::Peer>, st
             crate::computers::share(state, &computer, |store, c| store.set_computer_files(c, on))
         }
         Request::ComputerSend { computer, name, via } => computer_send(state, &computer, &name, via.as_deref(), fds),
+        Request::ComputerHandoff { computer, url, title } => {
+            crate::handoff::send(state, &computer, &url, title.as_deref())
+        }
+        Request::ComputerHandoffSwitch { computer, on } => {
+            crate::computers::share(state, &computer, |store, c| store.set_computer_handoff(c, on))
+        }
     }
 }
 
@@ -617,7 +645,12 @@ fn authorized_by(
         // What is shared with another computer, and from it: a person's
         // decision, like pairing. An agent could otherwise turn a computer's
         // clipboard into a feed.
-        Request::ComputerClipboard { .. } | Request::ComputerFiles { .. } => computers_caller(peer, observe, may_share),
+        Request::ComputerClipboard { .. } | Request::ComputerFiles { .. } | Request::ComputerHandoffSwitch { .. } => {
+            computers_caller(peer, observe, may_share)
+        }
+        // A card on another computer is a person's offer: an agent could
+        // otherwise put links in front of the person there.
+        Request::ComputerHandoff { .. } => computers_caller(peer, observe, may_offer_link),
         // The other computer saves what it is sent without asking, as a
         // phone does: a person here only, like `send`.
         Request::ComputerSend { .. } => computers_caller(peer, observe, may_send_to_computer),
@@ -703,7 +736,19 @@ pub fn may_share(origin: RequestOrigin) -> Result<(), String> {
     }
     Err(format!(
         "a {origin} request cannot change what is shared with another computer: only a person at this \
-         machine may. Run `rime remote computers clipboard` or `rime remote computers files` from a terminal"
+         machine may. Run `rime remote computers clipboard`, `files` or `handoff` from a terminal"
+    ))
+}
+
+/// `computer_handoff`'s rule over a value: a card on another computer is
+/// put in front of the person there, so only a person here offers one.
+pub fn may_offer_link(origin: RequestOrigin) -> Result<(), String> {
+    if MAY_PAIR.contains(&origin) {
+        return Ok(());
+    }
+    Err(format!(
+        "a {origin} request cannot offer a link to another computer: only a person at this machine may. \
+         Run `rime remote computers open` from a terminal"
     ))
 }
 
@@ -1639,6 +1684,8 @@ mod tests {
             Request::ComputerClipboard { computer: "desk".into(), send: true, receive: true },
             Request::ComputerFiles { computer: "desk".into(), on: true },
             Request::ComputerSend { computer: "desk".into(), name: "a.txt".into(), via: None },
+            Request::ComputerHandoff { computer: "desk".into(), url: "https://example.com".into(), title: None },
+            Request::ComputerHandoffSwitch { computer: "desk".into(), on: true },
         ];
         for req in &every {
             let Err(why) = authorized(req, Some(foreign)) else {
@@ -1710,9 +1757,16 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_allow(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
-                Request::ComputerClipboard { .. } | Request::ComputerFiles { .. } => assert_eq!(
+                Request::ComputerClipboard { .. } | Request::ComputerFiles { .. } | Request::ComputerHandoffSwitch { .. } => {
+                    assert_eq!(
+                        verdict.is_ok(),
+                        rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_share(o).is_ok()),
+                        "{req:?} stopped asking the origin rule"
+                    )
+                }
+                Request::ComputerHandoff { .. } => assert_eq!(
                     verdict.is_ok(),
-                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_share(o).is_ok()),
+                    rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_offer_link(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
                 Request::ComputerSend { .. } => assert_eq!(
@@ -1740,6 +1794,9 @@ mod tests {
             Request::ComputerClipboard { computer: "desk".into(), send: false, receive: false },
             Request::ComputerFiles { computer: "desk".into(), on: true },
             Request::ComputerFiles { computer: "desk".into(), on: false },
+            Request::ComputerHandoffSwitch { computer: "desk".into(), on: true },
+            Request::ComputerHandoffSwitch { computer: "desk".into(), on: false },
+            Request::ComputerHandoff { computer: "desk".into(), url: "https://example.com".into(), title: None },
         ];
         for o in RequestOrigin::ALL {
             for req in &switches {
@@ -1759,6 +1816,19 @@ mod tests {
             r#"{"cmd":"computer_clipboard","computer":"desk","send":true,"receive":false}"#
         );
         assert_eq!(serde_json::to_string(&switches[2]).unwrap(), r#"{"cmd":"computer_files","computer":"desk","on":true}"#);
+        assert_eq!(
+            serde_json::to_string(&switches[4]).unwrap(),
+            r#"{"cmd":"computer_handoff_switch","computer":"desk","on":true}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&switches[6]).unwrap(),
+            r#"{"cmd":"computer_handoff","computer":"desk","url":"https://example.com"}"#
+        );
+        let off = Reply::ComputerHandoff { id: "i".into(), name: "Desk".into(), shown: false, why: Some("busy".into()) };
+        assert_eq!(
+            serde_json::to_string(&off).unwrap(),
+            r#"{"reply":"computer_handoff","id":"i","name":"Desk","shown":false,"why":"busy"}"#
+        );
     }
 
     #[test]
