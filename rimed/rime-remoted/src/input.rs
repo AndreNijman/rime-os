@@ -21,8 +21,12 @@
 //!    Shell starts locking and before the compositor confirms it.
 //!
 //! Only logind can say "unlocked", and only positively (`LockedHint` false);
-//! every other source can only veto. A missing Shell file is no opinion
-//! either way. The gate is read before every event, and a session thread
+//! every other source can only veto. On a compositor with a lock notifier a
+//! missing Shell file is no opinion either way; on one without (labwc) a
+//! stale `LockedHint` false could not be told apart from a true one, so
+//! there the Shell's file must be present and say unlocked. The file counts
+//! only when this user alone could have written it ([`read_shell_file`]).
+//! The gate is read before every event, and a session thread
 //! that holds anything re-reads it every [`HELD_TICK`] whether or not the
 //! phone sends anything, so a key held when the screen locks is let go
 //! before it can auto-repeat into the password field.
@@ -350,15 +354,20 @@ pub fn parse_batch(bytes: &[u8]) -> Result<(u64, Vec<Ev>), Refused> {
 /// What the Shell's `lock.json` says.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ShellFile {
-    /// No file: no opinion. A Shell that never wrote one cannot prove the
-    /// screen is unlocked by its absence.
+    /// No file. On a compositor with a lock notifier, no opinion; on one
+    /// without (labwc), locked: logind's `LockedHint` alone cannot be told
+    /// apart from a stale one there.
     #[default]
     Absent,
     Locked,
     Unlocked,
-    /// There, and not `{"locked": <bool>}`: counted as locked.
+    /// There, and not a file this user alone could have written saying
+    /// `{"locked": <bool>}`: counted as locked.
     Unreadable,
 }
+
+/// The most the Shell's file may hold.
+const SHELL_FILE_MAX: u64 = 4096;
 
 /// Every lock source, as last read.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -372,33 +381,69 @@ pub struct Sources {
     /// The compositor's own lock notifier, when it has one. `None` (not
     /// offered, or nothing said yet) is no veto: it cannot prove "unlocked".
     pub notifier: Option<bool>,
+    /// Whether the compositor offers a lock notifier at all. Without one, the
+    /// Shell's file is required: absent counts as locked.
+    pub notifier_offered: bool,
     /// The Shell's file.
     pub shell: ShellFile,
 }
 
 /// Whether input must stop: the union of every source, and unknown is
 /// locked. Only logind saying `LockedHint` false, with no other source
-/// objecting, lets anything through.
+/// objecting, lets anything through; on a compositor with no lock notifier
+/// the Shell's file must also be there and say unlocked.
 pub fn locked(s: &Sources) -> bool {
     crate::share::counts_as_locked(s.locked_hint)
         || s.lock_signal
         || s.notifier == Some(true)
         || matches!(s.shell, ShellFile::Locked | ShellFile::Unreadable)
+        || (s.shell == ShellFile::Absent && !s.notifier_offered)
 }
 
-/// Read the Shell's lock file.
+/// Read the Shell's lock file. Only a regular file (not a link, a FIFO or a
+/// directory) owned by this user, writable by nobody else, of at most
+/// [`SHELL_FILE_MAX`] bytes, is read at all; anything else there is
+/// [`ShellFile::Unreadable`], so locked. Opened without following a link and
+/// without blocking, so nothing put there can stall the session thread.
 pub fn read_shell_file(path: &Path) -> ShellFile {
-    match std::fs::read(path) {
-        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes)
-            .ok()
-            .and_then(|v| v.get("locked")?.as_bool())
-        {
-            Some(true) => ShellFile::Locked,
-            Some(false) => ShellFile::Unlocked,
-            None => ShellFile::Unreadable,
-        },
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => ShellFile::Absent,
-        Err(_) => ShellFile::Unreadable,
+    use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK | libc::O_CLOEXEC)
+        .open(path);
+    let file = match file {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return ShellFile::Absent,
+        Err(_) => return ShellFile::Unreadable,
+    };
+    let Ok(meta) = file.metadata() else {
+        return ShellFile::Unreadable;
+    };
+    // SAFETY: getuid has no failure mode.
+    let uid = unsafe { libc::getuid() };
+    if !meta.file_type().is_file()
+        || meta.uid() != uid
+        || meta.mode() & 0o022 != 0
+        || meta.len() > SHELL_FILE_MAX
+    {
+        return ShellFile::Unreadable;
+    }
+    let mut bytes = Vec::new();
+    if std::io::Read::read_to_end(
+        &mut std::io::Read::take(&file, SHELL_FILE_MAX + 1),
+        &mut bytes,
+    )
+    .is_err()
+    {
+        return ShellFile::Unreadable;
+    }
+    match serde_json::from_slice::<Value>(&bytes)
+        .ok()
+        .and_then(|v| v.get("locked")?.as_bool())
+    {
+        Some(true) => ShellFile::Locked,
+        Some(false) => ShellFile::Unlocked,
+        None => ShellFile::Unreadable,
     }
 }
 
@@ -411,14 +456,24 @@ pub struct Gate {
 }
 
 impl Gate {
-    fn sources(&self, notifier: Option<bool>, shell: ShellFile) -> Sources {
+    fn sources(&self, notifier: Option<bool>, notifier_offered: bool, shell: ShellFile) -> Sources {
         let (locked_hint, lock_signal) = (self.logind)();
         Sources {
             locked_hint,
             lock_signal,
             notifier,
+            notifier_offered,
             shell,
         }
+    }
+
+    /// The gate against `backend`: its notifier, and whether it has one.
+    fn locked_for(&self, backend: &dyn Backend) -> bool {
+        locked(&self.sources(
+            backend.compositor_locked(),
+            backend.offers_lock_notifier(),
+            self.shell_file(),
+        ))
     }
 
     fn shell_file(&self) -> ShellFile {
@@ -516,8 +571,13 @@ pub trait Backend: Send {
     fn text_key(&mut self, code: u32, pressed: bool) -> std::io::Result<()>;
     /// Wait until the compositor has processed everything sent.
     fn sync(&mut self) -> std::io::Result<()>;
+    /// Make the new pointer take clicks. Sent only once the gate has said
+    /// unlocked: even a motion there and back must not reach a lock screen.
+    fn warm_up(&mut self) -> std::io::Result<()>;
     /// The compositor's own lock notifier: `Some(true)` locked.
     fn compositor_locked(&self) -> Option<bool>;
+    /// Whether the compositor offers a lock notifier at all.
+    fn offers_lock_notifier(&self) -> bool;
     /// Why the compositor is gone, once it is.
     fn gone(&self) -> Option<String>;
 }
@@ -534,7 +594,6 @@ impl StubBackend {
             dir: dir.to_path_buf(),
         };
         b.write(json!({"a": "open"}))?;
-        b.write(json!({"a": "warm"}))?;
         Ok(b)
     }
 
@@ -585,10 +644,20 @@ impl Backend for StubBackend {
         }
         Ok(())
     }
+    fn warm_up(&mut self) -> std::io::Result<()> {
+        self.write(json!({"a": "warm"}))
+    }
     fn compositor_locked(&self) -> Option<bool> {
         StubBackend::sources(&self.dir)
             .get("notifier")
             .and_then(Value::as_bool)
+    }
+    /// A `notifier` that is a bool in `sources.json` (not null, not
+    /// missing) stands for a compositor that offers one.
+    fn offers_lock_notifier(&self) -> bool {
+        StubBackend::sources(&self.dir)
+            .get("notifier")
+            .is_some_and(Value::is_boolean)
     }
     fn gone(&self) -> Option<String> {
         self.dir
@@ -729,11 +798,11 @@ impl Session {
     /// The gate, now: the Shell file as last read, logind and the
     /// compositor as they are.
     fn locked_now(&self) -> bool {
-        locked(
-            &self
-                .gate
-                .sources(self.backend.compositor_locked(), self.shell),
-        )
+        locked(&self.gate.sources(
+            self.backend.compositor_locked(),
+            self.backend.offers_lock_notifier(),
+            self.shell,
+        ))
     }
 
     /// How long the session thread may wait for the next frame.
@@ -1205,7 +1274,10 @@ pub fn open(
     }
     let gate = env.gate();
     let shell = gate.shell_file();
-    if locked(&gate.sources(None, shell)) {
+    // Before the connect the compositor's notifier is unknown, so this early
+    // answer is lenient about an absent Shell file; the check after the
+    // round trip below is the one that decides.
+    if locked(&gate.sources(None, true, shell)) {
         return Err(error(
             "locked",
             "this computer is locked; unlock it at the keyboard first",
@@ -1213,13 +1285,18 @@ pub fn open(
     }
     let mut backend = env.backend().map_err(|why| error("unavailable", &why))?;
     // Keys or buttons an earlier run left held go first, on the new devices.
+    // The compositor's notifier is known only now, after the round trip.
+    let unlocked = !gate.locked_for(backend.as_ref());
+    if unlocked {
+        backend
+            .warm_up()
+            .map_err(|e| error("unavailable", &e.to_string()))?;
+    }
     let crash = env.crash_file();
     if let Some(left) = read_held(&crash) {
-        let unlocked = !locked(&gate.sources(backend.compositor_locked(), gate.shell_file()));
         write_held(&crash, &recover(backend.as_mut(), &left, unlocked));
     }
-    // The compositor's notifier is known only now, after the round trip.
-    if locked(&gate.sources(backend.compositor_locked(), gate.shell_file())) {
+    if !unlocked || gate.locked_for(backend.as_ref()) {
         return Err(error(
             "locked",
             "this computer is locked; unlock it at the keyboard first",
@@ -1457,7 +1534,10 @@ pub fn recover_at_start() {
         let Ok(mut backend) = env.backend() else {
             return;
         };
-        let unlocked = !locked(&gate.sources(backend.compositor_locked(), gate.shell_file()));
+        let unlocked = !gate.locked_for(backend.as_ref());
+        if unlocked && backend.warm_up().is_err() {
+            return;
+        }
         write_held(&crash, &recover(backend.as_mut(), &left, unlocked));
     });
 }
@@ -2031,11 +2111,6 @@ pub mod wayland {
             w.send(keyboards, 0, &a, None).map_err(fail)?;
             w.keymap(w.keyboard, &layout.keymap()).map_err(fail)?;
             w.sync().map_err(fail)?;
-            // Hyprland drops a new pointer's first clicks until it has seen
-            // a relative motion (measured): one there and back.
-            w.motion(1.0, 0.0).map_err(fail)?;
-            w.motion(-1.0, 0.0).map_err(fail)?;
-            w.sync().map_err(fail)?;
             Ok(w)
         }
 
@@ -2259,12 +2334,24 @@ pub mod wayland {
             }
         }
 
+        fn warm_up(&mut self) -> std::io::Result<()> {
+            // Hyprland drops a new pointer's first clicks until it has seen
+            // a relative motion (measured): one there and back.
+            self.motion(1.0, 0.0)?;
+            self.motion(-1.0, 0.0)?;
+            self.sync()
+        }
+
         fn compositor_locked(&self) -> Option<bool> {
             self.shared
                 .heard
                 .lock()
                 .unwrap_or_else(|e| e.into_inner())
                 .locked
+        }
+
+        fn offers_lock_notifier(&self) -> bool {
+            self.shared.note.load(Ordering::SeqCst) != 0
         }
 
         fn gone(&self) -> Option<String> {
@@ -2295,6 +2382,7 @@ mod tests {
     struct Fake {
         log: Arc<Mutex<Vec<String>>>,
         compositor: Arc<Mutex<Option<bool>>>,
+        offers_notifier: Arc<AtomicBool>,
     }
 
     impl Fake {
@@ -2332,12 +2420,37 @@ mod tests {
         fn sync(&mut self) -> std::io::Result<()> {
             self.push("sync".into())
         }
+        fn warm_up(&mut self) -> std::io::Result<()> {
+            self.push("warm".into())
+        }
         fn compositor_locked(&self) -> Option<bool> {
             *self.compositor.lock().expect("c")
+        }
+        fn offers_lock_notifier(&self) -> bool {
+            self.offers_notifier.load(Ordering::SeqCst)
         }
         fn gone(&self) -> Option<String> {
             None
         }
+    }
+
+    /// Write the Shell's file the way the Shell must: whole (a rename), mode
+    /// 0600, whatever this process's umask.
+    pub(super) fn write_shell_file(path: &Path, locked: bool) {
+        use std::io::Write as _;
+        use std::os::unix::fs::OpenOptionsExt;
+        let tmp = path.with_extension("tmp");
+        let _ = std::fs::remove_file(&tmp);
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&tmp)
+            .expect("create");
+        f.write_all(json!({"locked": locked}).to_string().as_bytes())
+            .expect("write");
+        drop(f);
+        std::fs::rename(&tmp, path).expect("rename");
     }
 
     /// A session on a fake backend, with switches for the gate and grant.
@@ -2356,6 +2469,9 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("mkdir");
         let fake = Fake::default();
+        // labwc's case, the stricter one: no notifier, so the Shell's file
+        // must be there and say unlocked.
+        write_shell_file(&dir.join("lock.json"), false);
         let hint = Arc::new(Mutex::new((Some(false), false)));
         let grant = Arc::new(AtomicBool::new(true));
         let said = Arc::new(Mutex::new(Vec::new()));
@@ -2411,6 +2527,7 @@ mod tests {
     fn locked_is_the_union_of_every_source_and_only_logind_can_say_unlocked() {
         let open = Sources {
             locked_hint: Some(false),
+            notifier_offered: true,
             ..Sources::default()
         };
         assert!(!locked(&open));
@@ -2442,8 +2559,9 @@ mod tests {
             shell: ShellFile::Unreadable,
             ..open
         }));
-        // And what cannot veto does not: an absent or "unlocked" Shell file,
-        // a notifier that says unlocked or nothing.
+        // And what cannot veto does not: an absent or "unlocked" Shell file
+        // where the compositor has a notifier, a notifier that says unlocked
+        // or nothing.
         assert!(!locked(&Sources {
             shell: ShellFile::Absent,
             notifier: None,
@@ -2454,30 +2572,97 @@ mod tests {
             notifier: Some(false),
             ..open
         }));
+        // With no notifier (labwc) a stale `LockedHint` false cannot be told
+        // from a true one: the Shell's file must be there and say unlocked.
+        let labwc = Sources {
+            notifier_offered: false,
+            ..open
+        };
+        assert!(locked(&Sources {
+            shell: ShellFile::Absent,
+            ..labwc
+        }));
+        assert!(!locked(&Sources {
+            shell: ShellFile::Unlocked,
+            ..labwc
+        }));
+        assert!(locked(&Sources {
+            shell: ShellFile::Unlocked,
+            locked_hint: None,
+            ..labwc
+        }));
     }
 
     #[test]
-    fn the_shell_file_is_no_opinion_when_absent_and_locked_when_unreadable() {
+    fn the_shell_file_is_read_only_when_this_user_alone_could_have_written_it() {
         let dir = std::env::temp_dir().join(format!("rime-input-shellfile-{}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("mkdir");
         let f = dir.join("lock.json");
         let _ = std::fs::remove_file(&f);
         assert_eq!(read_shell_file(&f), ShellFile::Absent);
+        use std::os::unix::fs::PermissionsExt;
+        let set_mode = |m: u32| {
+            std::fs::set_permissions(&f, std::fs::Permissions::from_mode(m)).expect("chmod");
+        };
         for (text, want) in [
-            (r#"{"locked":true}"#, ShellFile::Locked),
-            (r#"{"locked":false,"at":1}"#, ShellFile::Unlocked),
-            (r#"{"locked":"no"}"#, ShellFile::Unreadable),
-            ("", ShellFile::Unreadable),
-            ("{", ShellFile::Unreadable),
+            (r#"{"locked":true}"#.to_string(), ShellFile::Locked),
+            (
+                r#"{"locked":false,"at":1}"#.to_string(),
+                ShellFile::Unlocked,
+            ),
+            (r#"{"locked":"no"}"#.to_string(), ShellFile::Unreadable),
+            (String::new(), ShellFile::Unreadable),
+            ("{".to_string(), ShellFile::Unreadable),
+            // Bigger than any file the Shell writes, even if it parses.
+            (
+                format!(r#"{{"locked":false,"pad":"{}"}}"#, "x".repeat(5000)),
+                ShellFile::Unreadable,
+            ),
         ] {
-            std::fs::write(&f, text).expect("write");
-            assert_eq!(read_shell_file(&f), want, "{text}");
+            std::fs::write(&f, &text).expect("write");
+            set_mode(0o600);
+            assert_eq!(read_shell_file(&f), want, "{text:.40}");
         }
+        // Writable by the group or by others: anyone could have said
+        // "unlocked", so it says nothing but locked.
+        write_shell_file(&f, false);
+        assert_eq!(read_shell_file(&f), ShellFile::Unlocked);
+        for mode in [0o620, 0o602, 0o666] {
+            set_mode(mode);
+            assert_eq!(read_shell_file(&f), ShellFile::Unreadable, "{mode:o}");
+        }
+        set_mode(0o644);
+        assert_eq!(read_shell_file(&f), ShellFile::Unlocked);
+        // A link to a file that says unlocked is not the file.
+        let real = dir.join("elsewhere.json");
+        write_shell_file(&real, false);
+        std::fs::remove_file(&f).expect("rm");
+        std::os::unix::fs::symlink(&real, &f).expect("symlink");
+        assert_eq!(read_shell_file(&f), ShellFile::Unreadable);
+        // A FIFO is opened without blocking and refused.
+        std::fs::remove_file(&f).expect("rm");
+        let c = std::ffi::CString::new(f.as_os_str().as_encoded_bytes()).expect("c");
+        // SAFETY: a valid C string; mkfifo only creates a node.
+        assert_eq!(unsafe { libc::mkfifo(c.as_ptr(), 0o600) }, 0, "mkfifo");
+        assert_eq!(read_shell_file(&f), ShellFile::Unreadable);
         // A directory where the file should be cannot be read: locked.
         std::fs::remove_file(&f).expect("rm");
         std::fs::create_dir(&f).expect("mkdir");
         assert_eq!(read_shell_file(&f), ShellFile::Unreadable);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_shell_file_owned_by_someone_else_says_nothing_but_locked() {
+        // Any world-readable regular file root owns shows the owner check
+        // alone refusing it.
+        // SAFETY: getuid has no failure mode.
+        if unsafe { libc::getuid() } == 0 {
+            return;
+        }
+        let f = Path::new("/etc/hostname");
+        assert!(f.is_file(), "the test needs a root-owned regular file");
+        assert_eq!(read_shell_file(f), ShellFile::Unreadable);
     }
 
     #[test]
@@ -2705,8 +2890,14 @@ mod tests {
         fn sync(&mut self) -> std::io::Result<()> {
             self.inner.sync()
         }
+        fn warm_up(&mut self) -> std::io::Result<()> {
+            self.inner.warm_up()
+        }
         fn compositor_locked(&self) -> Option<bool> {
             self.inner.compositor_locked()
+        }
+        fn offers_lock_notifier(&self) -> bool {
+            self.inner.offers_lock_notifier()
         }
         fn gone(&self) -> Option<String> {
             None
@@ -2714,9 +2905,35 @@ mod tests {
     }
 
     #[test]
+    fn without_a_lock_notifier_the_shell_file_going_away_pauses_and_lets_go() {
+        let mut r = rig("shellgone");
+        assert_eq!(
+            r.frame(0, 1, json!([{"t": "k", "code": 30, "p": true}])),
+            Step::Go
+        );
+        r.fake.take();
+        // logind still says unlocked, but on labwc that may be stale: the
+        // Shell's file is gone (the Shell died, or never ran), so locked.
+        std::fs::remove_file(r.dir.join("lock.json")).expect("rm");
+        assert_eq!(r.session.tick(r.at(20)), Step::Go);
+        assert!(r.session.paused());
+        assert!(r.fake.take().contains(&"key 30 false".to_string()));
+        assert!(r.said().iter().any(|v| v["event"] == "input_paused"));
+        // On a compositor with a notifier, the same missing file is no
+        // opinion: logind's "unlocked" stands.
+        r.fake.offers_notifier.store(true, Ordering::SeqCst);
+        assert_eq!(r.session.tick(r.at(40)), Step::Go);
+        assert!(!r.session.paused());
+        assert!(r.said().iter().any(|v| v["event"] == "input_resumed"));
+    }
+
+    #[test]
     fn frames_that_never_stop_coming_still_let_go_of_a_held_key_when_it_locks() {
         let mut r = rig("flood");
-        assert_eq!(r.frame(0, 1, json!([{"t":"k","code":30,"p":true}])), Step::Go);
+        assert_eq!(
+            r.frame(0, 1, json!([{"t":"k","code":30,"p":true}])),
+            Step::Go
+        );
         r.fake.take();
         r.lock(Some(true), false);
         // Empty batches every 5 ms: no event to check the gate before, and
@@ -2724,10 +2941,16 @@ mod tests {
         for i in 0..10 {
             assert_eq!(r.frame(5 + 5 * i, 2 + i, json!([])), Step::Go);
         }
-        assert!(r.session.held().is_empty(), "a key stayed held across the lock");
+        assert!(
+            r.session.held().is_empty(),
+            "a key stayed held across the lock"
+        );
         let got = r.fake.take();
         assert!(got.contains(&"key 30 false".to_string()), "{got:?}");
-        assert_eq!(r.said(), [json!({"event": "input_paused", "why": "locked"})]);
+        assert_eq!(
+            r.said(),
+            [json!({"event": "input_paused", "why": "locked"})]
+        );
     }
 
     #[test]
@@ -3032,10 +3255,14 @@ mod tests {
     ];
 
     #[test]
-    fn the_devices_are_made_then_warmed_up_with_one_motion_there_and_back() {
+    fn the_devices_are_made_and_warmed_up_apart_with_one_motion_there_and_back() {
         let (sock, seen) = compositor(ALL);
-        let w =
+        let mut w =
             wayland::Wayland::over(sock, &wayland::Layout::from_names("us", "")).expect("connect");
+        // Nothing reaches the pointer until the gate has said unlocked.
+        let made = seen.lock().expect("log").len();
+        assert_eq!(made, 10, "{:?}", seen.lock().expect("log"));
+        w.warm_up().expect("warm up");
         let log = seen.lock().expect("log").clone();
         let shape: Vec<(u32, u16)> = log.iter().map(|(o, op, _)| (*o, *op)).collect();
         // get_registry, sync (callback 3), bind ×3 (seat 4, pointers 5,
@@ -3286,18 +3513,27 @@ ShellRoot {
         let hint = Arc::new(Mutex::new((Some(false), false)));
         let said = Arc::new(Mutex::new(Vec::new()));
         let (h, sd) = (Arc::clone(&hint), Arc::clone(&said));
-        let backend = wayland::Wayland::connect(&socket, &wayland::Layout::from_names("us", ""))
-            .expect("virtual devices");
+        let mut backend =
+            wayland::Wayland::connect(&socket, &wayland::Layout::from_names("us", ""))
+                .expect("virtual devices");
+        backend.warm_up().expect("warm up");
         assert_eq!(
             backend.compositor_locked(),
             None,
             "labwc has no lock notifier"
         );
+        assert!(
+            !backend.offers_lock_notifier(),
+            "labwc has no lock notifier"
+        );
+        // So the Shell's file is required: written here as the Shell would.
+        let shell_file = rt.join("lock.json");
+        write_shell_file(&shell_file, false);
         let mut session = Session::new(
             Box::new(backend),
             Gate {
                 logind: Box::new(move || *h.lock().expect("h")),
-                shell: None,
+                shell: Some(shell_file),
             },
             Box::new(|| true),
             Box::new(|| Ok(())),

@@ -5284,6 +5284,25 @@ fn input_sources(h: &Harness, sources: serde_json::Value) {
     std::fs::rename(&tmp, h.root.join("input/sources.json")).expect("rename");
 }
 
+/// The Shell's lock file as the Shell writes it (whole, by a rename, mode
+/// 0600), or gone.
+fn shell_lock_file(h: &Harness, locked: Option<bool>) {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let dir = h.root.join("run/rime-remote");
+    std::fs::create_dir_all(&dir).expect("mkdir");
+    let Some(locked) = locked else {
+        std::fs::remove_file(dir.join("lock.json")).expect("rm");
+        return;
+    };
+    let tmp = dir.join("lock.json.tmp");
+    let _ = std::fs::remove_file(&tmp);
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(&tmp).expect("create");
+    f.write_all(serde_json::json!({"locked": locked}).to_string().as_bytes()).expect("write");
+    drop(f);
+    std::fs::rename(&tmp, dir.join("lock.json")).expect("rename");
+}
+
 /// How long any one wait in the input test may take before it fails.
 const INPUT_WAIT: Duration = Duration::from_secs(10);
 
@@ -5415,7 +5434,14 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     let r = open_input(&mut p, 6);
     assert_eq!(r["kind"], "locked", "{r}");
     closed(&mut p, 6);
+    // logind says unlocked, but this compositor (the stub's, like labwc)
+    // has no lock notifier, so a stale `LockedHint` could not be told apart:
+    // without the Shell's file saying unlocked, still locked.
     input_sources(&h, serde_json::json!({"locked_hint": false}));
+    let r = open_input(&mut p, 6);
+    assert_eq!(r["kind"], "locked", "{r}");
+    closed(&mut p, 6);
+    shell_lock_file(&h, Some(false));
     let r = open_input(&mut p, 7);
     assert_eq!(r["reply"], "input_ready", "{r}");
     // One input channel on this computer at a time.
@@ -5430,7 +5456,13 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     ]));
     let got = input_actions_until(&h, 0, "the first batch", |a| has(a, serde_json::json!({"a": "text_key", "p": false})));
     let kinds: Vec<&str> = got.iter().map(|a| a["a"].as_str().unwrap()).collect();
-    assert_eq!(kinds, ["open", "warm", "motion", "key", "button", "scroll", "text_keymap", "text_key", "text_key"], "{got:?}");
+    // The open refused after the connect (no notifier, no Shell file) made
+    // the devices and dropped them without sending them anything.
+    assert_eq!(
+        kinds,
+        ["open", "close", "open", "warm", "motion", "key", "button", "scroll", "text_keymap", "text_key", "text_key"],
+        "{got:?}"
+    );
     let held: serde_json::Value =
         serde_json::from_slice(&std::fs::read(h.root.join("run/rime-remote/input-held.json")).expect("held file")).expect("json");
     assert_eq!((held["keys"].clone(), held["buttons"].clone()), (serde_json::json!([30]), serde_json::json!([272])), "{held}");
@@ -5446,22 +5478,24 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     // The Shell's file locks too, whatever logind says, and so do a Lock
     // signal and the compositor's notifier: still nothing. Each change keeps
     // one source locked at every moment, since a batch may be read late.
-    std::fs::create_dir_all(h.root.join("run/rime-remote")).expect("mkdir");
-    std::fs::write(h.root.join("run/rime-remote/lock.json"), r#"{"locked":true}"#).expect("lock file");
+    shell_lock_file(&h, Some(true));
     input_sources(&h, serde_json::json!({"locked_hint": false}));
     input_batch(&mut p, 7, 3, serde_json::json!([{"t": "k", "code": 32, "p": true}]));
     input_sources(&h, serde_json::json!({"locked_hint": false, "lock_signal": true}));
-    std::fs::remove_file(h.root.join("run/rime-remote/lock.json")).expect("rm");
+    shell_lock_file(&h, Some(false));
     input_batch(&mut p, 7, 4, serde_json::json!([{"t": "k", "code": 33, "p": true}]));
     input_sources(&h, serde_json::json!({"locked_hint": false, "lock_signal": true, "notifier": true}));
     input_sources(&h, serde_json::json!({"locked_hint": false, "notifier": true}));
     input_batch(&mut p, 7, 5, serde_json::json!([{"t": "k", "code": 34, "p": true}]));
+    // From here on the compositor has a notifier, so the Shell's file is an
+    // optional veto: gone, it says nothing either way.
+    shell_lock_file(&h, None);
     // Every batch above has reached the session (a reply after them on the
     // same connection) and been read (well within the wait) while locked.
     assert_eq!(input_call(&mut p, r#"{"cmd":"remote_hello"}"#)["reply"], "remote");
     std::thread::sleep(Duration::from_millis(500));
     // Unlocked: it resumes, and the next event goes through.
-    input_sources(&h, serde_json::json!({"locked_hint": false}));
+    input_sources(&h, serde_json::json!({"locked_hint": false, "notifier": false}));
     assert_eq!(input_events(&mut p, 7, 1, "input_resumed")[0], serde_json::json!({"event": "input_resumed"}));
     let n2 = input_actions(&h).len();
     input_batch(&mut p, 7, 6, serde_json::json!([{"t": "m", "dx": 1, "dy": 1}]));
