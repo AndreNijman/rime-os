@@ -594,6 +594,13 @@ pub struct StubBackend {
 impl StubBackend {
     pub fn open(dir: &Path) -> std::io::Result<StubBackend> {
         std::fs::create_dir_all(dir)?;
+        // A compositor slow to answer: `slow` holds the milliseconds.
+        if let Some(ms) = std::fs::read_to_string(dir.join("slow"))
+            .ok()
+            .and_then(|t| t.trim().parse::<u64>().ok())
+        {
+            std::thread::sleep(Duration::from_millis(ms.min(10_000)));
+        }
         let b = StubBackend {
             dir: dir.to_path_buf(),
         };
@@ -1277,6 +1284,17 @@ impl Session {
     }
 }
 
+impl Drop for Session {
+    /// A session dropped without [`Session::end`] (a panic on its thread)
+    /// still lets go of what it holds; what it cannot stays in the crash
+    /// file.
+    fn drop(&mut self) {
+        if !self.held.is_empty() {
+            let _ = self.release_all();
+        }
+    }
+}
+
 /// The channel's end when the compositor stops taking input.
 fn gone(e: std::io::Error) -> Step {
     Step::End(
@@ -1321,15 +1339,59 @@ pub fn recover(backend: &mut dyn Backend, held: &Held, unlocked: bool) -> Held {
 
 // ── the live channel ───────────────────────────────────────────────────────
 
-/// The one input channel this machine has open, if any.
+/// The one input channel this machine has open, if any: from the moment
+/// [`open`] reserves it (before the slow connect), or while the start's
+/// recovery releases what a crashed run left held (`device` empty).
 struct Live {
     token: u64,
     device: String,
     /// A [`Why`] set by somebody else to end it; 0 for none.
     stop: Arc<AtomicU8>,
-    /// The session thread's end, to wake it.
-    wake: UnixStream,
+    /// The session thread's end, to wake it (none for the recovery).
+    wake: Option<UnixStream>,
     done: Arc<(Mutex<bool>, Condvar)>,
+}
+
+/// The slot a [`Live`] holds, given back when this is dropped (also by a
+/// panic): the entry goes if it is still this one, and whoever waits for
+/// the end is woken.
+struct Slot {
+    token: u64,
+    done: Arc<(Mutex<bool>, Condvar)>,
+}
+
+impl Drop for Slot {
+    fn drop(&mut self) {
+        {
+            let mut guard = lock_live();
+            if guard.as_ref().is_some_and(|l| l.token == self.token) {
+                *guard = None;
+            }
+        }
+        let (m, cv) = &*self.done;
+        *m.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cv.notify_all();
+    }
+}
+
+/// Take the slot for `device` (empty: the start's recovery), unless one is
+/// held. The global lock is held only for this, never across a connect.
+fn reserve(device: &str, wake: Option<UnixStream>) -> Result<(Slot, Arc<AtomicU8>), ()> {
+    let mut guard = lock_live();
+    if guard.is_some() {
+        return Err(());
+    }
+    let token = TOKENS.fetch_add(1, Ordering::Relaxed);
+    let stop = Arc::new(AtomicU8::new(0));
+    let done = Arc::new((Mutex::new(false), Condvar::new()));
+    *guard = Some(Live {
+        token,
+        device: device.to_string(),
+        stop: Arc::clone(&stop),
+        wake,
+        done: Arc::clone(&done),
+    });
+    Ok((Slot { token, done }, stop))
 }
 
 fn live() -> &'static Mutex<Option<Live>> {
@@ -1349,9 +1411,11 @@ static TOKENS: AtomicU64 = AtomicU64::new(1);
 pub fn stop_for(device: &str, why: Why) -> bool {
     let guard = lock_live();
     match guard.as_ref() {
-        Some(l) if l.device == device => {
+        Some(l) if l.device == device && !device.is_empty() => {
             l.stop.store(why as u8, Ordering::SeqCst);
-            let _ = l.wake.shutdown(std::net::Shutdown::Read);
+            if let Some(w) = &l.wake {
+                let _ = w.shutdown(std::net::Shutdown::Read);
+            }
             true
         }
         _ => false,
@@ -1365,7 +1429,9 @@ pub fn shutdown(within: Duration) {
         let guard = lock_live();
         let Some(l) = guard.as_ref() else { return };
         l.stop.store(Why::Stopping as u8, Ordering::SeqCst);
-        let _ = l.wake.shutdown(std::net::Shutdown::Read);
+        if let Some(w) = &l.wake {
+            let _ = w.shutdown(std::net::Shutdown::Read);
+        }
         Arc::clone(&l.done)
     };
     let (m, cv) = &*done;
@@ -1452,43 +1518,6 @@ pub fn open(
     if let Err(why) = env.available() {
         return Err(error("unavailable", &why));
     }
-    let mut guard = lock_live();
-    if guard.is_some() {
-        return Err(error(
-            "busy",
-            "another phone is using this computer as a touchpad",
-        ));
-    }
-    let gate = env.gate();
-    let shell = gate.shell_file();
-    // Before the connect the compositor's notifier is unknown, so this early
-    // answer is lenient about an absent Shell file; the check after the
-    // round trip below is the one that decides.
-    if locked(&gate.sources(None, true, shell)) {
-        return Err(error(
-            "locked",
-            "this computer is locked; unlock it at the keyboard first",
-        ));
-    }
-    let (mut backend, bound) = env.backend().map_err(|why| error("unavailable", &why))?;
-    // Keys or buttons an earlier run left held go first, on the new devices.
-    // The compositor's notifier is known only now, after the round trip.
-    let unlocked = !gate.locked_for(backend.as_ref());
-    if unlocked {
-        backend
-            .warm_up()
-            .map_err(|e| error("unavailable", &e.to_string()))?;
-    }
-    let crash = env.crash_file();
-    if let Some(left) = read_held(&crash) {
-        write_held(&crash, &recover(backend.as_mut(), &left, unlocked));
-    }
-    if !unlocked || gate.locked_for(backend.as_ref()) {
-        return Err(error(
-            "locked",
-            "this computer is locked; unlock it at the keyboard first",
-        ));
-    }
     let (theirs, mine) = seqpacket_pair().map_err(|e| error("unavailable", &e.to_string()))?;
     let wake = mine
         .try_clone()
@@ -1496,9 +1525,76 @@ pub fn open(
     let writer = mine
         .try_clone()
         .map_err(|e| error("unavailable", &e.to_string()))?;
-    let token = TOKENS.fetch_add(1, Ordering::Relaxed);
-    let stop = Arc::new(AtomicU8::new(0));
-    let done = Arc::new((Mutex::new(false), Condvar::new()));
+    // The slot first, briefly under the global lock; everything slow after
+    // it without, so revoking, lowering the grant or stopping this service
+    // never waits behind a compositor that is slow to answer. They find the
+    // slot and mark it, and it is looked at after each slow step.
+    let (slot, stop) = match reserve(device, Some(wake)) {
+        Ok(x) => x,
+        Err(()) => {
+            // The start's recovery is quick: wait for it once.
+            let recovering = lock_live()
+                .as_ref()
+                .filter(|l| l.device.is_empty())
+                .map(|l| Arc::clone(&l.done));
+            if let Some(done) = recovering {
+                let (m, cv) = &*done;
+                let g = m.lock().unwrap_or_else(|e| e.into_inner());
+                let _ = cv.wait_timeout_while(g, Duration::from_secs(5), |finished| !*finished);
+            }
+            let wake = mine
+                .try_clone()
+                .map_err(|e| error("unavailable", &e.to_string()))?;
+            reserve(device, Some(wake))
+                .map_err(|()| error("busy", "another phone is using this computer as a touchpad"))?
+        }
+    };
+    let stopped = || -> Result<(), Vec<u8>> {
+        match Why::from_u8(stop.load(Ordering::SeqCst)) {
+            None => Ok(()),
+            Some(Why::NotAllowed) => Err(error(
+                "not_allowed",
+                "this phone is no longer allowed to use this computer as a touchpad",
+            )),
+            Some(Why::Stopping) => Err(error(
+                "unavailable",
+                "Rime Remote on this computer is stopping",
+            )),
+            Some(_) => Err(error("unavailable", "the touchpad was stopped")),
+        }
+    };
+    let locked_refusal = || {
+        error(
+            "locked",
+            "this computer is locked; unlock it at the keyboard first",
+        )
+    };
+    let gate = env.gate();
+    let shell = gate.shell_file();
+    // Before the connect the compositor's notifier is unknown, so this early
+    // answer is lenient about an absent Shell file; the check after the
+    // round trip below is the one that decides.
+    if locked(&gate.sources(None, true, shell)) {
+        return Err(locked_refusal());
+    }
+    let (mut backend, bound) = env.backend().map_err(|why| error("unavailable", &why))?;
+    stopped()?;
+    // The compositor's notifier is known only now, after the round trip.
+    let unlocked = !gate.locked_for(backend.as_ref());
+    if unlocked {
+        backend
+            .warm_up()
+            .map_err(|e| error("unavailable", &e.to_string()))?;
+    }
+    // Keys or buttons an earlier run left held go first, on the new devices.
+    let crash = env.crash_file();
+    if let Some(left) = read_held(&crash) {
+        write_held(&crash, &recover(backend.as_mut(), &left, unlocked));
+    }
+    if !unlocked || gate.locked_for(backend.as_ref()) {
+        return Err(locked_refusal());
+    }
+    stopped()?;
     let st = Arc::clone(state);
     let dev = device.to_string();
     let session = Session::new(
@@ -1516,24 +1612,17 @@ pub fn open(
         Some(crash),
         Instant::now(),
     );
-    let (stop2, done2) = (Arc::clone(&stop), Arc::clone(&done));
     let who = (
         device.to_string(),
         name.unwrap_or_else(|| device.to_string()),
     );
     let opened_line = audit_open(&who.0, &who.1);
+    // The slot goes with the thread, which gives it back however it ends.
     std::thread::Builder::new()
         .name("rime-input".into())
-        .spawn(move || run(session, mine, stop2, done2, token, who))
+        .spawn(move || run(session, mine, stop, slot, who))
         .map_err(|e| error("unavailable", &format!("no thread for the touchpad: {e}")))?;
     eprintln!("{opened_line}");
-    *guard = Some(Live {
-        token,
-        device: device.to_string(),
-        stop,
-        wake,
-        done,
-    });
     Ok((
         theirs,
         json!({"reply": "input_ready"}).to_string().into_bytes(),
@@ -1546,10 +1635,12 @@ fn run(
     mut session: Session,
     sock: UnixStream,
     stop: Arc<AtomicU8>,
-    done: Arc<(Mutex<bool>, Condvar)>,
-    token: u64,
+    slot: Slot,
     who: (String, String),
 ) {
+    // Dropped last, even by a panic: the slot is given back after the
+    // session (whose drop lets go of what it holds) is gone.
+    let _slot = slot;
     let opened = Instant::now();
     let mut buf = vec![0u8; MAX_FRAME_BYTES + 1];
     let ended = loop {
@@ -1602,15 +1693,6 @@ fn run(
     );
     drop(session);
     drop(sock);
-    {
-        let mut guard = lock_live();
-        if guard.as_ref().is_some_and(|l| l.token == token) {
-            *guard = None;
-        }
-    }
-    let (m, cv) = &*done;
-    *m.lock().unwrap_or_else(|e| e.into_inner()) = true;
-    cv.notify_all();
 }
 
 // ── where input goes ───────────────────────────────────────────────────────
@@ -1745,26 +1827,40 @@ pub fn prepare() {
 /// is left waits for the next channel.
 pub fn recover_at_start() {
     let env = env();
+    if read_held(&env.crash_file()).is_none() {
+        return;
+    }
+    std::thread::spawn(move || recover_held(env, Duration::from_secs(3)));
+}
+
+/// Release what the crash file holds, under the same slot a live channel
+/// takes, so the two never write the file (or the devices) at once. Skipped
+/// when a channel holds the slot: its open releases it instead. Waits up to
+/// `settle` for logind's first answer (unknown counts as locked).
+fn recover_held(env: &'static Env, settle: Duration) {
+    let Ok((_slot, stop)) = reserve("", None) else {
+        return;
+    };
     let crash = env.crash_file();
     let Some(left) = read_held(&crash) else {
         return;
     };
-    std::thread::spawn(move || {
-        // logind's first answer, or unknown (locked) after a moment.
-        let gate = env.gate();
-        let deadline = Instant::now() + Duration::from_secs(3);
-        while (gate.logind)().0.is_none() && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(100));
-        }
-        let Ok((mut backend, _)) = env.backend() else {
-            return;
-        };
-        let unlocked = !gate.locked_for(backend.as_ref());
-        if unlocked && backend.warm_up().is_err() {
-            return;
-        }
-        write_held(&crash, &recover(backend.as_mut(), &left, unlocked));
-    });
+    let gate = env.gate();
+    let deadline = Instant::now() + settle;
+    while (gate.logind)().0.is_none()
+        && Instant::now() < deadline
+        && stop.load(Ordering::SeqCst) == 0
+    {
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    let Ok((mut backend, _)) = env.backend() else {
+        return;
+    };
+    let unlocked = !gate.locked_for(backend.as_ref());
+    if unlocked && backend.warm_up().is_err() {
+        return;
+    }
+    write_held(&crash, &recover(backend.as_mut(), &left, unlocked));
 }
 
 // ── logind ─────────────────────────────────────────────────────────────────
@@ -3446,6 +3542,183 @@ mod tests {
         }
         let line = audit_open("d1f2", "Pixel");
         assert!(line.contains("\"Pixel\" (d1f2) started"), "{line}");
+    }
+
+    /// Tests that use the process's one live slot or its stub desktop, one
+    /// at a time.
+    fn serial() -> std::sync::MutexGuard<'static, ()> {
+        static M: Mutex<()> = Mutex::new(());
+        M.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// The unit tests' stub desktop, emptied, unlocked (a compositor with
+    /// a notifier, so no Shell file is needed).
+    fn fresh_stub() -> PathBuf {
+        let Env::Stub(dir) = env() else {
+            panic!("unit tests run on the stub")
+        };
+        let _ = std::fs::remove_dir_all(dir);
+        std::fs::create_dir_all(dir).expect("mkdir");
+        std::fs::write(
+            dir.join("sources.json"),
+            json!({"locked_hint": false, "notifier": false}).to_string(),
+        )
+        .expect("sources");
+        dir.clone()
+    }
+
+    fn stub_actions(dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(dir.join("actions.jsonl"))
+            .unwrap_or_default()
+            .lines()
+            .map(|l| {
+                let v: Value = serde_json::from_str(l).expect("json");
+                format!(
+                    "{} {} {}",
+                    v["a"].as_str().unwrap_or_default(),
+                    v["code"],
+                    v["p"]
+                )
+            })
+            .collect()
+    }
+
+    #[test]
+    fn revoking_or_stopping_never_waits_behind_a_slow_compositor() {
+        let _s = serial();
+        let dir = fresh_stub();
+        std::fs::write(dir.join("slow"), "1500").expect("slow");
+        let (state, sdir) = crate::serve::tests::a_state("input-slow");
+        let id = {
+            let mut store = state.devices().expect("store");
+            let id = store
+                .pair(&rime_remote_core::b64_encode(&[9; 32]), "Pixel", 1, false)
+                .expect("pair")
+                .id;
+            store.set_phone_input(&id, true).expect("grant");
+            id
+        };
+        let req = br#"{"cmd":"input","v":1}"#;
+        let (st, id2) = (Arc::clone(&state), id.clone());
+        let opener = std::thread::spawn(move || open(&st, &id2, Scope::Full, req));
+        let t = Instant::now();
+        while lock_live().is_none() {
+            assert!(t.elapsed() < Duration::from_secs(2), "never reserved");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        // Mid-connect: another open is told "busy", and lowering the grant
+        // finds the channel, both at once.
+        let t = Instant::now();
+        let busy: Value =
+            serde_json::from_slice(&open(&state, &id, Scope::Full, req).expect_err("opened twice"))
+                .expect("json");
+        assert_eq!(busy["kind"], "busy", "{busy}");
+        assert!(stop_for(&id, Why::NotAllowed));
+        assert!(
+            t.elapsed() < Duration::from_millis(300),
+            "waited {:?} behind the connect",
+            t.elapsed()
+        );
+        // The open, once the compositor answers, gives up without sending
+        // the devices anything, and gives the slot back.
+        let v: Value = serde_json::from_slice(&opener.join().expect("join").expect_err("opened"))
+            .expect("json");
+        assert_eq!(v["kind"], "not_allowed", "{v}");
+        assert!(lock_live().is_none());
+        assert_eq!(stub_actions(&dir), ["open null null", "close null null"]);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(sdir);
+    }
+
+    #[test]
+    fn a_panic_on_the_session_thread_still_lets_go_and_gives_the_slot_back() {
+        let _s = serial();
+        let dir = std::env::temp_dir().join(format!("rime-input-panic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        write_shell_file(&dir.join("lock.json"), false);
+        let fake = Fake::default();
+        // The second call into the compositor code panics.
+        let hook = Hook {
+            inner: fake.clone(),
+            after: 2,
+            n: 0,
+            then: Box::new(|| panic!("a bug in the compositor code")),
+        };
+        let held = dir.join("input-held.json");
+        let session = Session::new(
+            Box::new(hook),
+            Gate {
+                logind: Box::new(|| (Some(false), false)),
+                shell: Some(dir.join("lock.json")),
+            },
+            Box::new(|| true),
+            Box::new(|| Ok(())),
+            Box::new(|_| {}),
+            Some(held.clone()),
+            Instant::now(),
+        );
+        let (slot, stop) = reserve("pixel", None).expect("free");
+        let (theirs, mine) = seqpacket_pair().expect("pair");
+        let t = std::thread::spawn(move || {
+            run(session, mine, stop, slot, ("pixel".into(), "Pixel".into()))
+        });
+        for (seq, ev) in [
+            (1, json!([{"t": "k", "code": 30, "p": true}])),
+            (2, json!([{"t": "m", "dx": 1, "dy": 1}])),
+        ] {
+            (&theirs)
+                .write_all(json!({"seq": seq, "ev": ev}).to_string().as_bytes())
+                .expect("send");
+        }
+        assert!(t.join().is_err(), "the thread did not panic");
+        assert!(lock_live().is_none(), "the slot was kept");
+        assert!(fake.take().contains(&"key 30 false".to_string()));
+        assert!(read_held(&held).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn the_starts_recovery_takes_the_same_slot_as_a_channel() {
+        let _s = serial();
+        let dir = fresh_stub();
+        let held = env().crash_file();
+        write_held(
+            &held,
+            &Held {
+                keys: BTreeSet::from([50]),
+                ..Held::default()
+            },
+        );
+        // A channel holds the slot: the recovery leaves the file to it.
+        let (slot, _) = reserve("pixel", None).expect("free");
+        recover_held(env(), Duration::ZERO);
+        assert!(stub_actions(&dir).is_empty());
+        assert_eq!(read_held(&held).expect("kept").keys, BTreeSet::from([50]));
+        drop(slot);
+        // Free: it releases, holding the slot meanwhile, and gives it back.
+        std::fs::write(dir.join("slow"), "300").expect("slow");
+        let t = std::thread::spawn(|| recover_held(env(), Duration::ZERO));
+        let start = Instant::now();
+        while lock_live().is_none() {
+            assert!(start.elapsed() < Duration::from_secs(2), "never reserved");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert!(lock_live().as_ref().is_some_and(|l| l.device.is_empty()));
+        t.join().expect("join");
+        assert!(lock_live().is_none());
+        assert_eq!(
+            stub_actions(&dir),
+            [
+                "open null null",
+                "warm null null",
+                "key 50 false",
+                "mods null null",
+                "close null null"
+            ]
+        );
+        assert!(read_held(&held).is_none());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
