@@ -53,17 +53,97 @@ const RELAY_RETRY: Duration = Duration::from_secs(5);
 trait Stream: Read + Write + Send {
     /// How long one read may wait from now on.
     fn wait(&self, d: Duration) -> std::io::Result<()>;
+    /// A second handle that writes to the same connection, for a link split
+    /// in two ([`Link::into_duplex`]).
+    fn writer(&self) -> std::io::Result<Box<dyn Write + Send>>;
+    /// The socket under it, to shut it from another thread.
+    fn socket(&self) -> std::io::Result<TcpStream>;
 }
 
 impl Stream for TcpStream {
     fn wait(&self, d: Duration) -> std::io::Result<()> {
         self.set_read_timeout(Some(d))
     }
+    fn writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
+        Ok(Box::new(self.try_clone()?))
+    }
+    fn socket(&self) -> std::io::Result<TcpStream> {
+        self.try_clone()
+    }
 }
 
 impl Stream for RelayPipe {
     fn wait(&self, d: Duration) -> std::io::Result<()> {
         self.socket.set_read_timeout(Some(d))
+    }
+    fn writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
+        Ok(Box::new(RelayWriter { tx: Arc::clone(&self.tx) }))
+    }
+    fn socket(&self) -> std::io::Result<TcpStream> {
+        self.socket.try_clone()
+    }
+}
+
+/// The writing half of a relay connection: the same sender the reading half
+/// answers the relay's pings with.
+struct RelayWriter {
+    tx: Arc<Mutex<Sender<Box<dyn Write + Send>>>>,
+}
+
+impl Write for RelayWriter {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.tx
+            .lock()
+            .map_err(|_| std::io::Error::other("relay sender poisoned"))?
+            .binary(bytes)?;
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// The writing half of a split link; cloned freely, one frame at a time.
+#[derive(Clone)]
+pub struct LinkWriter {
+    inner: Arc<Mutex<(Box<dyn Write + Send>, Arc<Mutex<Channel>>)>>,
+}
+
+impl LinkWriter {
+    pub fn send(&self, frame: Frame) -> Result<(), String> {
+        let bytes = frame.encode().map_err(|e| e.to_string())?;
+        let mut g = self.inner.lock().map_err(|_| "the link is broken".to_string())?;
+        let sealed = g.1.lock().map_err(|_| "the link is broken".to_string())?.seal(&bytes).map_err(|e| e.to_string())?;
+        let mut framed = Vec::with_capacity(4 + sealed.len());
+        framed.extend_from_slice(&(sealed.len() as u32).to_be_bytes());
+        framed.extend_from_slice(&sealed);
+        g.0.write_all(&framed).and_then(|_| g.0.flush()).map_err(|e| e.to_string())
+    }
+}
+
+/// The reading half of a split link. Answers pings itself.
+pub struct LinkReader {
+    stream: Box<dyn Stream>,
+    channel: Arc<Mutex<Channel>>,
+    writer: LinkWriter,
+}
+
+impl LinkReader {
+    /// The next frame that is not a ping.
+    pub fn next(&mut self) -> Result<Frame, String> {
+        loop {
+            let sealed = read_message(&mut *self.stream).map_err(|e| format!("no answer: {e}"))?;
+            let plain = self
+                .channel
+                .lock()
+                .map_err(|_| "the link is broken".to_string())?
+                .open(&sealed)
+                .map_err(|e| e.to_string())?;
+            match Frame::decode(&plain).map_err(|e| e.to_string())? {
+                Frame::Ping { token } => self.writer.send(Frame::Pong { token })?,
+                other => return Ok(other),
+            }
+        }
     }
 }
 
@@ -230,6 +310,44 @@ impl Link {
                 _ => continue,
             }
         }
+    }
+
+    /// Open `channel` with `request` and return the other computer's answer
+    /// to it, answering pings; an error when it closes the channel instead.
+    pub fn open_channel(&mut self, channel: u32, request: &[u8]) -> Result<serde_json::Value, String> {
+        self.send(Frame::Open { channel, request: request.to_vec() })?;
+        loop {
+            match self.next()? {
+                Frame::Ping { token } => self.send(Frame::Pong { token })?,
+                Frame::Control(reply) => {
+                    return serde_json::from_slice(&reply).map_err(|e| format!("an unreadable answer: {e}"))
+                }
+                Frame::Close { channel: c, .. } if c == channel => return Err("the other computer closed it".into()),
+                _ => continue,
+            }
+        }
+    }
+
+    /// Split the link for a channel held open: frames are read on one
+    /// thread (each read waiting at most `wait`) and written from another.
+    /// The socket is for shutting it from either.
+    pub fn into_duplex(self, wait: Duration) -> Result<(LinkReader, LinkWriter, TcpStream), String> {
+        self.stream.wait(wait).map_err(|e| e.to_string())?;
+        let w = self.stream.writer().map_err(|e| e.to_string())?;
+        let socket = self.stream.socket().map_err(|e| e.to_string())?;
+        let channel = Arc::new(Mutex::new(self.channel));
+        let writer = LinkWriter {
+            inner: Arc::new(Mutex::new((w, Arc::clone(&channel)))),
+        };
+        Ok((
+            LinkReader {
+                stream: self.stream,
+                channel,
+                writer: writer.clone(),
+            },
+            writer,
+            socket,
+        ))
     }
 
     /// One frame from the other computer.

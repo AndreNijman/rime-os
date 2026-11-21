@@ -46,7 +46,8 @@
 //! Another Rime computer paired with a code (`rime remote computers add`) is
 //! kept under `computers`, never under `devices`, and a session its key opens
 //! gets [`Scope::Peer`]: `rime-remoted` answers such a session from a short
-//! allow list and never forwards it to `rime-agentd`. Not a flag on a phone's
+//! allow list and never forwards its lines to `rime-agentd` (the agent verbs
+//! a person here granted it build their own requests; [`AgentGrant`]). Not a flag on a phone's
 //! record, because an older `rime-remoted` (after a rollback) would ignore an
 //! unknown flag and load a computer as a phone with everything a phone may do.
 //!
@@ -229,6 +230,54 @@ pub struct Share {
     /// A card opens nothing until a person presses Open on it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub handoff: Option<bool>,
+    /// What that computer may do with this computer's agent sessions (M4):
+    /// `None` is off, the default. Set only by a person here
+    /// (`computer_grant`), never by anything another computer sends, and
+    /// never sent to another computer except as a hint to that computer
+    /// about its own grant.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agents: Option<AgentGrant>,
+}
+
+/// How far another computer may reach into this computer's agent sessions.
+///
+/// Ordered: `Control` includes everything `View` allows. Off is no grant at
+/// all (`None`), never a third value, so a record without the field is off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentGrant {
+    /// List the sessions and read the tail of one.
+    View,
+    /// Also attach to one and type into it.
+    Control,
+}
+
+impl AgentGrant {
+    /// The wire and display word.
+    pub fn word(self) -> &'static str {
+        match self {
+            AgentGrant::View => "view",
+            AgentGrant::Control => "control",
+        }
+    }
+
+    /// `off`, `view` or `control`, as `computers list` and the CLI spell it.
+    pub fn word_of(grant: Option<AgentGrant>) -> &'static str {
+        grant.map_or("off", AgentGrant::word)
+    }
+
+    /// The other way round: `off` is `Ok(None)`; anything else is refused.
+    pub fn parse(word: &str) -> Result<Option<AgentGrant>, String> {
+        match word {
+            "off" => Ok(None),
+            "view" => Ok(Some(AgentGrant::View)),
+            "control" => Ok(Some(AgentGrant::Control)),
+            other => Err(format!(
+                "'{}' is not an agents setting: say off, view or control",
+                other.chars().filter(|c| !c.is_control()).take(40).collect::<String>()
+            )),
+        }
+    }
 }
 
 impl Share {
@@ -275,7 +324,8 @@ pub enum Scope {
     /// The device's companion key: only `rime-remoted`'s allow list.
     Companion,
     /// Another of the owner's computers: only `rime-remoted`'s peer allow
-    /// list, never `rime-agentd`, never the human gate.
+    /// list (its agent verbs only as far as [`Device::agents_grant`]), no
+    /// line of its passed to `rime-agentd`, never the human gate.
     Peer,
 }
 
@@ -369,6 +419,17 @@ impl Device {
     /// paired, trusted, and its handoff switch is not off (on by default).
     pub fn takes_handoff(&self) -> bool {
         self.is_active() && self.trusted() && self.share.handoff.unwrap_or(true)
+    }
+
+    /// What this (other) computer may do with this computer's agent
+    /// sessions: the grant a person here set, and only while the computer is
+    /// paired and trusted. The only reader of `share.agents`.
+    pub fn agents_grant(&self) -> Option<AgentGrant> {
+        if self.is_active() && self.trusted() {
+            self.share.agents
+        } else {
+            None
+        }
     }
 }
 
@@ -1053,6 +1114,27 @@ impl DeviceStore {
         }
         c.share.handoff = Some(on);
         Ok(c.clone())
+    }
+
+    /// `rime remote computers grant <computer> agents …`: what another
+    /// computer may do with this computer's agent sessions. Raising it is
+    /// refused like turning a clipboard switch on (a removed computer, or one
+    /// introduced and not allowed yet); lowering it, or turning it off, is
+    /// always allowed. Returns the record and whether the grant went down,
+    /// which is when live attachments must be dropped.
+    pub fn set_computer_agents(
+        &mut self,
+        id_or_name: &str,
+        grant: Option<AgentGrant>,
+    ) -> Result<(Device, bool), StoreError> {
+        let id = resolve_in(&self.computers, id_or_name)?;
+        let c = self.computers.get_mut(&id).expect("resolved");
+        let before = c.share.agents;
+        if grant > before {
+            may_share_with(c)?;
+        }
+        c.share.agents = grant;
+        Ok((c.clone(), grant < before))
     }
 
     /// `rime remote computers forget`: lift a removal here, so the computer
@@ -2295,6 +2377,71 @@ mod tests {
         assert_eq!(s.introduced_by_count(&c.id, c.paired_ms), 2, "revoked and allowed phones count");
         // A phone from before this pairing does not.
         assert_eq!(s.introduced_by_count(&c.id, 115), 1);
+    }
+
+    #[test]
+    fn the_agents_grant_is_set_here_only_raised_for_a_trusted_computer_and_cleared_by_every_removal() {
+        let own = raw(99);
+        let mut s = DeviceStore::default();
+        let desk = s.pair_computer(&raw(7), &own, "desk", vec![], None, 10).expect("desk");
+        assert_eq!(desk.agents_grant(), None, "a new computer has a grant");
+        // Off is written as no field at all.
+        assert!(!serde_json::to_string(&desk).expect("json").contains("agents"));
+        let (d, lowered) = s.set_computer_agents(&desk.id, Some(AgentGrant::View)).expect("view");
+        assert!(!lowered);
+        assert_eq!(d.agents_grant(), Some(AgentGrant::View));
+        let (d, lowered) = s.set_computer_agents(&desk.id, Some(AgentGrant::Control)).expect("control");
+        assert!(!lowered);
+        assert_eq!(d.agents_grant(), Some(AgentGrant::Control));
+        assert!(serde_json::to_string(&d).expect("json").contains(r#""agents":"control""#));
+        // Lowering says so, which is what drops live attachments.
+        let (d, lowered) = s.set_computer_agents(&desk.id, Some(AgentGrant::View)).expect("down");
+        assert!(lowered);
+        assert_eq!(d.agents_grant(), Some(AgentGrant::View));
+        let (_, lowered) = s.set_computer_agents(&desk.id, None).expect("off");
+        assert!(lowered);
+        // A re-pair of a paired computer keeps it, like the switches.
+        s.set_computer_agents(&desk.id, Some(AgentGrant::Control)).expect("control");
+        let again = s.pair_computer(&raw(7), &own, "desk", vec![], None, 11).expect("refresh");
+        assert_eq!(again.agents_grant(), Some(AgentGrant::Control));
+        // A removal clears it, and it does not come back on a forget + pair.
+        s.revoke_computer(&desk.id, 20).expect("removed");
+        let gone = s.find_computer(&desk.id).expect("desk");
+        assert_eq!((gone.share.agents, gone.agents_grant()), (None, None), "a removal kept the grant");
+        assert!(matches!(s.set_computer_agents(&desk.id, Some(AgentGrant::View)), Err(StoreError::NotShared(_))));
+        assert!(s.set_computer_agents(&desk.id, None).is_ok(), "turning it off is always allowed");
+        s.forget_computer(&desk.id, 30).expect("forgotten");
+        assert_eq!(s.pair_computer(&raw(7), &own, "desk", vec![], None, 40).expect("paired").agents_grant(), None);
+        // A removal another computer passed on clears it too.
+        let other = s.pair_computer(&raw(8), &own, "other", vec![], None, 50).expect("other");
+        s.set_computer_agents(&other.id, Some(AgentGrant::Control)).expect("control");
+        let desk2 = s.find_computer(&desk.id).expect("desk").id.clone();
+        let applied = s.apply_tombstones(&desk2, &own, &[tomb(8, 60)], 61);
+        assert_eq!(applied.removed, std::slice::from_ref(&other.id));
+        assert_eq!(s.find_computer(&other.id).expect("other").share.agents, None, "a passed-on removal kept the grant");
+        // An introduced computer cannot be granted until a person allows it,
+        // and even a grant smuggled into its record does nothing until then.
+        let Introduced::Added(new) = s
+            .introduce_computer(&raw(10), &own, "new", vec![], None, by("pixel"), 70)
+            .expect("introduce")
+        else {
+            panic!("not added")
+        };
+        assert!(matches!(s.set_computer_agents(&new.id, Some(AgentGrant::View)), Err(StoreError::NotAllowedYet(_))));
+        let mut smuggled = (*new).clone();
+        smuggled.share.agents = Some(AgentGrant::Control);
+        assert_eq!(smuggled.agents_grant(), None, "an introduced computer not allowed yet has a grant");
+        s.allow_computer(&new.id, 80).expect("allowed");
+        assert_eq!(s.find_computer(&new.id).expect("new").agents_grant(), None, "allowing granted agents");
+        s.set_computer_agents(&new.id, Some(AgentGrant::View)).expect("granted once allowed");
+        // The words, both ways, and nothing else.
+        for (w, g) in [("off", None), ("view", Some(AgentGrant::View)), ("control", Some(AgentGrant::Control))] {
+            assert_eq!(AgentGrant::parse(w), Ok(g));
+            assert_eq!(AgentGrant::word_of(g), w);
+        }
+        for w in ["", "Control", "full", "on", "view "] {
+            assert!(AgentGrant::parse(w).is_err(), "{w:?}");
+        }
     }
 
     #[test]
