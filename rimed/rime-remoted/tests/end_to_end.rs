@@ -5284,11 +5284,73 @@ fn input_sources(h: &Harness, sources: serde_json::Value) {
     std::fs::rename(&tmp, h.root.join("input/sources.json")).expect("rename");
 }
 
+/// How long any one wait in the input test may take before it fails.
+const INPUT_WAIT: Duration = Duration::from_secs(10);
+
+/// `Session::recv` with a deadline, failing with what was awaited.
+///
+/// The socket's own read timeout never fires while the desktop is up: it
+/// pings on its own clock and `recv` answers each ping and reads on, so a
+/// wait for a frame that never comes (a lease that never runs out, say)
+/// would answer pings forever instead of failing.
+fn recv_before(session: &mut Session, deadline: Instant, what: &str) -> Frame {
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        assert!(!left.is_zero(), "waited {INPUT_WAIT:?} for {what}; pending: {:?}", session.pending);
+        session.socket.set_read_timeout(Some(left)).expect("read timeout");
+        let mut len = [0u8; 4];
+        if let Err(e) = session.socket.read_exact(&mut len) {
+            panic!("waited for {what}: {e}; pending: {:?}", session.pending);
+        }
+        let mut body = vec![0u8; u32::from_be_bytes(len) as usize];
+        session.socket.read_exact(&mut body).unwrap_or_else(|e| panic!("waited for {what}: {e}"));
+        session.socket.set_read_timeout(Some(Duration::from_secs(15))).expect("read timeout");
+        let plain = session.channel.open(&body).expect("open");
+        match Frame::decode(&plain).expect("decode") {
+            Frame::Ping { token } => session.send(Frame::Pong { token }),
+            frame => return frame,
+        }
+    }
+}
+
+/// A control request and its reply, within `INPUT_WAIT`.
+fn input_call(session: &mut Session, request: &str) -> serde_json::Value {
+    session.send(Frame::Control(request.as_bytes().to_vec()));
+    let deadline = Instant::now() + INPUT_WAIT;
+    loop {
+        match recv_before(session, deadline, request) {
+            Frame::Control(line) => return serde_json::from_slice(&line).unwrap_or_else(|e| panic!("{e}: {line:?}")),
+            other => session.pending.push(other),
+        }
+    }
+}
+
+/// `n` event lines on `channel`, parked ones first, within `INPUT_WAIT`.
+fn input_events(session: &mut Session, channel: u32, n: usize, what: &str) -> Vec<serde_json::Value> {
+    let mut text = Vec::new();
+    session.pending.retain(|f| match f {
+        Frame::Data { channel: c, bytes } if *c == channel => {
+            text.extend_from_slice(bytes);
+            false
+        }
+        _ => true,
+    });
+    let deadline = Instant::now() + INPUT_WAIT;
+    while text.iter().filter(|b| **b == b'\n').count() < n {
+        match recv_before(session, deadline, what) {
+            Frame::Data { channel: c, bytes } if c == channel => text.extend(bytes),
+            other => session.pending.push(other),
+        }
+    }
+    String::from_utf8(text).expect("utf-8").lines().map(|l| serde_json::from_str(l).expect("json")).collect()
+}
+
 /// Open the input channel on `channel`: the reply line.
 fn open_input(session: &mut Session, channel: u32) -> serde_json::Value {
     session.send(Frame::Open { channel, request: br#"{"cmd":"input","v":1}"#.to_vec() });
+    let deadline = Instant::now() + INPUT_WAIT;
     loop {
-        match session.recv() {
+        match recv_before(session, deadline, "the input channel's reply") {
             Frame::Control(line) => return serde_json::from_slice(&line).expect("json"),
             other => session.pending.push(other),
         }
@@ -5309,8 +5371,9 @@ fn closed(session: &mut Session, channel: u32) {
     if session.closed_unasked(channel).is_some() {
         return;
     }
+    let deadline = Instant::now() + INPUT_WAIT;
     loop {
-        match session.recv() {
+        match recv_before(session, deadline, &format!("channel {channel} to close")) {
             Frame::Close { channel: c, .. } if c == channel => return,
             other => session.pending.push(other),
         }
@@ -5326,7 +5389,7 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     let mut p = phone.connect(&h).expect("the phone's session");
 
     // Off until a person here turns it on, and the hello says so.
-    let hello = p.call(r#"{"cmd":"remote_hello"}"#);
+    let hello = input_call(&mut p, r#"{"cmd":"remote_hello"}"#);
     assert_eq!(hello["input"], "off", "{hello}");
     assert!(hello["features"].as_array().expect("features").iter().any(|f| f == "phone_input"), "{hello}");
     let r = open_input(&mut p, 5);
@@ -5342,7 +5405,7 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     let granted = h.control(r#"{"cmd":"device_grant","device":"pixel-8","input":"on"}"#);
     // Pairing worked, so this process counts as a person here: the same rule.
     assert_eq!(granted["reply"], "device_granted", "{granted}");
-    assert_eq!(p.call(r#"{"cmd":"remote_hello"}"#)["input"], "on");
+    assert_eq!(input_call(&mut p, r#"{"cmd":"remote_hello"}"#)["input"], "on");
     let (code, said) = rime_remote(&h, &["devices", "--json"], b"");
     assert_eq!(code, 0, "{said}");
     let listed: serde_json::Value = serde_json::from_str(&said).expect("json");
@@ -5376,7 +5439,7 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     // the phone is told; what it sends meanwhile is dropped.
     let n = input_actions(&h).len();
     input_sources(&h, serde_json::json!({"locked_hint": true}));
-    assert_eq!(events_on(&mut p, 7, 1)[0], serde_json::json!({"event": "input_paused", "why": "locked"}));
+    assert_eq!(input_events(&mut p, 7, 1, "input_paused")[0], serde_json::json!({"event": "input_paused", "why": "locked"}));
     let got = input_actions_until(&h, n, "the releases", |a| has(a, serde_json::json!({"a": "button", "p": false})));
     assert!(has(&got, serde_json::json!({"a": "key", "code": 30, "p": false})), "{got:?}");
     input_batch(&mut p, 7, 2, serde_json::json!([{"t": "text", "s": "hunter2"}, {"t": "k", "code": 31, "p": true}]));
@@ -5395,11 +5458,11 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     input_batch(&mut p, 7, 5, serde_json::json!([{"t": "k", "code": 34, "p": true}]));
     // Every batch above has reached the session (a reply after them on the
     // same connection) and been read (well within the wait) while locked.
-    assert_eq!(p.call(r#"{"cmd":"remote_hello"}"#)["reply"], "remote");
+    assert_eq!(input_call(&mut p, r#"{"cmd":"remote_hello"}"#)["reply"], "remote");
     std::thread::sleep(Duration::from_millis(500));
     // Unlocked: it resumes, and the next event goes through.
     input_sources(&h, serde_json::json!({"locked_hint": false}));
-    assert_eq!(events_on(&mut p, 7, 1)[0], serde_json::json!({"event": "input_resumed"}));
+    assert_eq!(input_events(&mut p, 7, 1, "input_resumed")[0], serde_json::json!({"event": "input_resumed"}));
     let n2 = input_actions(&h).len();
     input_batch(&mut p, 7, 6, serde_json::json!([{"t": "m", "dx": 1, "dy": 1}]));
     input_actions_until(&h, n2, "the motion after unlocking", |a| has(a, serde_json::json!({"a": "motion"})));
@@ -5412,7 +5475,7 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     // Held, then nothing from the phone for longer than the lease.
     let n = input_actions(&h).len();
     input_batch(&mut p, 7, 7, serde_json::json!([{"t": "k", "code": 35, "p": true}]));
-    assert_eq!(events_on(&mut p, 7, 1)[0], serde_json::json!({"event": "input_released", "why": "lease"}));
+    assert_eq!(input_events(&mut p, 7, 1, "input_released (the lease)")[0], serde_json::json!({"event": "input_released", "why": "lease"}));
     let got = input_actions_until(&h, n, "the lease release", |a| has(a, serde_json::json!({"a": "key", "code": 35, "p": false})));
     assert!(has(&got, serde_json::json!({"a": "key", "code": 35, "p": true})), "{got:?}");
 
@@ -5424,7 +5487,7 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     let (code, said) = rime_remote(&h, &["devices", "grant", "pixel-8", "input", "off"], b"");
     assert_eq!(code, 0, "{said}");
     assert!(said.contains("may not use this computer as a touchpad") && said.contains("was stopped"), "{said}");
-    let said = events_on(&mut p, 7, 1).remove(0);
+    let said = input_events(&mut p, 7, 1, "input_closed").remove(0);
     assert_eq!((said["event"].clone(), said["why"].clone()), (serde_json::json!("input_closed"), serde_json::json!("not_allowed")), "{said}");
     closed(&mut p, 7);
     let got = input_actions_until(&h, n, "the close", |a| has(a, serde_json::json!({"a": "close"})));
@@ -5436,7 +5499,7 @@ fn a_phone_with_the_grant_drives_the_desktop_and_a_lock_a_lowered_grant_or_a_los
     // A phone's companion key never opens it, grant or not.
     assert_eq!(h.control(r#"{"cmd":"device_grant","device":"pixel-8","input":"on"}"#)["reply"], "device_granted");
     let companion = Device::new();
-    let r = p.call(&format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
+    let r = input_call(&mut p, &format!(r#"{{"cmd":"companion_register","public_key":"{}"}}"#, companion.key()));
     assert_eq!(r["reply"], "ok", "{r}");
     let mut c = companion.connect(&h).expect("the companion session");
     let r = open_input(&mut c, 5);
