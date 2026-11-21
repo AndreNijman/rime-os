@@ -564,9 +564,21 @@ pub fn agents_of(state: &State, computer: &str) -> Reply {
             message: refusal_text(&c.name, LIST_VERB, &answer),
         };
     }
-    // Typed, so a hostile answer brings no field and no value the type does
-    // not have; a session that does not parse is left out and counted.
-    let given = answer["sessions"].as_array().cloned().unwrap_or_default();
+    let (sessions, unreadable) = received(answer["sessions"].as_array().cloned().unwrap_or_default());
+    Reply::ComputerAgents {
+        id: c.id,
+        name: c.name,
+        sessions,
+        truncated: answer["truncated"].as_bool().unwrap_or(false),
+        unreadable,
+    }
+}
+
+/// The sessions another computer listed, as this computer keeps them: typed,
+/// so a hostile answer brings no field and no value the type does not have;
+/// every text field made [`plain`]; at most [`MAX_SESSIONS`]. A session that
+/// does not parse is left out and counted.
+fn received(given: Vec<Value>) -> (Vec<SessionInfo>, usize) {
     let mut sessions: Vec<SessionInfo> = Vec::new();
     let mut unreadable = 0usize;
     for s in given.into_iter().take(MAX_SESSIONS) {
@@ -578,13 +590,7 @@ pub fn agents_of(state: &State, computer: &str) -> Reply {
             Err(_) => unreadable += 1,
         }
     }
-    Reply::ComputerAgents {
-        id: c.id,
-        name: c.name,
-        sessions,
-        truncated: answer["truncated"].as_bool().unwrap_or(false),
-        unreadable,
-    }
+    (sessions, unreadable)
 }
 
 /// The longest text field kept from another computer's session list.
@@ -1097,7 +1103,11 @@ mod tests {
         hostile.cwd = "/tmp/\u{1b}[2J\u{9b}31m".into();
         hostile.args = vec!["a\u{0}b".into(); 500];
         hostile.title = Some("t".repeat(5000));
-        plain_session(&mut hostile);
+        let mut given = vec![serde_json::to_value(&hostile).expect("json"); MAX_SESSIONS + 5];
+        given[0] = json!({"id": "not a number"});
+        let (kept, unreadable) = received(given);
+        assert_eq!((kept.len(), unreadable), (MAX_SESSIONS - 1, 1));
+        let hostile = kept.into_iter().next().expect("one");
         assert_eq!(hostile.name.as_deref(), Some("]52;c;aGk=eviltxt"));
         assert_eq!(hostile.cwd, "/tmp/[2J31m");
         assert_eq!((hostile.args.len(), hostile.args[0].as_str()), (64, "ab"));
