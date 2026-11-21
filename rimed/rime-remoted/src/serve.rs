@@ -84,6 +84,9 @@ pub const HELLO_COMPUTER: u8 = b'C';
 /// NAT eventually forgets.
 pub const PING_INTERVAL: Duration = Duration::from_secs(15);
 
+/// The shortest and longest ping interval `--ping-interval-ms` accepts.
+pub const PING_INTERVAL_RANGE: (Duration, Duration) = (Duration::from_millis(50), Duration::from_secs(600));
+
 /// How long an unauthenticated peer may take to finish its handshake.
 ///
 /// Applied by `main` on every accepted socket and cleared in [`session`] only
@@ -591,12 +594,20 @@ fn frames(
     outcome
 }
 
+/// How long a connection pinged every `interval` may go without a sign of
+/// life before it is closed: [`LIVENESS_MISSES`] pings, never less than
+/// [`LIVENESS_FLOOR`]. A file receiver names it to its sender
+/// ([`crate::files`]), which waits that long for a frame in turn.
+pub(crate) fn liveness_window(interval: Duration) -> Duration {
+    (interval * LIVENESS_MISSES as u32).max(LIVENESS_FLOOR)
+}
+
 /// How long one write to the device may make no progress.
 ///
 /// The same window the pings get, so the two ways this side notices a dead
 /// device agree about how long "dead" takes.
 fn write_deadline(interval: Duration) -> Duration {
-    (interval * LIVENESS_MISSES as u32).max(LIVENESS_FLOOR)
+    liveness_window(interval)
 }
 
 /// Read, decrypt and route until the connection ends.

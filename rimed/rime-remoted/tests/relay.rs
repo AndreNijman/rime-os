@@ -1734,17 +1734,28 @@ fn a_sender_keeps_waiting_through_a_link_slower_than_a_progress_line_every_ten_s
     const _: () = assert!(RATE * 12 < 1024 * 1024);
     a.relay.throttle_guest_to_host(RATE);
     let body = a_body(4 * 1024 * 1024 + 11);
-    let started = Instant::now();
     let sent = std::thread::scope(|s| {
-        s.spawn(|| {
-            std::thread::sleep(SLOW_FOR);
-            a.relay.throttle_guest_to_host(0);
+        let (done, finished) = std::sync::mpsc::channel();
+        let (b, a_on_b, body) = (&b, &a_on_b, &body);
+        s.spawn(move || {
+            let _ = done.send(send_through_relay(b, a_on_b, "quiet.bin", body));
         });
-        send_through_relay(&b, &a_on_b, "quiet.bin", &body)
+        std::thread::sleep(SLOW_FOR);
+        // Still on the way: the slow stretch is what the send went through
+        // (a throttle that let it all past would have finished it by now),
+        // and the sender did not give up during it.
+        match finished.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Ok(early) => {
+                a.relay.throttle_guest_to_host(0);
+                panic!("the send ended while the link was still slow: {early}\n{}", a.log());
+            }
+            Err(e) => panic!("the sending thread ended without a reply: {e}"),
+        }
+        a.relay.throttle_guest_to_host(0);
+        finished.recv_timeout(Duration::from_secs(120)).expect("the send finished once the link was fast")
     });
-    let took = started.elapsed();
     assert_eq!(sent["reply"], "computer_sent", "{sent}\n{}", a.log());
-    assert!(took >= SLOW_FOR, "the sender never met the slow stretch: {took:?}");
     let got = std::fs::read(a.root.join("desk/Downloads/quiet.bin")).expect("saved on A");
     assert!(got == body, "the file through the quiet link differs: {} of {} bytes", got.len(), body.len());
 }

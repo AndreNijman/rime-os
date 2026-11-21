@@ -186,7 +186,8 @@ fn run(args: &[String]) -> Result<(), String> {
             let ms: u64 = v
                 .parse()
                 .map_err(|_| format!("--ping-interval-ms {v} is not a number"))?;
-            std::time::Duration::from_millis(ms.clamp(50, 600_000))
+            let (least, most) = serve::PING_INTERVAL_RANGE;
+            std::time::Duration::from_millis(ms).clamp(least, most)
         }
     };
     let allow_foreground = args.iter().any(|a| a == "--allow-foreground");
