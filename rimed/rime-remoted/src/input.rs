@@ -822,22 +822,57 @@ impl Session {
 
     /// Let go of everything: keys from the fixed keyboard, buttons, and any
     /// text key mid-press, then wait for the compositor to have it.
-    pub fn release_all(&mut self) {
+    ///
+    /// A code is forgotten only once its release was sent, and none is when
+    /// the compositor does not confirm having them: what is left stays held
+    /// here and in the crash file, for the next channel (or the next start)
+    /// to release. The first failure is returned; the channel then ends.
+    pub fn release_all(&mut self) -> std::io::Result<()> {
+        let before = self.held.clone();
         let had_keys = !self.held.keys.is_empty() || !self.held.text_keys.is_empty();
-        for code in std::mem::take(&mut self.held.keys) {
-            let _ = self.backend.key(code, false);
+        let mut failed: Option<std::io::Error> = None;
+        for code in before.keys.iter().copied() {
+            match self.backend.key(code, false) {
+                Ok(()) => {
+                    self.held.keys.remove(&code);
+                }
+                Err(e) => {
+                    failed.get_or_insert(e);
+                }
+            }
         }
-        for code in std::mem::take(&mut self.held.text_keys) {
-            let _ = self.backend.text_key(code, false);
+        for code in before.text_keys.iter().copied() {
+            match self.backend.text_key(code, false) {
+                Ok(()) => {
+                    self.held.text_keys.remove(&code);
+                }
+                Err(e) => {
+                    failed.get_or_insert(e);
+                }
+            }
         }
         if had_keys {
-            let _ = self.backend.modifiers(0, self.locked_mask());
+            if let Err(e) = self.backend.modifiers(0, self.locked_mask()) {
+                failed.get_or_insert(e);
+            }
         }
-        for code in std::mem::take(&mut self.held.buttons) {
-            let _ = self.backend.button(code, false);
+        for code in before.buttons.iter().copied() {
+            match self.backend.button(code, false) {
+                Ok(()) => {
+                    self.held.buttons.remove(&code);
+                }
+                Err(e) => {
+                    failed.get_or_insert(e);
+                }
+            }
         }
-        let _ = self.backend.sync();
+        if let Err(e) = self.backend.sync() {
+            // Sent, perhaps, but not known to have arrived.
+            self.held = before;
+            failed.get_or_insert(e);
+        }
         self.record();
+        failed.map_or(Ok(()), Err)
     }
 
     fn locked_mask(&self) -> u32 {
@@ -848,12 +883,13 @@ impl Session {
         }
     }
 
-    fn pause(&mut self) {
-        self.release_all();
+    fn pause(&mut self) -> std::io::Result<()> {
+        self.release_all()?;
         if !self.paused {
             self.paused = true;
             (self.out)(json!({"event": "input_paused", "why": "locked"}));
         }
+        Ok(())
     }
 
     fn rate_ok(&mut self, now: Instant, text: usize) -> Result<(), String> {
@@ -932,14 +968,13 @@ impl Session {
             // Before EVERY event: a frame that started unlocked can end
             // after the screen locked.
             if self.locked_now() {
-                self.pause();
-                return Step::Go;
+                return match self.pause() {
+                    Ok(()) => Step::Go,
+                    Err(e) => gone(e),
+                };
             }
             if let Err(e) = self.apply(ev) {
-                return Step::End(
-                    Why::Unavailable,
-                    format!("the compositor stopped taking input: {e}"),
-                );
+                return gone(e);
             }
         }
         Step::Go
@@ -1049,8 +1084,7 @@ impl Session {
             for c in &chars[i..end] {
                 if self.locked_now() {
                     self.held.text_keys.clear();
-                    self.pause();
-                    return Ok(());
+                    return self.pause();
                 }
                 let code = distinct.iter().position(|d| d == c).expect("in the keymap") as u32 + 1;
                 self.backend.text_key(code, true)?;
@@ -1085,13 +1119,17 @@ impl Session {
         self.shell = self.gate.shell_file();
         let locked = self.locked_now();
         if locked && (!self.paused || !self.held.is_empty()) {
-            self.pause();
+            if let Err(e) = self.pause() {
+                return gone(e);
+            }
         } else if !locked && self.paused {
             self.paused = false;
             (self.out)(json!({"event": "input_resumed"}));
         }
         if !self.held.is_empty() && now.duration_since(self.last_frame) > LEASE {
-            self.release_all();
+            if let Err(e) = self.release_all() {
+                return gone(e);
+            }
             (self.out)(json!({"event": "input_released", "why": "lease"}));
         }
         Step::Go
@@ -1100,35 +1138,57 @@ impl Session {
     /// The channel is over: let go of everything, and say why when there is
     /// a reason the phone did not give itself.
     pub fn end(&mut self, why: Option<(Why, String)>) {
-        self.release_all();
+        if let Err(e) = self.release_all() {
+            eprintln!(
+                "rime-remoted: touchpad: could not let go of everything ({e}); \
+                 the rest is released by the next channel or start"
+            );
+        }
         if let Some((why, message)) = why {
             (self.out)(json!({"event": "input_closed", "why": why.word(), "message": message}));
         }
     }
 }
 
+/// The channel's end when the compositor stops taking input.
+fn gone(e: std::io::Error) -> Step {
+    Step::End(
+        Why::Unavailable,
+        format!("the compositor stopped taking input: {e}"),
+    )
+}
+
 /// What to do about keys and buttons an earlier run left held. Keys get a
 /// bare release from the new keyboard; a button needs a whole click to come
 /// up on Hyprland, which is only given while the screen is unlocked (a click
-/// on a lock screen is input on it). What could not be done is returned, to
-/// be kept for next time.
+/// on a lock screen is input on it). What could not be done, or was not
+/// confirmed by the compositor, is returned, to be kept for next time.
 pub fn recover(backend: &mut dyn Backend, held: &Held, unlocked: bool) -> Held {
-    for code in held.keys.iter().chain(held.text_keys.iter()) {
-        let _ = backend.key(*code, false);
+    let mut left = Held::default();
+    for code in &held.keys {
+        if backend.key(*code, false).is_err() {
+            left.keys.insert(*code);
+        }
+    }
+    for code in &held.text_keys {
+        if backend.key(*code, false).is_err() {
+            left.text_keys.insert(*code);
+        }
     }
     if !held.keys.is_empty() || !held.text_keys.is_empty() {
         let _ = backend.modifiers(0, 0);
     }
-    let mut left = Held::default();
     for code in &held.buttons {
-        if unlocked {
-            let _ = backend.button(*code, true);
-            let _ = backend.button(*code, false);
-        } else {
+        if !unlocked
+            || backend.button(*code, true).is_err()
+            || backend.button(*code, false).is_err()
+        {
             left.buttons.insert(*code);
         }
     }
-    let _ = backend.sync();
+    if backend.sync().is_err() {
+        return held.clone();
+    }
     left
 }
 
@@ -2515,6 +2575,8 @@ mod tests {
         log: Arc<Mutex<Vec<String>>>,
         compositor: Arc<Mutex<Option<bool>>>,
         offers_notifier: Arc<AtomicBool>,
+        /// Requests (as logged) the compositor refuses.
+        fail: Arc<Mutex<Vec<String>>>,
     }
 
     impl Fake {
@@ -2522,8 +2584,18 @@ mod tests {
             std::mem::take(&mut *self.log.lock().expect("log"))
         }
         fn push(&self, s: String) -> std::io::Result<()> {
+            if self.fail.lock().expect("fail").contains(&s) {
+                self.log.lock().expect("log").push(format!("FAILED {s}"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::BrokenPipe,
+                    "the fake compositor refused it",
+                ));
+            }
             self.log.lock().expect("log").push(s);
             Ok(())
+        }
+        fn refuse(&self, what: &[&str]) {
+            *self.fail.lock().expect("fail") = what.iter().map(|s| s.to_string()).collect();
         }
     }
 
@@ -3057,6 +3129,79 @@ mod tests {
         assert_eq!(r.session.tick(r.at(40)), Step::Go);
         assert!(!r.session.paused());
         assert!(r.said().iter().any(|v| v["event"] == "input_resumed"));
+    }
+
+    #[test]
+    fn a_code_is_forgotten_only_once_its_release_was_sent_and_confirmed() {
+        let mut r = rig("releasefail");
+        let held_file = r.dir.join("input-held.json");
+        assert_eq!(
+            r.frame(
+                0,
+                1,
+                json!([{"t": "k", "code": 30, "p": true}, {"t": "k", "code": 31, "p": true},
+                       {"t": "b", "b": "left", "p": true}])
+            ),
+            Step::Go
+        );
+        // The release of 31 fails as the screen locks: the channel ends, and
+        // 31 (only) is still held, here and on disk.
+        r.fake.refuse(&["key 31 false"]);
+        r.lock(Some(true), false);
+        assert!(matches!(
+            r.session.tick(r.at(20)),
+            Step::End(Why::Unavailable, _)
+        ));
+        assert_eq!(r.session.held().keys, BTreeSet::from([31]));
+        assert!(r.session.held().buttons.is_empty());
+        assert_eq!(
+            read_held(&held_file).expect("kept").keys,
+            BTreeSet::from([31])
+        );
+        // Ending tries again; still refused, so the file stays for the next
+        // channel or start.
+        r.session.end(Some((Why::Unavailable, String::new())));
+        assert_eq!(
+            read_held(&held_file).expect("kept").keys,
+            BTreeSet::from([31])
+        );
+        // Once it goes through, nothing is left.
+        r.fake.refuse(&[]);
+        r.session.end(None);
+        assert!(r.session.held().is_empty());
+        assert!(!held_file.exists());
+
+        // Sent but never confirmed (the sync fails): everything is kept.
+        let mut r = rig("syncfail");
+        let held_file = r.dir.join("input-held.json");
+        assert_eq!(
+            r.frame(0, 1, json!([{"t": "k", "code": 30, "p": true}])),
+            Step::Go
+        );
+        r.fake.refuse(&["sync"]);
+        r.session.end(None);
+        assert_eq!(r.session.held().keys, BTreeSet::from([30]));
+        assert_eq!(
+            read_held(&held_file).expect("kept").keys,
+            BTreeSet::from([30])
+        );
+
+        // Recovery keeps what it could not release, and everything when
+        // the compositor does not confirm.
+        let held = Held {
+            keys: BTreeSet::from([30, 31]),
+            buttons: BTreeSet::from([0x110]),
+            text_keys: BTreeSet::new(),
+        };
+        let f = Fake::default();
+        f.refuse(&["key 31 false", "button 0x110 true"]);
+        let left = recover(&mut f.clone(), &held, true);
+        assert_eq!(
+            (left.keys, left.buttons),
+            (BTreeSet::from([31]), BTreeSet::from([0x110]))
+        );
+        f.refuse(&["sync"]);
+        assert_eq!(recover(&mut f.clone(), &held, true), held);
     }
 
     #[test]
