@@ -507,6 +507,52 @@ $ wl-paste | rime remote computers open desk -
 
 The wire is `docs/remote-live-contract.md` §2.15.
 
+### Your agents on another computer
+
+You can let one of your computers see, or work in, the agent sessions on
+another. The choice is made on the computer whose agents they are, and it is
+off until you change it:
+
+```
+desk$ rime remote computers grant laptop agents view
+laptop will be able to list your agent sessions here and read the end of what each shows, …
+Type the computer's name (laptop) to allow it: laptop
+rime: laptop (9c1e…) may list your agent sessions here and read the end of each.
+
+laptop$ rime remote computers agents desk
+ID    NAME                     AGENT        STATE     ATTACHED PLACE
+3     fix the parser           claude       working   0        rime-os
+laptop$ rime remote computers peek desk 3
+```
+
+- **`view`** lets that computer list the sessions and read the end of what
+  each shows. That can include code, paths and anything an agent printed.
+- **`control`** also lets it attach and type, with
+  `rime remote computers attach desk 3`. Typing there is the same as typing
+  at Desk's keyboard in that session, so it can answer the agent's own
+  questions in its terminal. It still cannot start or stop a session, approve
+  anything an agent asks Rime for, or reach nex. Leave with the same detach
+  key as `rime agent attach`; the session keeps running.
+- Desk shows a notification each time another computer attaches, and the
+  session's attached count includes it. While Laptop is attached the session
+  takes Laptop's window size; when it leaves, Desk's comes back.
+- **`off`, or a lower level, takes effect at once**: anything that computer
+  had attached is cut off. Removing the computer does the same and forgets the
+  setting.
+- Raising it asks you to type the computer's name; `--yes` skips that, but it
+  still only works from a terminal. Like every other switch here, only you at
+  the computer can change it: an agent, a scheduled job, a phone or another
+  computer cannot. Reading or attaching to another computer's sessions must be
+  you at the computer too, so an agent on Laptop cannot reach Desk's agents
+  through it.
+- A computer your phone introduced gets nothing until you `allow` it and then
+  grant it.
+- `rime remote computers list` shows both directions on one line: what you let
+  that computer do here, and what it says it lets this one do there (`--json`:
+  `agents`, `can_agents`, `can_agents_ms`). The second is only what the other
+  computer said the last time this one reached it, so it can be a few minutes
+  old.
+
 ## The computer itself: status, lock and media
 
 Five verbs never reach `rime-agentd`: `rime-remoted` answers them itself, as

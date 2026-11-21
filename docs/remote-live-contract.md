@@ -975,9 +975,10 @@ time, so only the full key may say where pushes go), `machine_status`, `machine_
 (a send needs an unlocked phone, §2.11), `photos_reply` and
 `photos_fetch_reply` (photos need an unlocked phone, §2.13), `companion_register`,
 `companion_forget`, every `rime-agentd` verb (`hello`, `list`, `input`,
-`privilege_request`, `decide`, `clipboard_write`, …), a line with no readable
-`cmd`, and every other channel (`attach`, `receive`, `save_file`,
-`photos_upload`, nex's feed). A companion session reaches `rime-agentd` never, not even to be told
+`privilege_request`, `decide`, `clipboard_write`, …), the peer verbs
+(`peer_agents`, `peer_agent_peek`, `peer_agent_resize`, …), a line with no
+readable `cmd`, and every other channel (`attach`, `receive`, `save_file`,
+`photos_upload`, `peer_agent_attach`, nex's feed). A companion session reaches `rime-agentd` never, not even to be told
 no:
 
 ```json
@@ -1464,7 +1465,8 @@ Measured on wl-clipboard 2.3.0, in a private headless labwc:
 Design: ECOSYSTEM-PLAN.md decision 11. M1a: pairing, the peer scope,
 `peer_hello`, and dialling. M1b: tombstone exchange, `computer_forget`,
 presence and the background refresh. M2: introductions through the phone
-(feature `computer_introductions`, "Introductions" below).
+(feature `computer_introductions`, "Introductions" below). M4: agents across
+computers (feature `peer_agents`, "Agents across computers (M4)" below).
 
 **Pairing (LAN listener, hello byte `C`).** A computer dials the other's LAN
 port and sends `C` (phones send `P` to pair and `S` for a session). Over the
@@ -1536,6 +1538,16 @@ removed computer is refused as a computer.
 → {"reply":"computer_handoff","id","name","shown":true}
 → {"reply":"computer_handoff","id","name","shown":false,"why":"off"|"busy"|"offline"|"unsupported"}
 → {"reply":"error","message":"…"}
+{"cmd":"computer_grant","computer":"<id or name>","agents":"off"|"view"|"control"}
+→ {"reply":"computer_granted","id","name","agents":"view","dropped":false}
+{"cmd":"computer_agents","computer":"<id or name>"}
+→ {"reply":"computer_agents","id","name","sessions":[<§1 session record>…],"truncated":false,"unreadable":0}
+{"cmd":"computer_agent_peek","computer":"<id or name>","id":3,"bytes":8192}   bytes optional
+→ {"reply":"computer_agent_peek","id","name","session":3,"data":"<base64>","cols":80,"rows":24,"state":"working"}
+{"cmd":"computer_attach","computer":"<id or name>","id":3,"cols":80,"rows":24}
+→ {"reply":"computer_attached","id","name","session":3,"label":"fix the parser"}   then the raw terminal
+{"cmd":"computer_agent_resize","computer":"<id or name>","id":3,"cols":100,"rows":30}
+→ {"reply":"ok"}
 ```
 
 - `computer_show`, `computer_add`, `computer_remove` and `computer_forget`
@@ -1591,8 +1603,8 @@ is a paired, not removed computer is scope `peer`.
 
 | | allowed |
 | --- | --- |
-| control verbs | `remote_hello`, `peer_hello`, `peer_tombstones`, `peer_presence`, `peer_offer`, `peer_clipboard`, `peer_handoff` |
-| channels (`Open`) | `peer_file` |
+| control verbs | `remote_hello`, `peer_hello`, `peer_tombstones`, `peer_presence`, `peer_offer`, `peer_clipboard`, `peer_handoff`; with the agents grant (M4, below) `peer_agents`, `peer_agent_peek`, `peer_agent_resize` |
+| channels (`Open`) | `peer_file`; with the agents grant `peer_agent_attach` |
 
 ```json
 {"cmd":"remote_hello"} → {"reply":"remote","version":1,"features":["peer_hello","peer_tombstones","peer_presence","peer_offer","peer_clipboard","peer_file","peer_handoff"],"scope":"peer"}
@@ -1608,12 +1620,16 @@ is a paired, not removed computer is scope `peer`.
 
 Everything else is refused before routing: every `rime-agentd` verb, `decide`,
 nex, the machine verbs, the phone verbs, the companion verbs, push, a line
-with no readable `cmd`, and every channel but `peer_file` (a `peer_file` sent
-as a control line is refused too). A peer's line or channel reaches
-`rime-agentd` never: rime-remoted builds exactly two requests itself from
-fields it checked, `clipboard_write` (for `peer_clipboard`) and `save_file`
-(for `peer_file`), as actor `computer:<id>`, and forwards no byte of a peer's
-line to it, nor any of `rime-agentd`'s words back to the peer. `peer_handoff`
+with no readable `cmd`, and every channel but `peer_file` and
+`peer_agent_attach` (either sent as a control line is refused too). A peer's
+line or channel reaches `rime-agentd` never: rime-remoted builds its own
+requests from fields it checked, as actor `computer:<id>`: `clipboard_write`
+(for `peer_clipboard`), `save_file` (for `peer_file`), and, only for a computer
+a person here granted it (M4, below), `list`, `info`, `peek`, `resize` and
+`attach`. It forwards no byte of a peer's line to it, nor any of
+`rime-agentd`'s words back to the peer (an error is reduced to its `kind`).
+Once an agent attach is open, the bytes on that channel are terminal input,
+as for a phone's attach. `peer_handoff`
 reaches no other process at all until a person presses Open (below). The companion
 allow list refuses `peer` too, as a second lock. A session presenting this machine's own key is refused at the handshake
 whatever `devices.json` or `computers.json` says.
@@ -2021,6 +2037,101 @@ queue for it).
   at the handshake and back off to one an hour; it stays listed "not allowed
   yet" until a person removes it. Allowing it changes nothing on the wire,
   because X refuses every handshake from Y.
+
+**Agents across computers (M4, feature `peer_agents`).** A person can let
+another computer see, or control, this computer's agent sessions. The grant
+lives on the CONTROLLED computer only, in its `computers.json` record under
+`share.agents`: absent (the default, `off`), `"view"` or `"control"`.
+
+- Set only by `computer_grant`, which needs a §7 local origin (the `pair`
+  rule). Raising it needs a trusted computer (paired with a code, or
+  introduced and then allowed; `not allowed yet` otherwise); lowering it
+  always works. Removal clears it (`share` is reset), and so does a removal
+  learned from a tombstone. It is never sent in a tombstone, presence or an
+  introduction, and a peer has no verb that sets it.
+- `rime remote computers grant <computer> agents off|view|control`. Raising
+  it asks the person to type the computer's name (or its id) at a terminal,
+  after a sentence naming the risk; `--yes` skips the typing but still
+  needs a terminal. Lowering asks nothing. The service's origin rule is the
+  gate; the prompt is for the person.
+- **Lowering it (to `view` or `off`) or removing the computer drops that
+  computer's live connections here at once**, so a live attach ends. It
+  reconnects with what is left.
+- `computers` adds to each record `agents` (this computer's grant to that
+  one: `off`, `view`, `control`) and `can_agents` with `can_agents_ms` (what
+  that computer last said it grants this one, and when). `can_agents` is a
+  claim: it is learned from the other computer's `remote_hello` each time
+  this one dials it (presence refresh every 5 min on AC, 15 on battery, and
+  every agents, peek, attach or ping), kept in memory only, taken from the
+  closed set, and never changes what this computer allows. A change there
+  shows here at the next dial.
+
+*The peer verbs.* Checked in this order: the grant (an exact id, active and
+trusted, else `not_allowed`, the same refusal as any verb outside the peer
+list); the rate (30 requests per 10 s per computer, `busy`); the fields
+(`bad_request`); then rime-remoted builds the one `rime-agentd` request.
+
+| verb | needs | built request |
+| --- | --- | --- |
+| `peer_agents` | `view` | `list`; answered with each §1 session record, at most 200 and 60,000 bytes (`truncated`) |
+| `peer_agent_peek {id, bytes?}` | `view` | `peek`, `bytes` 1 to 8,192 (default 8,192) |
+| `peer_agent_resize {id, cols, rows}` | `control` | `resize` |
+| `Open peer_agent_attach {id, cols, rows}` | `control` | `info` (for the label), then `attach` with `replay` at its default |
+
+```json
+{"cmd":"remote_hello"}  → {…,"features":[…,"peer_agents"],"agents":"view"}   only when granted
+{"cmd":"peer_agents"}   → {"reply":"peer_agents","sessions":[…],"truncated":false}
+{"cmd":"peer_agent_peek","id":3} → {"reply":"peer_agent_peek","id":3,"data":"<base64>","cols":80,"rows":24,"state":"working"}
+Open {"cmd":"peer_agent_attach","id":3,"cols":80,"rows":24}
+→ Control {"reply":"peer_agent_attached","id":3,"label":"fix the parser"}   then Data both ways
+→ Control {"reply":"error","kind":"not_allowed"|"busy"|"bad_request"|"no_such_session"|"session_exited"|"permission_denied"|"unavailable","message":"…"}, Close
+```
+
+- `id` is a session number (u32); `cols` 10 to 1,000 and `rows` 3 to 500.
+  A `rime-agentd` error comes back as its `kind` from that closed set and a
+  fixed message, never its own words. A peek answer is checked (base64 of at
+  most 8,192 bytes, a size, a state word) before it is sent.
+- At most 4 attachments at once and 6 new ones a minute per computer
+  (`busy`). Memory only.
+- `rime-agentd` sees `claude-remote-control` with actor `computer:<id>`, so
+  the attach is a **remote viewer** (§1.7): while it is attached the session
+  takes its size, and when it goes the size this computer gave comes back; a
+  resize that arrives after it detached changes nothing here. The session's
+  `attached` count includes it.
+- Each attach shows one notification here, "<computer> attached to <session
+  label>", through the same notification backend as §2.7
+  (`RIME_REMOTED_NOTIFY_STUB` in tests).
+- Never reachable from a peer, whatever its grant: `run`, `signal`, `remove`,
+  `input`, `requests`, `decide`, `grants`, the system grants, nex, the machine
+  and lock verbs, and `computer_grant` itself (a control-socket verb, not a
+  peer verb). **What `control` does reach:** it types into the session's
+  terminal exactly as a person at this keyboard would, so it can answer an
+  agent's own prompts in its terminal (Claude Code's permission questions,
+  for one). It cannot answer `rime-agentd`'s privilege requests or grant
+  anything, which go through `decide` and §7's local-origin rule.
+
+*The controlling side.* `computer_agents` is own user, any origin, like
+`computers`. `computer_agent_peek`, `computer_attach` and
+`computer_agent_resize` need a §7 local origin: an agent here may not read or
+type into another computer's sessions (that would step around `rime-agentd`'s
+own rule that one agent session never reaches another). Each request dials
+the other computer (a resize too: one dial each). `computer_attach` holds
+the control connection: after its reply line the connection is the terminal,
+both ways. rime-remoted answers the other computer's keepalives while it is
+held and ends it when either side closes. On the way to the person it takes
+out OSC 52 (set or read the clipboard) from the terminal bytes; anything else
+passes as it would for a local attach. `computer_agents` makes every text
+field of a listed session plain (control characters, bidirectional overrides
+and line separators taken out, each field at most 1,024 characters, at most
+64 arguments and 64 child records). `rime remote computers peek` prints the
+tail with every escape sequence taken out.
+
+```text
+rime remote computers grant <computer> agents off|view|control [--yes]
+rime remote computers agents <computer> [--json]
+rime remote computers peek <computer> <session> [--bytes N] [--json]
+rime remote computers attach <computer> <session>
+```
 
 ## 3. The phone
 
