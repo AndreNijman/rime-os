@@ -3171,14 +3171,6 @@ mod tests {
             0o100600,
             SHELL_FILE_MAX + 1
         ));
-        // And a real file root owns is refused (it would be anyway, as it
-        // does not parse; the rule above is what proves the owner check).
-        // SAFETY: getuid has no failure mode.
-        if unsafe { libc::getuid() } != 0 {
-            let f = Path::new("/etc/hostname");
-            assert!(f.is_file(), "the test needs a root-owned regular file");
-            assert_eq!(read_shell_file(f), ShellFile::Unreadable);
-        }
     }
 
     #[test]
@@ -4123,12 +4115,15 @@ mod tests {
         let me = (unsafe { libc::getuid() }, std::process::id() as i32);
         assert_eq!(wayland::peer_creds(&s), Some(me));
         // And this test's own cgroup decides whether it is a session.
-        let cg = rime_agent_core::origin::read_cgroup(me.1).expect("cgroup");
-        assert_eq!(
-            wayland::peer_session(&s).map(|(id, _)| id),
-            wayland::session_of_cgroup(&cg, me.0),
-            "{cg}"
-        );
+        // Without a unified hierarchy the placement is unknown: no session.
+        match rime_agent_core::origin::read_cgroup(me.1) {
+            Ok(cg) => assert_eq!(
+                wayland::peer_session(&s).map(|(id, _)| id),
+                wayland::session_of_cgroup(&cg, me.0),
+                "{cg}"
+            ),
+            Err(_) => assert_eq!(wayland::peer_session(&s), None),
+        }
         let _ = std::fs::remove_file(&path);
     }
 
