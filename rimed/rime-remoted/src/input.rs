@@ -90,7 +90,12 @@ const TEXT_CHUNK: usize = 200;
 
 /// Keys a phone may never press: a touchpad needs none of them, and a
 /// keyboard grant must not be a way to turn the computer off or suspend it.
-pub const FORBIDDEN_KEYS: [u32; 4] = [116 /* POWER */, 142 /* SLEEP */, 143 /* WAKEUP */, 205 /* SUSPEND */];
+pub const FORBIDDEN_KEYS: [u32; 4] = [
+    116, /* POWER */
+    142, /* SLEEP */
+    143, /* WAKEUP */
+    205, /* SUSPEND */
+];
 
 const CAPSLOCK: u32 = 58;
 
@@ -137,16 +142,39 @@ impl Src {
 }
 
 /// A modifier a `tap` may hold around its key, as the evdev key it presses.
-const MODS: [(&str, u32); 5] = [("ctrl", 29), ("shift", 42), ("alt", 56), ("super", 125), ("altgr", 100)];
+const MODS: [(&str, u32); 5] = [
+    ("ctrl", 29),
+    ("shift", 42),
+    ("alt", 56),
+    ("super", 125),
+    ("altgr", 100),
+];
 
 /// One event of a batch, validated.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Ev {
-    Motion { dx: f64, dy: f64 },
-    Button { b: Button, p: bool },
-    Scroll { dx: f64, dy: f64, src: Src, stop: bool },
-    Key { code: u32, p: bool },
-    Tap { code: u32, mods: Vec<u32> },
+    Motion {
+        dx: f64,
+        dy: f64,
+    },
+    Button {
+        b: Button,
+        p: bool,
+    },
+    Scroll {
+        dx: f64,
+        dy: f64,
+        src: Src,
+        stop: bool,
+    },
+    Key {
+        code: u32,
+        p: bool,
+    },
+    Tap {
+        code: u32,
+        mods: Vec<u32>,
+    },
     Text(String),
     Hold,
 }
@@ -158,16 +186,22 @@ pub struct Refused(pub String);
 fn delta(v: &Value, field: &str) -> Result<f64, Refused> {
     let d = match v.get(field) {
         None => 0.0,
-        Some(x) => x.as_f64().ok_or_else(|| Refused(format!("{field} is not a number")))?,
+        Some(x) => x
+            .as_f64()
+            .ok_or_else(|| Refused(format!("{field} is not a number")))?,
     };
     if !d.is_finite() || d.abs() > MAX_DELTA {
-        return Err(Refused(format!("{field} must be a number no larger than {MAX_DELTA} either way")));
+        return Err(Refused(format!(
+            "{field} must be a number no larger than {MAX_DELTA} either way"
+        )));
     }
     Ok(d)
 }
 
 fn flag(v: &Value, field: &str) -> Result<bool, Refused> {
-    v.get(field).and_then(Value::as_bool).ok_or_else(|| Refused(format!("{field} must be true or false")))
+    v.get(field)
+        .and_then(Value::as_bool)
+        .ok_or_else(|| Refused(format!("{field} must be true or false")))
 }
 
 /// Whether a phone may press this key: a keyboard key (1..=255) that is not
@@ -183,7 +217,9 @@ fn key_code(v: &Value) -> Result<u32, Refused> {
         .and_then(|c| u32::try_from(c).ok())
         .ok_or_else(|| Refused("code must be an evdev key code".into()))?;
     if !key_allowed(code) {
-        return Err(Refused(format!("key {code} may not be pressed from a phone")));
+        return Err(Refused(format!(
+            "key {code} may not be pressed from a phone"
+        )));
     }
     Ok(code)
 }
@@ -194,7 +230,9 @@ pub fn clean_text(s: &str) -> Result<String, Refused> {
     let s = s.replace("\r\n", "\n").replace('\r', "\n");
     let n = s.chars().count();
     if n > MAX_TEXT_CHARS {
-        return Err(Refused(format!("text is limited to {MAX_TEXT_CHARS} characters at a time")));
+        return Err(Refused(format!(
+            "text is limited to {MAX_TEXT_CHARS} characters at a time"
+        )));
     }
     if s.chars().any(|c| c.is_control() && c != '\n' && c != '\t') {
         return Err(Refused("text may not carry control characters".into()));
@@ -203,9 +241,15 @@ pub fn clean_text(s: &str) -> Result<String, Refused> {
 }
 
 fn event(v: &Value) -> Result<Ev, Refused> {
-    let t = v.get("t").and_then(Value::as_str).ok_or_else(|| Refused("every event needs a t".into()))?;
+    let t = v
+        .get("t")
+        .and_then(Value::as_str)
+        .ok_or_else(|| Refused("every event needs a t".into()))?;
     Ok(match t {
-        "m" => Ev::Motion { dx: delta(v, "dx")?, dy: delta(v, "dy")? },
+        "m" => Ev::Motion {
+            dx: delta(v, "dx")?,
+            dy: delta(v, "dy")?,
+        },
         "b" => {
             let b = match v.get("b").and_then(Value::as_str) {
                 Some("left") => Button::Left,
@@ -213,7 +257,10 @@ fn event(v: &Value) -> Result<Ev, Refused> {
                 Some("middle") => Button::Middle,
                 _ => return Err(Refused("b must be left, right or middle".into())),
             };
-            Ev::Button { b, p: flag(v, "p")? }
+            Ev::Button {
+                b,
+                p: flag(v, "p")?,
+            }
         }
         "s" => {
             let src = match v.get("src").and_then(Value::as_str) {
@@ -221,19 +268,35 @@ fn event(v: &Value) -> Result<Ev, Refused> {
                 Some("wheel") => Src::Wheel,
                 _ => return Err(Refused("src must be finger or wheel".into())),
             };
-            let stop = v.get("stop").map(|_| flag(v, "stop")).transpose()?.unwrap_or(false);
-            Ev::Scroll { dx: delta(v, "dx")?, dy: delta(v, "dy")?, src, stop }
+            let stop = v
+                .get("stop")
+                .map(|_| flag(v, "stop"))
+                .transpose()?
+                .unwrap_or(false);
+            Ev::Scroll {
+                dx: delta(v, "dx")?,
+                dy: delta(v, "dy")?,
+                src,
+                stop,
+            }
         }
-        "k" => Ev::Key { code: key_code(v)?, p: flag(v, "p")? },
+        "k" => Ev::Key {
+            code: key_code(v)?,
+            p: flag(v, "p")?,
+        },
         "tap" => {
             let code = key_code(v)?;
             let mut mods = Vec::new();
             if let Some(list) = v.get("mods") {
-                let list = list.as_array().ok_or_else(|| Refused("mods must be a list".into()))?;
+                let list = list
+                    .as_array()
+                    .ok_or_else(|| Refused("mods must be a list".into()))?;
                 for m in list {
                     let word = m.as_str().unwrap_or_default();
                     let Some((_, key)) = MODS.iter().find(|(w, _)| *w == word) else {
-                        return Err(Refused("mods may be ctrl, shift, alt, super and altgr".into()));
+                        return Err(Refused(
+                            "mods may be ctrl, shift, alt, super and altgr".into(),
+                        ));
                     };
                     if !mods.contains(key) {
                         mods.push(*key);
@@ -243,7 +306,10 @@ fn event(v: &Value) -> Result<Ev, Refused> {
             Ev::Tap { code, mods }
         }
         "text" => {
-            let s = v.get("s").and_then(Value::as_str).ok_or_else(|| Refused("text needs s".into()))?;
+            let s = v
+                .get("s")
+                .and_then(Value::as_str)
+                .ok_or_else(|| Refused("text needs s".into()))?;
             Ev::Text(clean_text(s)?)
         }
         "hold" => Ev::Hold,
@@ -256,13 +322,24 @@ fn event(v: &Value) -> Result<Ev, Refused> {
 /// ones half-done.
 pub fn parse_batch(bytes: &[u8]) -> Result<(u64, Vec<Ev>), Refused> {
     if bytes.len() > MAX_FRAME_BYTES {
-        return Err(Refused(format!("a frame is limited to {MAX_FRAME_BYTES} bytes")));
+        return Err(Refused(format!(
+            "a frame is limited to {MAX_FRAME_BYTES} bytes"
+        )));
     }
-    let v: Value = serde_json::from_slice(bytes).map_err(|_| Refused("a frame must be one JSON object".into()))?;
-    let seq = v.get("seq").and_then(Value::as_u64).ok_or_else(|| Refused("a frame needs a seq".into()))?;
-    let list = v.get("ev").and_then(Value::as_array).ok_or_else(|| Refused("a frame needs an ev list".into()))?;
+    let v: Value = serde_json::from_slice(bytes)
+        .map_err(|_| Refused("a frame must be one JSON object".into()))?;
+    let seq = v
+        .get("seq")
+        .and_then(Value::as_u64)
+        .ok_or_else(|| Refused("a frame needs a seq".into()))?;
+    let list = v
+        .get("ev")
+        .and_then(Value::as_array)
+        .ok_or_else(|| Refused("a frame needs an ev list".into()))?;
     if list.len() > MAX_EVENTS {
-        return Err(Refused(format!("a frame is limited to {MAX_EVENTS} events")));
+        return Err(Refused(format!(
+            "a frame is limited to {MAX_EVENTS} events"
+        )));
     }
     let events = list.iter().map(event).collect::<Result<Vec<_>, _>>()?;
     Ok((seq, events))
@@ -312,7 +389,10 @@ pub fn locked(s: &Sources) -> bool {
 /// Read the Shell's lock file.
 pub fn read_shell_file(path: &Path) -> ShellFile {
     match std::fs::read(path) {
-        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes).ok().and_then(|v| v.get("locked")?.as_bool()) {
+        Ok(bytes) => match serde_json::from_slice::<Value>(&bytes)
+            .ok()
+            .and_then(|v| v.get("locked")?.as_bool())
+        {
             Some(true) => ShellFile::Locked,
             Some(false) => ShellFile::Unlocked,
             None => ShellFile::Unreadable,
@@ -333,11 +413,18 @@ pub struct Gate {
 impl Gate {
     fn sources(&self, notifier: Option<bool>, shell: ShellFile) -> Sources {
         let (locked_hint, lock_signal) = (self.logind)();
-        Sources { locked_hint, lock_signal, notifier, shell }
+        Sources {
+            locked_hint,
+            lock_signal,
+            notifier,
+            shell,
+        }
     }
 
     fn shell_file(&self) -> ShellFile {
-        self.shell.as_deref().map_or(ShellFile::Absent, read_shell_file)
+        self.shell
+            .as_deref()
+            .map_or(ShellFile::Absent, read_shell_file)
     }
 }
 
@@ -368,11 +455,11 @@ impl Held {
         let mut m = 0;
         for k in &self.keys {
             m |= match k {
-                42 | 54 => 0x1,   // Shift
-                29 | 97 => 0x4,   // Control
-                56 => 0x8,        // Mod1 (Alt)
+                42 | 54 => 0x1,    // Shift
+                29 | 97 => 0x4,    // Control
+                56 => 0x8,         // Mod1 (Alt)
                 125 | 126 => 0x40, // Mod4 (Super)
-                100 => 0x80,      // Mod5 (AltGr, ISO_Level3_Shift)
+                100 => 0x80,       // Mod5 (AltGr, ISO_Level3_Shift)
                 _ => 0,
             };
         }
@@ -391,7 +478,9 @@ pub fn write_held(path: &Path, held: &Held) {
         let _ = std::fs::remove_file(path);
         return;
     }
-    let Ok(text) = serde_json::to_vec(held) else { return };
+    let Ok(text) = serde_json::to_vec(held) else {
+        return;
+    };
     if let Some(dir) = path.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
@@ -441,14 +530,19 @@ pub struct StubBackend {
 impl StubBackend {
     pub fn open(dir: &Path) -> std::io::Result<StubBackend> {
         std::fs::create_dir_all(dir)?;
-        let b = StubBackend { dir: dir.to_path_buf() };
+        let b = StubBackend {
+            dir: dir.to_path_buf(),
+        };
         b.write(json!({"a": "open"}))?;
         b.write(json!({"a": "warm"}))?;
         Ok(b)
     }
 
     fn write(&self, line: Value) -> std::io::Result<()> {
-        let mut f = std::fs::OpenOptions::new().create(true).append(true).open(self.dir.join("actions.jsonl"))?;
+        let mut f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.dir.join("actions.jsonl"))?;
         f.write_all(format!("{line}\n").as_bytes())
     }
 
@@ -484,15 +578,23 @@ impl Backend for StubBackend {
     }
     fn sync(&mut self) -> std::io::Result<()> {
         if self.dir.join("gone").exists() {
-            return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, "the stub compositor is gone"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "the stub compositor is gone",
+            ));
         }
         Ok(())
     }
     fn compositor_locked(&self) -> Option<bool> {
-        StubBackend::sources(&self.dir).get("notifier").and_then(Value::as_bool)
+        StubBackend::sources(&self.dir)
+            .get("notifier")
+            .and_then(Value::as_bool)
     }
     fn gone(&self) -> Option<String> {
-        self.dir.join("gone").exists().then(|| "the stub compositor is gone".to_string())
+        self.dir
+            .join("gone")
+            .exists()
+            .then(|| "the stub compositor is gone".to_string())
     }
 }
 
@@ -529,7 +631,14 @@ impl Why {
     }
 
     fn from_u8(v: u8) -> Option<Why> {
-        [Why::NotAllowed, Why::Unavailable, Why::Refused, Why::Stopping].into_iter().find(|w| *w as u8 == v)
+        [
+            Why::NotAllowed,
+            Why::Unavailable,
+            Why::Refused,
+            Why::Stopping,
+        ]
+        .into_iter()
+        .find(|w| *w as u8 == v)
     }
 }
 
@@ -595,7 +704,11 @@ impl Session {
             last_frame: now,
             last_seq: None,
             last_available: now,
-            rate: Rate { start: now, frames: 0, text: 0 },
+            rate: Rate {
+                start: now,
+                frames: 0,
+                text: 0,
+            },
             crash,
         }
     }
@@ -613,7 +726,11 @@ impl Session {
     /// The gate, now: the Shell file as last read, logind and the
     /// compositor as they are.
     fn locked_now(&self) -> bool {
-        locked(&self.gate.sources(self.backend.compositor_locked(), self.shell))
+        locked(
+            &self
+                .gate
+                .sources(self.backend.compositor_locked(), self.shell),
+        )
     }
 
     /// How long the session thread may wait for the next frame.
@@ -669,7 +786,11 @@ impl Session {
 
     fn rate_ok(&mut self, now: Instant, text: usize) -> Result<(), String> {
         if now.duration_since(self.rate.start) >= Duration::from_secs(1) {
-            self.rate = Rate { start: now, frames: 0, text: 0 };
+            self.rate = Rate {
+                start: now,
+                frames: 0,
+                text: 0,
+            };
         }
         self.rate.frames += 1;
         self.rate.text += text;
@@ -677,7 +798,9 @@ impl Session {
             return Err(format!("more than {MAX_FRAMES_PER_SEC} frames in a second"));
         }
         if self.rate.text > MAX_TEXT_PER_SEC {
-            return Err(format!("more than {MAX_TEXT_PER_SEC} characters of text in a second"));
+            return Err(format!(
+                "more than {MAX_TEXT_PER_SEC} characters of text in a second"
+            ));
         }
         Ok(())
     }
@@ -687,14 +810,26 @@ impl Session {
         // The grant on EVERY frame: lowering it ends the channel even if the
         // hook that stops a live channel never ran.
         if !(self.granted)() {
-            return Step::End(Why::NotAllowed, "this phone is no longer allowed to use this computer as a touchpad".into());
+            return Step::End(
+                Why::NotAllowed,
+                "this phone is no longer allowed to use this computer as a touchpad".into(),
+            );
         }
         self.last_frame = now;
         let (seq, events) = match parse_batch(bytes) {
             Ok(x) => x,
             Err(Refused(why)) => return Step::End(Why::Refused, why),
         };
-        let text: usize = events.iter().map(|e| if let Ev::Text(s) = e { s.chars().count() } else { 0 }).sum();
+        let text: usize = events
+            .iter()
+            .map(|e| {
+                if let Ev::Text(s) = e {
+                    s.chars().count()
+                } else {
+                    0
+                }
+            })
+            .sum();
         if let Err(why) = self.rate_ok(now, text) {
             return Step::End(Why::Refused, why);
         }
@@ -719,7 +854,10 @@ impl Session {
                 return Step::Go;
             }
             if let Err(e) = self.apply(ev) {
-                return Step::End(Why::Unavailable, format!("the compositor stopped taking input: {e}"));
+                return Step::End(
+                    Why::Unavailable,
+                    format!("the compositor stopped taking input: {e}"),
+                );
             }
         }
         Step::Go
@@ -735,7 +873,8 @@ impl Session {
             self.caps = !self.caps;
         }
         if is_modifier(code) {
-            self.backend.modifiers(self.held.depressed(), self.locked_mask())?;
+            self.backend
+                .modifiers(self.held.depressed(), self.locked_mask())?;
         }
         Ok(())
     }
@@ -747,7 +886,8 @@ impl Session {
         self.backend.key(code, false)?;
         self.held.keys.remove(&code);
         if is_modifier(code) {
-            self.backend.modifiers(self.held.depressed(), self.locked_mask())?;
+            self.backend
+                .modifiers(self.held.depressed(), self.locked_mask())?;
         }
         self.record();
         Ok(())
@@ -781,7 +921,10 @@ impl Session {
             Ev::Tap { code, mods } => {
                 // Only what this tap pressed is let go by it: a modifier the
                 // phone already holds stays held.
-                let pressed: Vec<u32> = mods.into_iter().filter(|m| !self.held.keys.contains(m)).collect();
+                let pressed: Vec<u32> = mods
+                    .into_iter()
+                    .filter(|m| !self.held.keys.contains(m))
+                    .collect();
                 for m in &pressed {
                     self.press_key(*m)?;
                 }
@@ -842,7 +985,10 @@ impl Session {
     /// the gate and the lease.
     pub fn tick(&mut self, now: Instant) -> Step {
         if !(self.granted)() {
-            return Step::End(Why::NotAllowed, "this phone is no longer allowed to use this computer as a touchpad".into());
+            return Step::End(
+                Why::NotAllowed,
+                "this phone is no longer allowed to use this computer as a touchpad".into(),
+            );
         }
         if let Some(why) = self.backend.gone() {
             return Step::End(Why::Unavailable, why);
@@ -958,41 +1104,70 @@ pub fn shutdown(within: Duration) {
 }
 
 fn error(code: &str, message: &str) -> Vec<u8> {
-    json!({"reply": "error", "code": code, "message": message}).to_string().into_bytes()
+    json!({"reply": "error", "code": code, "message": message})
+        .to_string()
+        .into_bytes()
 }
 
 fn seqpacket_pair() -> std::io::Result<(UnixStream, UnixStream)> {
     let mut fds = [0 as RawFd; 2];
     // SAFETY: socketpair writes two descriptors into the array on success.
-    let r = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC, 0, fds.as_mut_ptr()) };
+    let r = unsafe {
+        libc::socketpair(
+            libc::AF_UNIX,
+            libc::SOCK_SEQPACKET | libc::SOCK_CLOEXEC,
+            0,
+            fds.as_mut_ptr(),
+        )
+    };
     if r != 0 {
         return Err(std::io::Error::last_os_error());
     }
     // SAFETY: both descriptors are new and owned by nobody else.
-    Ok(unsafe { (UnixStream::from_raw_fd(fds[0]), UnixStream::from_raw_fd(fds[1])) })
+    Ok(unsafe {
+        (
+            UnixStream::from_raw_fd(fds[0]),
+            UnixStream::from_raw_fd(fds[1]),
+        )
+    })
 }
 
 /// Whether this phone may use this computer as a touchpad, as the store says
 /// now.
 fn granted(state: &State, device: &str) -> bool {
-    state.devices().ok().and_then(|s| s.find(device).ok().map(|d| d.input_grant())).unwrap_or(false)
+    state
+        .devices()
+        .ok()
+        .and_then(|s| s.find(device).ok().map(|d| d.input_grant()))
+        .unwrap_or(false)
 }
 
 /// Open the input channel for `device` on a session of `scope`: the reply,
 /// and the end the frame loop writes the phone's frames into. Refused (the
 /// reply only) when the phone may not, the screen is locked, there is no
 /// session to type into, or another phone has it.
-pub fn open(state: &Arc<State>, device: &str, scope: Scope, request: &[u8]) -> Result<(UnixStream, Vec<u8>), Vec<u8>> {
+pub fn open(
+    state: &Arc<State>,
+    device: &str,
+    scope: Scope,
+    request: &[u8],
+) -> Result<(UnixStream, Vec<u8>), Vec<u8>> {
     // `may_open` already keeps companion and peer sessions out; this says it
     // again where the channel is made, so neither check alone is the wall.
     if scope != Scope::Full {
-        return Err(error("not_allowed", "a touchpad needs the phone's own key; unlock the phone to use it"));
+        return Err(error(
+            "not_allowed",
+            "a touchpad needs the phone's own key; unlock the phone to use it",
+        ));
     }
     let v: Value = serde_json::from_slice(request).unwrap_or(Value::Null);
     if v.get("v").and_then(Value::as_u64) != Some(1) {
         return Err(error("bad_request", "this computer speaks input version 1"));
     }
-    let name = state.devices().ok().and_then(|s| s.find(device).ok().map(|d| d.name.clone()));
+    let name = state
+        .devices()
+        .ok()
+        .and_then(|s| s.find(device).ok().map(|d| d.name.clone()));
     if !granted(state, device) {
         return Err(error(
             "not_allowed",
@@ -1009,12 +1184,18 @@ pub fn open(state: &Arc<State>, device: &str, scope: Scope, request: &[u8]) -> R
     }
     let mut guard = lock_live();
     if guard.is_some() {
-        return Err(error("busy", "another phone is using this computer as a touchpad"));
+        return Err(error(
+            "busy",
+            "another phone is using this computer as a touchpad",
+        ));
     }
     let gate = env.gate();
     let shell = gate.shell_file();
     if locked(&gate.sources(None, shell)) {
-        return Err(error("locked", "this computer is locked; unlock it at the keyboard first"));
+        return Err(error(
+            "locked",
+            "this computer is locked; unlock it at the keyboard first",
+        ));
     }
     let mut backend = env.backend().map_err(|why| error("unavailable", &why))?;
     // Keys or buttons an earlier run left held go first, on the new devices.
@@ -1025,11 +1206,18 @@ pub fn open(state: &Arc<State>, device: &str, scope: Scope, request: &[u8]) -> R
     }
     // The compositor's notifier is known only now, after the round trip.
     if locked(&gate.sources(backend.compositor_locked(), gate.shell_file())) {
-        return Err(error("locked", "this computer is locked; unlock it at the keyboard first"));
+        return Err(error(
+            "locked",
+            "this computer is locked; unlock it at the keyboard first",
+        ));
     }
     let (theirs, mine) = seqpacket_pair().map_err(|e| error("unavailable", &e.to_string()))?;
-    let wake = mine.try_clone().map_err(|e| error("unavailable", &e.to_string()))?;
-    let writer = mine.try_clone().map_err(|e| error("unavailable", &e.to_string()))?;
+    let wake = mine
+        .try_clone()
+        .map_err(|e| error("unavailable", &e.to_string()))?;
+    let writer = mine
+        .try_clone()
+        .map_err(|e| error("unavailable", &e.to_string()))?;
     let token = TOKENS.fetch_add(1, Ordering::Relaxed);
     let stop = Arc::new(AtomicU8::new(0));
     let done = Arc::new((Mutex::new(false), Condvar::new()));
@@ -1052,13 +1240,28 @@ pub fn open(state: &Arc<State>, device: &str, scope: Scope, request: &[u8]) -> R
         .name("rime-input".into())
         .spawn(move || run(session, mine, stop2, done2, token))
         .map_err(|e| error("unavailable", &format!("no thread for the touchpad: {e}")))?;
-    *guard = Some(Live { token, device: device.to_string(), stop, wake, done });
-    Ok((theirs, json!({"reply": "input_ready"}).to_string().into_bytes()))
+    *guard = Some(Live {
+        token,
+        device: device.to_string(),
+        stop,
+        wake,
+        done,
+    });
+    Ok((
+        theirs,
+        json!({"reply": "input_ready"}).to_string().into_bytes(),
+    ))
 }
 
 /// The session thread: frames in, ticks between, everything released at the
 /// end however it ends.
-fn run(mut session: Session, sock: UnixStream, stop: Arc<AtomicU8>, done: Arc<(Mutex<bool>, Condvar)>, token: u64) {
+fn run(
+    mut session: Session,
+    sock: UnixStream,
+    stop: Arc<AtomicU8>,
+    done: Arc<(Mutex<bool>, Condvar)>,
+    token: u64,
+) {
     let mut buf = vec![0u8; MAX_FRAME_BYTES + 1];
     let ended = loop {
         if let Some(why) = Why::from_u8(stop.load(Ordering::SeqCst)) {
@@ -1073,7 +1276,12 @@ fn run(mut session: Session, sock: UnixStream, stop: Arc<AtomicU8>, done: Arc<(M
                 None => break None,
             },
             Ok(n) => session.frame(&buf[..n], Instant::now()),
-            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                ) =>
+            {
                 session.tick(Instant::now())
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Step::Go,
@@ -1086,7 +1294,9 @@ fn run(mut session: Session, sock: UnixStream, stop: Arc<AtomicU8>, done: Arc<(M
     let ended = ended.map(|(why, message)| {
         let message = if message.is_empty() {
             match why {
-                Why::NotAllowed => "this phone is no longer allowed to use this computer as a touchpad".into(),
+                Why::NotAllowed => {
+                    "this phone is no longer allowed to use this computer as a touchpad".into()
+                }
                 Why::Stopping => "Rime Remote on this computer is stopping".into(),
                 _ => String::new(),
             }
@@ -1122,7 +1332,9 @@ fn env() -> &'static Env {
     CHOSEN.get_or_init(|| match std::env::var_os(STUB_ENV) {
         Some(dir) if !dir.is_empty() => Env::Stub(PathBuf::from(dir)),
         // A unit test never reaches a real desktop, whatever its environment.
-        _ if cfg!(test) => Env::Stub(std::env::temp_dir().join(format!("rime-remoted-input-unit-{}", std::process::id()))),
+        _ if cfg!(test) => Env::Stub(
+            std::env::temp_dir().join(format!("rime-remoted-input-unit-{}", std::process::id())),
+        ),
         _ => Env::Real,
     })
 }
@@ -1131,7 +1343,9 @@ impl Env {
     fn runtime_file(&self, name: &str) -> PathBuf {
         match self {
             Env::Stub(dir) if cfg!(test) => dir.join(name),
-            _ => rime_agent_core::paths::runtime_dir().join("rime-remote").join(name),
+            _ => rime_agent_core::paths::runtime_dir()
+                .join("rime-remote")
+                .join(name),
         }
     }
 
@@ -1147,14 +1361,22 @@ impl Env {
                 Gate {
                     logind: Box::new(move || {
                         let v = StubBackend::sources(&dir);
-                        (v.get("locked_hint").and_then(Value::as_bool), v.get("lock_signal").and_then(Value::as_bool).unwrap_or(false))
+                        (
+                            v.get("locked_hint").and_then(Value::as_bool),
+                            v.get("lock_signal")
+                                .and_then(Value::as_bool)
+                                .unwrap_or(false),
+                        )
                     }),
                     shell,
                 }
             }
             Env::Real => {
                 let watch = logind::watch();
-                Gate { logind: Box::new(move || watch.read()), shell }
+                Gate {
+                    logind: Box::new(move || watch.read()),
+                    shell,
+                }
             }
         }
     }
@@ -1168,7 +1390,9 @@ impl Env {
             Env::Real => {
                 let runtime = rime_agent_core::paths::runtime_dir();
                 if wayland::gaming(&runtime) {
-                    return Err("Gaming Mode is running; the touchpad works on the desktop only".into());
+                    return Err(
+                        "Gaming Mode is running; the touchpad works on the desktop only".into(),
+                    );
                 }
                 if logind::watch().no_session() {
                     return Err("nobody is logged in to a desktop on this computer".into());
@@ -1180,7 +1404,9 @@ impl Env {
 
     fn backend(&self) -> Result<Box<dyn Backend>, String> {
         match self {
-            Env::Stub(dir) => StubBackend::open(dir).map(|b| Box::new(b) as Box<dyn Backend>).map_err(|e| e.to_string()),
+            Env::Stub(dir) => StubBackend::open(dir)
+                .map(|b| Box::new(b) as Box<dyn Backend>)
+                .map_err(|e| e.to_string()),
             Env::Real => {
                 let socket = wayland::discover(&rime_agent_core::paths::runtime_dir())?;
                 let layout = wayland::Layout::of_session();
@@ -1204,7 +1430,9 @@ pub fn prepare() {
 pub fn recover_at_start() {
     let env = env();
     let crash = env.crash_file();
-    let Some(left) = read_held(&crash) else { return };
+    let Some(left) = read_held(&crash) else {
+        return;
+    };
     std::thread::spawn(move || {
         // logind's first answer, or unknown (locked) after a moment.
         let gate = env.gate();
@@ -1212,7 +1440,9 @@ pub fn recover_at_start() {
         while (gate.logind)().0.is_none() && Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(100));
         }
-        let Ok(mut backend) = env.backend() else { return };
+        let Ok(mut backend) = env.backend() else {
+            return;
+        };
         let unlocked = !locked(&gate.sources(backend.compositor_locked(), gate.shell_file()));
         write_held(&crash, &recover(backend.as_mut(), &left, unlocked));
     });
@@ -1290,7 +1520,11 @@ mod logind {
 
     const DEST: &str = "org.freedesktop.login1";
 
-    async fn proxy<'a>(conn: &zbus::Connection, path: &str, iface: &'static str) -> zbus::Result<zbus::Proxy<'a>> {
+    async fn proxy<'a>(
+        conn: &zbus::Connection,
+        path: &str,
+        iface: &'static str,
+    ) -> zbus::Result<zbus::Proxy<'a>> {
         zbus::ProxyBuilder::new(conn)
             .destination(DEST)?
             .path(path.to_string())?
@@ -1304,11 +1538,17 @@ mod logind {
     /// needs a fresh start (the bus went, the session changed).
     async fn follow(w: &Watch) -> zbus::Result<()> {
         let conn = zbus::Connection::system().await?;
-        let manager = proxy(&conn, "/org/freedesktop/login1", "org.freedesktop.login1.Manager").await?;
+        let manager = proxy(
+            &conn,
+            "/org/freedesktop/login1",
+            "org.freedesktop.login1.Manager",
+        )
+        .await?;
         let uid = unsafe { libc::getuid() };
         let user: zbus::zvariant::OwnedObjectPath = manager.call("GetUser", &(uid,)).await?;
         let user = proxy(&conn, user.as_str(), "org.freedesktop.login1.User").await?;
-        let (_, display): (String, zbus::zvariant::OwnedObjectPath) = user.get_property("Display").await?;
+        let (_, display): (String, zbus::zvariant::OwnedObjectPath) =
+            user.get_property("Display").await?;
         let mut user_changes = zbus::fdo::PropertiesProxy::builder(&conn)
             .destination(DEST)?
             .path(user.path().to_owned())?
@@ -1419,7 +1659,10 @@ pub mod wayland {
             let mut found: Vec<String> = entries
                 .flatten()
                 .filter_map(|e| e.file_name().into_string().ok())
-                .filter(|n| n.strip_prefix("wayland-").is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit())))
+                .filter(|n| {
+                    n.strip_prefix("wayland-")
+                        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+                })
                 .collect();
             found.sort_by_key(|n| n["wayland-".len()..].parse::<u32>().unwrap_or(u32::MAX));
             names.extend(found);
@@ -1438,13 +1681,18 @@ pub mod wayland {
     /// there, so a stale socket left by a crash does not turn the touchpad
     /// off for good.
     pub fn gaming(runtime: &Path) -> bool {
-        let Ok(entries) = std::fs::read_dir(runtime) else { return false };
-        entries.flatten().filter_map(|e| e.file_name().into_string().ok()).any(|n| {
-            n.strip_prefix("gamescope-")
-                .and_then(|r| r.strip_suffix("-ei"))
-                .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
-                && UnixStream::connect(runtime.join(&n)).is_ok()
-        })
+        let Ok(entries) = std::fs::read_dir(runtime) else {
+            return false;
+        };
+        entries
+            .flatten()
+            .filter_map(|e| e.file_name().into_string().ok())
+            .any(|n| {
+                n.strip_prefix("gamescope-")
+                    .and_then(|r| r.strip_suffix("-ei"))
+                    .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
+                    && UnixStream::connect(runtime.join(&n)).is_ok()
+            })
     }
 
     /// The session's keyboard layout, as XKB names.
@@ -1455,7 +1703,8 @@ pub mod wayland {
     }
 
     fn safe(name: &str) -> bool {
-        name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+        name.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
     }
 
     impl Layout {
@@ -1487,8 +1736,15 @@ pub mod wayland {
         pub fn from_names(layouts: &str, variants: &str) -> Layout {
             let layouts: Vec<String> = layouts.split(',').map(|s| s.trim().to_string()).collect();
             let variants: Vec<String> = variants.split(',').map(|s| s.trim().to_string()).collect();
-            if layouts.is_empty() || layouts.len() > 4 || layouts.iter().any(|l| l.is_empty() || !safe(l)) || variants.iter().any(|v| !safe(v)) {
-                return Layout { layouts: vec!["us".into()], variants: vec![] };
+            if layouts.is_empty()
+                || layouts.len() > 4
+                || layouts.iter().any(|l| l.is_empty() || !safe(l))
+                || variants.iter().any(|v| !safe(v))
+            {
+                return Layout {
+                    layouts: vec!["us".into()],
+                    variants: vec![],
+                };
             }
             Layout { layouts, variants }
         }
@@ -1600,7 +1856,8 @@ pub mod wayland {
     }
 
     fn read_u32(b: &[u8], at: usize) -> Option<u32> {
-        b.get(at..at + 4).map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
+        b.get(at..at + 4)
+            .map(|s| u32::from_le_bytes([s[0], s[1], s[2], s[3]]))
     }
 
     fn read_str(b: &[u8], at: usize) -> Option<(String, usize)> {
@@ -1639,9 +1896,13 @@ pub mod wayland {
                 if obj == DISPLAY && op == 0 {
                     let code = read_u32(&body, 4).unwrap_or(0);
                     let text = read_str(&body, 8).map(|(s, _)| s).unwrap_or_default();
-                    bad = Some(format!("the compositor refused a request (error {code}: {text})"));
+                    bad = Some(format!(
+                        "the compositor refused a request (error {code}: {text})"
+                    ));
                 } else if obj == REGISTRY && op == 0 {
-                    if let (Some(name), Some((iface, at))) = (read_u32(&body, 0), read_str(&body, 4)) {
+                    if let (Some(name), Some((iface, at))) =
+                        (read_u32(&body, 0), read_str(&body, 4))
+                    {
                         let version = read_u32(&body, at).unwrap_or(1);
                         h.globals.push((name, iface, version));
                     }
@@ -1673,14 +1934,16 @@ pub mod wayland {
         /// Connect to the compositor at `socket` and make the three devices.
         /// Refused when it offers no virtual pointer or keyboard (gamescope).
         pub fn connect(socket: &Path, layout: &Layout) -> Result<Wayland, String> {
-            let sock = UnixStream::connect(socket).map_err(|e| format!("cannot reach the desktop: {e}"))?;
+            let sock = UnixStream::connect(socket)
+                .map_err(|e| format!("cannot reach the desktop: {e}"))?;
             Wayland::over(sock, layout)
         }
 
         /// The same over a connected socket: what a test's scripted
         /// compositor gives it.
         pub fn over(sock: UnixStream, layout: &Layout) -> Result<Wayland, String> {
-            sock.set_write_timeout(Some(WAIT)).map_err(|e| e.to_string())?;
+            sock.set_write_timeout(Some(WAIT))
+                .map_err(|e| e.to_string())?;
             let shared = Arc::new(Shared {
                 heard: Mutex::new(Heard::default()),
                 cv: Condvar::new(),
@@ -1711,11 +1974,19 @@ pub mod wayland {
             put_u32(&mut args, REGISTRY);
             w.send(DISPLAY, 1, &args, None).map_err(fail)?;
             w.sync().map_err(fail)?;
-            let globals = w.shared.heard.lock().unwrap_or_else(|e| e.into_inner()).globals.clone();
+            let globals = w
+                .shared
+                .heard
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .globals
+                .clone();
             let find = |iface: &str| globals.iter().find(|(_, i, _)| i == iface).cloned();
-            let (Some(seat), Some(pointers), Some(keyboards)) =
-                (find("wl_seat"), find("zwlr_virtual_pointer_manager_v1"), find("zwp_virtual_keyboard_manager_v1"))
-            else {
+            let (Some(seat), Some(pointers), Some(keyboards)) = (
+                find("wl_seat"),
+                find("zwlr_virtual_pointer_manager_v1"),
+                find("zwp_virtual_keyboard_manager_v1"),
+            ) else {
                 return Err("this desktop does not take virtual input (Gaming Mode?)".into());
             };
             let seat = w.bind(&seat, 1).map_err(fail)?;
@@ -1775,7 +2046,13 @@ pub mod wayland {
             Ok(id)
         }
 
-        fn send(&mut self, obj: u32, op: u16, args: &[u8], fd: Option<RawFd>) -> std::io::Result<()> {
+        fn send(
+            &mut self,
+            obj: u32,
+            op: u16,
+            args: &[u8],
+            fd: Option<RawFd>,
+        ) -> std::io::Result<()> {
             if let Some(why) = self.gone() {
                 return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, why));
             }
@@ -1815,7 +2092,10 @@ pub mod wayland {
         unsafe {
             let space = libc::CMSG_SPACE(std::mem::size_of::<RawFd>() as u32) as usize;
             let mut control = vec![0u8; space];
-            let mut iov = libc::iovec { iov_base: m.as_ptr() as *mut libc::c_void, iov_len: m.len() };
+            let mut iov = libc::iovec {
+                iov_base: m.as_ptr() as *mut libc::c_void,
+                iov_len: m.len(),
+            };
             let mut msg: libc::msghdr = std::mem::zeroed();
             msg.msg_iov = &mut iov;
             msg.msg_iovlen = 1;
@@ -1825,13 +2105,20 @@ pub mod wayland {
             (*cmsg).cmsg_level = libc::SOL_SOCKET;
             (*cmsg).cmsg_type = libc::SCM_RIGHTS;
             (*cmsg).cmsg_len = libc::CMSG_LEN(std::mem::size_of::<RawFd>() as u32) as _;
-            std::ptr::copy_nonoverlapping(&fd as *const RawFd as *const u8, libc::CMSG_DATA(cmsg), std::mem::size_of::<RawFd>());
+            std::ptr::copy_nonoverlapping(
+                &fd as *const RawFd as *const u8,
+                libc::CMSG_DATA(cmsg),
+                std::mem::size_of::<RawFd>(),
+            );
             let n = libc::sendmsg(sock.as_raw_fd(), &msg, libc::MSG_NOSIGNAL);
             if n < 0 {
                 return Err(std::io::Error::last_os_error());
             }
             if n as usize != m.len() {
-                return Err(std::io::Error::new(std::io::ErrorKind::WriteZero, "a short write with a keymap"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WriteZero,
+                    "a short write with a keymap",
+                ));
             }
         }
         Ok(())
@@ -1937,22 +2224,42 @@ pub mod wayland {
                     return Ok(());
                 }
                 if let Some(why) = &h.gone {
-                    return Err(std::io::Error::new(std::io::ErrorKind::BrokenPipe, why.clone()));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::BrokenPipe,
+                        why.clone(),
+                    ));
                 }
                 let left = deadline.saturating_duration_since(Instant::now());
                 if left.is_zero() {
-                    return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "the desktop did not answer in time"));
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        "the desktop did not answer in time",
+                    ));
                 }
-                h = self.shared.cv.wait_timeout(h, left).unwrap_or_else(|e| e.into_inner()).0;
+                h = self
+                    .shared
+                    .cv
+                    .wait_timeout(h, left)
+                    .unwrap_or_else(|e| e.into_inner())
+                    .0;
             }
         }
 
         fn compositor_locked(&self) -> Option<bool> {
-            self.shared.heard.lock().unwrap_or_else(|e| e.into_inner()).locked
+            self.shared
+                .heard
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .locked
         }
 
         fn gone(&self) -> Option<String> {
-            self.shared.heard.lock().unwrap_or_else(|e| e.into_inner()).gone.clone()
+            self.shared
+                .heard
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .gone
+                .clone()
         }
     }
 
@@ -2042,14 +2349,25 @@ mod tests {
         let t0 = Instant::now();
         let session = Session::new(
             Box::new(fake.clone()),
-            Gate { logind: Box::new(move || *h.lock().expect("h")), shell: Some(dir.join("lock.json")) },
+            Gate {
+                logind: Box::new(move || *h.lock().expect("h")),
+                shell: Some(dir.join("lock.json")),
+            },
             Box::new(move || g.load(Ordering::SeqCst)),
             Box::new(|| Ok(())),
             Box::new(move |v| s.lock().expect("s").push(v)),
             Some(dir.join("input-held.json")),
             t0,
         );
-        Rig { fake, hint, grant, said, session, t0, dir }
+        Rig {
+            fake,
+            hint,
+            grant,
+            said,
+            session,
+            t0,
+            dir,
+        }
     }
 
     impl Rig {
@@ -2077,21 +2395,51 @@ mod tests {
 
     #[test]
     fn locked_is_the_union_of_every_source_and_only_logind_can_say_unlocked() {
-        let open = Sources { locked_hint: Some(false), ..Sources::default() };
+        let open = Sources {
+            locked_hint: Some(false),
+            ..Sources::default()
+        };
         assert!(!locked(&open));
         // Unknown is locked: no logind answer, whatever the others say.
         assert!(locked(&Sources::default()));
-        assert!(locked(&Sources { notifier: Some(false), shell: ShellFile::Unlocked, ..Sources::default() }));
-        assert!(locked(&Sources { locked_hint: Some(true), ..Sources::default() }));
+        assert!(locked(&Sources {
+            notifier: Some(false),
+            shell: ShellFile::Unlocked,
+            ..Sources::default()
+        }));
+        assert!(locked(&Sources {
+            locked_hint: Some(true),
+            ..Sources::default()
+        }));
         // Each other source alone vetoes an unlocked logind.
-        assert!(locked(&Sources { lock_signal: true, ..open }));
-        assert!(locked(&Sources { notifier: Some(true), ..open }));
-        assert!(locked(&Sources { shell: ShellFile::Locked, ..open }));
-        assert!(locked(&Sources { shell: ShellFile::Unreadable, ..open }));
+        assert!(locked(&Sources {
+            lock_signal: true,
+            ..open
+        }));
+        assert!(locked(&Sources {
+            notifier: Some(true),
+            ..open
+        }));
+        assert!(locked(&Sources {
+            shell: ShellFile::Locked,
+            ..open
+        }));
+        assert!(locked(&Sources {
+            shell: ShellFile::Unreadable,
+            ..open
+        }));
         // And what cannot veto does not: an absent or "unlocked" Shell file,
         // a notifier that says unlocked or nothing.
-        assert!(!locked(&Sources { shell: ShellFile::Absent, notifier: None, ..open }));
-        assert!(!locked(&Sources { shell: ShellFile::Unlocked, notifier: Some(false), ..open }));
+        assert!(!locked(&Sources {
+            shell: ShellFile::Absent,
+            notifier: None,
+            ..open
+        }));
+        assert!(!locked(&Sources {
+            shell: ShellFile::Unlocked,
+            notifier: Some(false),
+            ..open
+        }));
     }
 
     #[test]
@@ -2125,11 +2473,28 @@ mod tests {
             {"t":"text","s":"a\r\nb\rc\td"},{"t":"hold"}]}"#;
         let (seq, ev) = parse_batch(ok).expect("valid");
         assert_eq!(seq, 1);
-        assert_eq!(ev[2], Ev::Scroll { dx: 0.0, dy: -40.0, src: Src::Wheel, stop: false });
-        assert_eq!(ev[4], Ev::Tap { code: 46, mods: vec![29] });
+        assert_eq!(
+            ev[2],
+            Ev::Scroll {
+                dx: 0.0,
+                dy: -40.0,
+                src: Src::Wheel,
+                stop: false
+            }
+        );
+        assert_eq!(
+            ev[4],
+            Ev::Tap {
+                code: 46,
+                mods: vec![29]
+            }
+        );
         assert_eq!(ev[5], Ev::Text("a\nb\nc\td".into()));
-        let too_many = json!({"seq": 1, "ev": vec![json!({"t": "hold"}); MAX_EVENTS + 1]}).to_string();
-        let long_text = json!({"seq": 1, "ev": [{"t": "text", "s": "x".repeat(MAX_TEXT_CHARS + 1)}]}).to_string();
+        let too_many =
+            json!({"seq": 1, "ev": vec![json!({"t": "hold"}); MAX_EVENTS + 1]}).to_string();
+        let long_text =
+            json!({"seq": 1, "ev": [{"t": "text", "s": "x".repeat(MAX_TEXT_CHARS + 1)}]})
+                .to_string();
         let fat = json!({"seq": 1, "ev": [{"t": "text", "s": "é".repeat(900)}], "pad": "y".repeat(MAX_FRAME_BYTES)}).to_string();
         for bad in [
             r#"{"ev":[]}"#.to_string(),
@@ -2152,7 +2517,11 @@ mod tests {
             r#"{"seq":1,"ev":[{"t":"text","s":"a\u001b[2~"}]}"#.to_string(),
             r#"{"seq":1,"ev":[{"t":"hold"},{"t":"warp","x":0}]}"#.to_string(),
         ] {
-            assert!(parse_batch(bad.as_bytes()).is_err(), "accepted {}", &bad[..bad.len().min(80)]);
+            assert!(
+                parse_batch(bad.as_bytes()).is_err(),
+                "accepted {}",
+                &bad[..bad.len().min(80)]
+            );
         }
     }
 
@@ -2160,18 +2529,43 @@ mod tests {
     fn events_reach_the_backend_and_what_is_held_is_tracked_with_its_modifiers() {
         let mut r = rig("apply");
         assert_eq!(r.frame(0, 1, json!([{"t":"m","dx":3,"dy":-2},{"t":"k","code":42,"p":true},{"t":"k","code":30,"p":true}])), Step::Go);
-        assert_eq!(r.fake.take(), ["motion 3 -2", "key 42 true", "mods 0x1 0x0", "key 30 true"]);
+        assert_eq!(
+            r.fake.take(),
+            ["motion 3 -2", "key 42 true", "mods 0x1 0x0", "key 30 true"]
+        );
         assert_eq!(r.session.held().keys, BTreeSet::from([30, 42]));
         // Held before it was pressed: a crash right after the press finds it.
-        assert_eq!(read_held(&r.dir.join("input-held.json")).expect("recorded").keys, BTreeSet::from([30, 42]));
+        assert_eq!(
+            read_held(&r.dir.join("input-held.json"))
+                .expect("recorded")
+                .keys,
+            BTreeSet::from([30, 42])
+        );
         r.frame(10, 2, json!([{"t":"k","code":30,"p":false},{"t":"k","code":42,"p":false},{"t":"k","code":42,"p":false}]));
-        assert_eq!(r.fake.take(), ["key 30 false", "key 42 false", "mods 0x0 0x0"]);
+        assert_eq!(
+            r.fake.take(),
+            ["key 30 false", "key 42 false", "mods 0x0 0x0"]
+        );
         assert!(read_held(&r.dir.join("input-held.json")).is_none());
         // A tap holds its modifiers around the key and lets go of only those.
         r.frame(20, 3, json!([{"t":"k","code":29,"p":true}]));
         r.fake.take();
-        r.frame(30, 4, json!([{"t":"tap","code":46,"mods":["ctrl","shift"]}]));
-        assert_eq!(r.fake.take(), ["key 42 true", "mods 0x5 0x0", "key 46 true", "key 46 false", "key 42 false", "mods 0x4 0x0"]);
+        r.frame(
+            30,
+            4,
+            json!([{"t":"tap","code":46,"mods":["ctrl","shift"]}]),
+        );
+        assert_eq!(
+            r.fake.take(),
+            [
+                "key 42 true",
+                "mods 0x5 0x0",
+                "key 46 true",
+                "key 46 false",
+                "key 42 false",
+                "mods 0x4 0x0"
+            ]
+        );
         assert_eq!(r.session.held().keys, BTreeSet::from([29]));
         // A frame sent twice is applied once.
         assert_eq!(r.frame(40, 4, json!([{"t":"m","dx":1,"dy":1}])), Step::Go);
@@ -2181,17 +2575,31 @@ mod tests {
     #[test]
     fn a_lock_releases_everything_says_paused_and_nothing_gets_through_until_unlocked() {
         let mut r = rig("lock");
-        r.frame(0, 1, json!([{"t":"k","code":30,"p":true},{"t":"b","b":"left","p":true}]));
+        r.frame(
+            0,
+            1,
+            json!([{"t":"k","code":30,"p":true},{"t":"b","b":"left","p":true}]),
+        );
         r.fake.take();
         // Locked with nothing from the phone: the next tick lets go, so a
         // held key cannot auto-repeat into the password field.
         r.lock(Some(true), false);
         assert_eq!(r.session.tick(r.at(20)), Step::Go);
-        assert_eq!(r.fake.take(), ["key 30 false", "mods 0x0 0x0", "button 0x110 false", "sync"]);
-        assert_eq!(r.said(), [json!({"event": "input_paused", "why": "locked"})]);
+        assert_eq!(
+            r.fake.take(),
+            ["key 30 false", "mods 0x0 0x0", "button 0x110 false", "sync"]
+        );
+        assert_eq!(
+            r.said(),
+            [json!({"event": "input_paused", "why": "locked"})]
+        );
         assert!(r.session.held().is_empty() && r.session.paused());
         // Everything while locked is dropped, not queued.
-        r.frame(40, 2, json!([{"t":"k","code":31,"p":true},{"t":"text","s":"hunter2"}]));
+        r.frame(
+            40,
+            2,
+            json!([{"t":"k","code":31,"p":true},{"t":"text","s":"hunter2"}]),
+        );
         r.session.tick(r.at(60));
         assert!(r.fake.take().is_empty());
         assert!(r.said().is_empty());
@@ -2208,12 +2616,32 @@ mod tests {
         // gate is read before every event, not once per frame.
         let c = Arc::clone(&r.fake.compositor);
         let fake = r.fake.clone();
-        r.session.backend = Box::new(Hook { inner: fake, after: 1, n: 0, then: Box::new(move || *c.lock().expect("c") = Some(true)) });
-        r.frame(0, 1, json!([{"t":"m","dx":1,"dy":0},{"t":"m","dx":2,"dy":0},{"t":"text","s":"secret"}]));
+        r.session.backend = Box::new(Hook {
+            inner: fake,
+            after: 1,
+            n: 0,
+            then: Box::new(move || *c.lock().expect("c") = Some(true)),
+        });
+        r.frame(
+            0,
+            1,
+            json!([{"t":"m","dx":1,"dy":0},{"t":"m","dx":2,"dy":0},{"t":"text","s":"secret"}]),
+        );
         let log = r.fake.take();
-        assert_eq!(log.first().map(String::as_str), Some("motion 1 0"), "{log:?}");
-        assert!(!log.iter().any(|l| l == "motion 2 0" || l.starts_with("text")), "{log:?}");
-        assert_eq!(r.said(), [json!({"event": "input_paused", "why": "locked"})]);
+        assert_eq!(
+            log.first().map(String::as_str),
+            Some("motion 1 0"),
+            "{log:?}"
+        );
+        assert!(
+            !log.iter()
+                .any(|l| l == "motion 2 0" || l.starts_with("text")),
+            "{log:?}"
+        );
+        assert_eq!(
+            r.said(),
+            [json!({"event": "input_paused", "why": "locked"})]
+        );
     }
 
     /// A backend that runs `then` after its `after`-th call.
@@ -2277,9 +2705,18 @@ mod tests {
         r.frame(0, 1, json!([{"t":"k","code":30,"p":true}]));
         r.fake.take();
         r.grant.store(false, Ordering::SeqCst);
-        assert!(matches!(r.frame(10, 2, json!([{"t":"m","dx":5,"dy":5}])), Step::End(Why::NotAllowed, _)));
-        assert!(r.fake.take().is_empty(), "a frame after the grant was lowered was applied");
-        assert!(matches!(r.session.tick(r.at(20)), Step::End(Why::NotAllowed, _)));
+        assert!(matches!(
+            r.frame(10, 2, json!([{"t":"m","dx":5,"dy":5}])),
+            Step::End(Why::NotAllowed, _)
+        ));
+        assert!(
+            r.fake.take().is_empty(),
+            "a frame after the grant was lowered was applied"
+        );
+        assert!(matches!(
+            r.session.tick(r.at(20)),
+            Step::End(Why::NotAllowed, _)
+        ));
         r.session.end(Some((Why::NotAllowed, "x".into())));
         assert_eq!(r.fake.take(), ["key 30 false", "mods 0x0 0x0", "sync"]);
         assert_eq!(r.said()[0]["event"], "input_closed");
@@ -2297,7 +2734,10 @@ mod tests {
         assert!(r.fake.take().is_empty());
         r.session.tick(r.at(1_251));
         assert_eq!(r.fake.take(), ["button 0x110 false", "sync"]);
-        assert_eq!(r.said(), [json!({"event": "input_released", "why": "lease"})]);
+        assert_eq!(
+            r.said(),
+            [json!({"event": "input_released", "why": "lease"})]
+        );
         assert_eq!(r.session.tick_every(), IDLE_TICK);
         // Nothing held: no lease to run out.
         r.session.tick(r.at(5_000));
@@ -2307,11 +2747,26 @@ mod tests {
     #[test]
     fn ending_the_channel_releases_everything_held() {
         let mut r = rig("end");
-        r.frame(0, 1, json!([{"t":"k","code":125,"p":true},{"t":"b","b":"right","p":true}]));
+        r.frame(
+            0,
+            1,
+            json!([{"t":"k","code":125,"p":true},{"t":"b","b":"right","p":true}]),
+        );
         r.fake.take();
         r.session.end(None);
-        assert_eq!(r.fake.take(), ["key 125 false", "mods 0x0 0x0", "button 0x111 false", "sync"]);
-        assert!(r.said().is_empty(), "the phone closed it itself: nothing to explain");
+        assert_eq!(
+            r.fake.take(),
+            [
+                "key 125 false",
+                "mods 0x0 0x0",
+                "button 0x111 false",
+                "sync"
+            ]
+        );
+        assert!(
+            r.said().is_empty(),
+            "the phone closed it itself: nothing to explain"
+        );
         assert!(read_held(&r.dir.join("input-held.json")).is_none());
     }
 
@@ -2321,12 +2776,21 @@ mod tests {
         for i in 0..MAX_FRAMES_PER_SEC as u64 {
             assert_eq!(r.frame(i, i + 1, json!([{"t":"hold"}])), Step::Go);
         }
-        assert!(matches!(r.frame(999, 9_999, json!([{"t":"hold"}])), Step::End(Why::Refused, _)));
+        assert!(matches!(
+            r.frame(999, 9_999, json!([{"t":"hold"}])),
+            Step::End(Why::Refused, _)
+        ));
         let mut r = rig("textrate");
         for i in 0..4 {
-            assert_eq!(r.frame(i, i + 1, json!([{"t":"text","s":"a".repeat(1_000)}])), Step::Go);
+            assert_eq!(
+                r.frame(i, i + 1, json!([{"t":"text","s":"a".repeat(1_000)}])),
+                Step::Go
+            );
         }
-        assert!(matches!(r.frame(5, 9, json!([{"t":"text","s":"b"}])), Step::End(Why::Refused, _)));
+        assert!(matches!(
+            r.frame(5, 9, json!([{"t":"text","s":"b"}])),
+            Step::End(Why::Refused, _)
+        ));
         // A new second starts afresh.
         let mut r = rig("textrate2");
         for i in 0..4 {
@@ -2338,27 +2802,55 @@ mod tests {
     #[test]
     fn text_with_more_distinct_characters_than_a_keymap_holds_is_typed_in_runs() {
         let mut r = rig("text");
-        let s: String = (0..250u32).map(|i| char::from_u32(0x4e00 + i).expect("char")).collect();
+        let s: String = (0..250u32)
+            .map(|i| char::from_u32(0x4e00 + i).expect("char"))
+            .collect();
         r.frame(0, 1, json!([{"t":"text","s":s}]));
         let log = r.fake.take();
         let maps: Vec<&String> = log.iter().filter(|l| l.starts_with("keymap")).collect();
         assert_eq!(maps, ["keymap 200", "keymap 50"]);
-        assert_eq!(log.iter().filter(|l| l.ends_with("true") && l.starts_with("text")).count(), 250);
+        assert_eq!(
+            log.iter()
+                .filter(|l| l.ends_with("true") && l.starts_with("text"))
+                .count(),
+            250
+        );
         // Each character is pressed then released, never left down.
         assert!(r.session.held().is_empty());
         r.frame(10, 2, json!([{"t":"text","s":"aba"}]));
-        assert_eq!(r.fake.take(), ["keymap 2", "text 1 true", "text 1 false", "text 2 true", "text 2 false", "text 1 true", "text 1 false"]);
+        assert_eq!(
+            r.fake.take(),
+            [
+                "keymap 2",
+                "text 1 true",
+                "text 1 false",
+                "text 2 true",
+                "text 2 false",
+                "text 1 true",
+                "text 1 false"
+            ]
+        );
     }
 
     #[test]
     fn recovery_releases_keys_and_clicks_buttons_only_when_unlocked() {
-        let held = Held { keys: BTreeSet::from([30]), buttons: BTreeSet::from([0x110]), text_keys: BTreeSet::from([3]) };
+        let held = Held {
+            keys: BTreeSet::from([30]),
+            buttons: BTreeSet::from([0x110]),
+            text_keys: BTreeSet::from([3]),
+        };
         let mut f = Fake::default();
         let left = recover(&mut f, &held, false);
-        assert_eq!(f.take(), ["key 30 false", "key 3 false", "mods 0x0 0x0", "sync"]);
+        assert_eq!(
+            f.take(),
+            ["key 30 false", "key 3 false", "mods 0x0 0x0", "sync"]
+        );
         assert_eq!(left.buttons, BTreeSet::from([0x110]));
         let left = recover(&mut f, &left, true);
-        assert_eq!(f.take(), ["button 0x110 true", "button 0x110 false", "sync"]);
+        assert_eq!(
+            f.take(),
+            ["button 0x110 true", "button 0x110 false", "sync"]
+        );
         assert!(left.is_empty());
     }
 
@@ -2379,12 +2871,26 @@ mod tests {
         // And a phone with no grant, which every phone starts as.
         let id = {
             let mut store = state.devices().expect("store");
-            store.pair(&rime_remote_core::b64_encode(&[7; 32]), "Pixel", 1, false).expect("pair").id
+            store
+                .pair(&rime_remote_core::b64_encode(&[7; 32]), "Pixel", 1, false)
+                .expect("pair")
+                .id
         };
-        let v: Value = serde_json::from_slice(&open(&state, &id, Scope::Full, req).expect_err("opened")).expect("json");
+        let v: Value =
+            serde_json::from_slice(&open(&state, &id, Scope::Full, req).expect_err("opened"))
+                .expect("json");
         assert_eq!(v["code"], "not_allowed", "{v}");
-        assert!(v["message"].as_str().unwrap_or_default().contains("rime remote devices grant Pixel input on"), "{v}");
-        let v: Value = serde_json::from_slice(&open(&state, &id, Scope::Full, br#"{"cmd":"input","v":2}"#).expect_err("opened")).expect("json");
+        assert!(
+            v["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("rime remote devices grant Pixel input on"),
+            "{v}"
+        );
+        let v: Value = serde_json::from_slice(
+            &open(&state, &id, Scope::Full, br#"{"cmd":"input","v":2}"#).expect_err("opened"),
+        )
+        .expect("json");
         assert_eq!(v["code"], "bad_request", "{v}");
         let _ = std::fs::remove_dir_all(dir);
     }
@@ -2393,21 +2899,49 @@ mod tests {
     fn layouts_become_include_keymaps_and_nothing_else_gets_into_one() {
         use wayland::Layout;
         let de = Layout::from_names("de", "nodeadkeys").keymap();
-        assert!(de.contains(r#"include "pc+de(nodeadkeys)+inet(evdev)""#), "{de}");
+        assert!(
+            de.contains(r#"include "pc+de(nodeadkeys)+inet(evdev)""#),
+            "{de}"
+        );
         let two = Layout::from_names("us,ru", ",phonetic").keymap();
-        assert!(two.contains(r#"include "pc+us+ru(phonetic):2+inet(evdev)""#), "{two}");
-        for bad in [("us\"};", ""), ("us", "x) }; xkb_symbols { include \"evil"), ("", ""), ("a,b,c,d,e", "")] {
-            assert_eq!(Layout::from_names(bad.0, bad.1), Layout { layouts: vec!["us".into()], variants: vec![] }, "{bad:?}");
+        assert!(
+            two.contains(r#"include "pc+us+ru(phonetic):2+inet(evdev)""#),
+            "{two}"
+        );
+        for bad in [
+            ("us\"};", ""),
+            ("us", "x) }; xkb_symbols { include \"evil"),
+            ("", ""),
+            ("a,b,c,d,e", ""),
+        ] {
+            assert_eq!(
+                Layout::from_names(bad.0, bad.1),
+                Layout {
+                    layouts: vec!["us".into()],
+                    variants: vec![]
+                },
+                "{bad:?}"
+            );
         }
         let t = wayland::text_keymap(&['é', '\n', '"']);
-        assert!(t.contains("maximum = 12;") && t.contains("<I9> = 9;") && t.contains("key <I9> { [ U00E9 ] };"), "{t}");
-        assert!(t.contains("key <I10> { [ Return ] };") && t.contains("key <I11> { [ U0022 ] };"), "{t}");
+        assert!(
+            t.contains("maximum = 12;")
+                && t.contains("<I9> = 9;")
+                && t.contains("key <I9> { [ U00E9 ] };"),
+            "{t}"
+        );
+        assert!(
+            t.contains("key <I10> { [ Return ] };") && t.contains("key <I11> { [ U0022 ] };"),
+            "{t}"
+        );
     }
 
     /// A scripted compositor on the other end of a socket pair: answers the
     /// registry with `globals`, every `sync` with `done`, and records every
     /// request as (object, opcode, body).
-    fn compositor(globals: &'static [&'static str]) -> (UnixStream, Arc<Mutex<Vec<(u32, u16, Vec<u8>)>>>) {
+    fn compositor(
+        globals: &'static [&'static str],
+    ) -> (UnixStream, Arc<Mutex<Vec<(u32, u16, Vec<u8>)>>>) {
         let (ours, theirs) = UnixStream::pair().expect("pair");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
@@ -2459,12 +2993,17 @@ mod tests {
         (ours, seen)
     }
 
-    const ALL: &[&str] = &["wl_seat", "zwlr_virtual_pointer_manager_v1", "zwp_virtual_keyboard_manager_v1"];
+    const ALL: &[&str] = &[
+        "wl_seat",
+        "zwlr_virtual_pointer_manager_v1",
+        "zwp_virtual_keyboard_manager_v1",
+    ];
 
     #[test]
     fn the_devices_are_made_then_warmed_up_with_one_motion_there_and_back() {
         let (sock, seen) = compositor(ALL);
-        let w = wayland::Wayland::over(sock, &wayland::Layout::from_names("us", "")).expect("connect");
+        let w =
+            wayland::Wayland::over(sock, &wayland::Layout::from_names("us", "")).expect("connect");
         let log = seen.lock().expect("log").clone();
         let shape: Vec<(u32, u16)> = log.iter().map(|(o, op, _)| (*o, *op)).collect();
         // get_registry, sync (callback 3), bind ×3 (seat 4, pointers 5,
@@ -2472,37 +3011,70 @@ mod tests {
         // 8, sync, then motion+frame, motion+frame, sync.
         assert_eq!(
             shape,
-            [(1, 1), (1, 0), (2, 0), (2, 0), (2, 0), (5, 0), (6, 0), (6, 0), (8, 0), (1, 0), (7, 0), (7, 4), (7, 0), (7, 4), (1, 0)],
+            [
+                (1, 1),
+                (1, 0),
+                (2, 0),
+                (2, 0),
+                (2, 0),
+                (5, 0),
+                (6, 0),
+                (6, 0),
+                (8, 0),
+                (1, 0),
+                (7, 0),
+                (7, 4),
+                (7, 0),
+                (7, 4),
+                (1, 0)
+            ],
         );
         let dx = |b: &Vec<u8>| i32::from_le_bytes(b[4..8].try_into().expect("4"));
-        assert_eq!((dx(&log[10].2), dx(&log[12].2)), (256, -256), "+1 then -1 in 24.8 fixed point");
+        assert_eq!(
+            (dx(&log[10].2), dx(&log[12].2)),
+            (256, -256),
+            "+1 then -1 in 24.8 fixed point"
+        );
         assert!(w.gone().is_none());
     }
 
     #[test]
     fn a_text_keymap_is_taken_before_the_first_key_of_it() {
         let (sock, seen) = compositor(ALL);
-        let mut w = wayland::Wayland::over(sock, &wayland::Layout::from_names("us", "")).expect("connect");
+        let mut w =
+            wayland::Wayland::over(sock, &wayland::Layout::from_names("us", "")).expect("connect");
         seen.lock().expect("log").clear();
         w.text_keymap(&['é']).expect("keymap");
         w.text_key(1, true).expect("key");
         w.text_key(1, false).expect("key");
         w.sync().expect("sync");
-        let shape: Vec<(u32, u16)> = seen.lock().expect("log").iter().map(|(o, op, _)| (*o, *op)).collect();
+        let shape: Vec<(u32, u16)> = seen
+            .lock()
+            .expect("log")
+            .iter()
+            .map(|(o, op, _)| (*o, *op))
+            .collect();
         // keymap on the text keyboard (9), its modifiers zeroed, a sync the
         // compositor answered, and only then the key.
         assert_eq!(shape, [(9, 0), (9, 2), (1, 0), (9, 1), (9, 1), (1, 0)]);
         // The same keymap again is not uploaded again.
         seen.lock().expect("log").clear();
         w.text_keymap(&['é']).expect("keymap");
-        let shape: Vec<(u32, u16)> = seen.lock().expect("log").iter().map(|(o, op, _)| (*o, *op)).collect();
+        let shape: Vec<(u32, u16)> = seen
+            .lock()
+            .expect("log")
+            .iter()
+            .map(|(o, op, _)| (*o, *op))
+            .collect();
         assert_eq!(shape, [(1, 0)]);
     }
 
     #[test]
     fn a_compositor_without_virtual_input_is_refused() {
         let (sock, _) = compositor(&["wl_seat", "wl_compositor"]);
-        let err = wayland::Wayland::over(sock, &wayland::Layout::from_names("us", "")).err().expect("refused");
+        let err = wayland::Wayland::over(sock, &wayland::Layout::from_names("us", ""))
+            .err()
+            .expect("refused");
         assert!(err.contains("does not take virtual input"), "{err}");
     }
 }
