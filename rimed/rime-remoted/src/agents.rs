@@ -1000,6 +1000,30 @@ mod tests {
     }
 
     #[test]
+    fn a_granted_peer_that_asks_too_often_is_told_busy_before_rime_agentd() {
+        let (state, c) = state_with("agents-rate");
+        set(&state, &c.id, Some(AgentGrant::View));
+        let agentd = Path::new("/nonexistent/agentd.sock");
+        let ask = || -> Value {
+            serde_json::from_slice(&answer(&state, agentd, &c.id, LIST_VERB, br#"{"cmd":"peer_agents"}"#)).expect("json")
+        };
+        for n in 0..MAX_ASKS {
+            assert_eq!(ask()["kind"], "unavailable", "ask {n} was not let through");
+        }
+        assert_eq!(ask()["kind"], "busy", "the request rate was not kept");
+        // Another computer's requests are its own.
+        let other = state
+            .devices()
+            .expect("store")
+            .pair_computer(&[8u8; 32], &state.identity.public_bytes(), "lab", vec![], None, 2)
+            .expect("paired");
+        set(&state, &other.id, Some(AgentGrant::View));
+        let v: Value =
+            serde_json::from_slice(&answer(&state, agentd, &other.id, LIST_VERB, br#"{"cmd":"peer_agents"}"#)).expect("json");
+        assert_eq!(v["kind"], "unavailable", "{v}");
+    }
+
+    #[test]
     fn requests_and_attaches_are_capped_per_computer() {
         let (state, c) = state_with("agents-caps");
         let now = Instant::now();
