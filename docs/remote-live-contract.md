@@ -1724,9 +1724,9 @@ Data from the receiver, one JSON line each:
   match never gets its name, because `rime-agentd` removes its temporary file
   when the stream ends short. The same happens when the sender closes the
   channel, the session ends (removal ends it), nothing arrives for 30 s, or
-  the transfer falls behind its schedule: 60 s of grace, then 256 KiB/s from
-  the start (byte `n` is due by 60 s + n / 256 KiB, so the whole file by
-  60 s plus 1 s per 256 KiB). A computer that trickles loses its slot once it
+  the transfer falls behind its schedule: 60 s of grace, then 32 KiB/s from
+  the start (byte `n` is due by 60 s + n / 32 KiB, so the whole file by
+  60 s plus 1 s per 32 KiB; a 1 Mbit/s link keeps up at every size). A computer that trickles loses its slot once it
   is behind, not at the end. A temporary file a killed
   `rime-agentd` left behind (`.rime-save-<pid>-<seq>-<nanos>.part`, its pid no
   longer running) is removed before its next save. `rime-agentd` saves under
