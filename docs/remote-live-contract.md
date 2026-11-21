@@ -1776,10 +1776,12 @@ Nothing is ever opened without that press.
   none. It is shown in quotes with markup escaped, never as markup.
 - **The card**: a notification from "Rime Remote", summary "Open a link from
   <name>?" where the name is this computer's own record of the sender, never
-  a field of the line; body the host (with the port) first, a host longer
-  than 48 characters cut from the left at a whole label (`…evil.example`),
-  so the end that names the site is what shows, then the title in
-  quotes, then the link cut to 160 characters, all escaped; one button,
+  a field of the line; body the host (with the port) first, then the title
+  in quotes, then the link cut to 160 characters, all escaped. A host longer
+  than 48 characters is cut from the LEFT (`…login.evil.example:8443`), at a
+  whole label while a dot is still left after it, so its end shows and never
+  only a top-level label; the link line then carries the same cut host, so
+  it does not lead with the part cut away. One button,
   Open; it expires after 10 minutes (the server's expire timeout).
   Dismissed, expired, gone with its notification server, or its computer
   removed (here, or by a removal another computer passed on): the card is

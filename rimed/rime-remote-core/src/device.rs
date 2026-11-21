@@ -2013,6 +2013,7 @@ mod tests {
         let mut s = DeviceStore::default();
         let a = s.pair_computer(&raw(7), &own, "a", vec![], None, 1).expect("a");
         let b = s.pair_computer(&raw(8), &own, "b", vec![], None, 1).expect("b");
+        s.set_computer_handoff(&b.id, false).expect("cards off");
         // A key sharing b's id but not b's key.
         let mut twin = [8u8; 32];
         twin[31] = 0;
@@ -2024,6 +2025,8 @@ mod tests {
         let applied = s.apply_tombstones(&a.id, &own, &[tomb(8, 5), tomb(9, 4)], 6);
         assert_eq!(applied.removed, std::slice::from_ref(&b.id));
         assert!(s.authenticate(&key(8)).is_none());
+        // Nothing chosen for it stays: the cards switch is cleared too.
+        assert_eq!(s.find_computer(&b.id).expect("b").share.handoff, None, "a removal kept the switch");
         let unknown = s.find_computer(&Device::id_for(&key(9))).expect("recorded").clone();
         assert_eq!((unknown.revoked_ms, unknown.name.as_str()), (Some(4), "c9"));
         assert!(s.authenticate(&key(9)).is_none());

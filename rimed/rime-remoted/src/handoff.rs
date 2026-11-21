@@ -327,34 +327,54 @@ fn shown_reply(shown: bool, why: Option<&str>) -> Vec<u8> {
     v.to_string().into_bytes()
 }
 
+/// The host as the card shows it: whole up to [`HOST_SHOWN`] characters,
+/// otherwise "…" and the end of its name, then its port. The end starts at
+/// a whole label while a dot is still left after it, so the site's name
+/// shows (`…evil.example`), never a bare top-level label (`…com`). An IPv6
+/// address (in brackets) always fits.
+fn shown_host(host: &str) -> String {
+    if host.len() <= HOST_SHOWN || !host.is_ascii() || host.starts_with('[') {
+        return host.to_string();
+    }
+    let (name, port) = match host.rsplit_once(':') {
+        Some((n, _)) => (n, &host[n.len()..]),
+        None => (host, ""),
+    };
+    let keep = HOST_SHOWN - 1 - port.len();
+    let tail = &name[name.len().saturating_sub(keep)..];
+    let tail = match tail.find('.') {
+        Some(i) if tail[i + 1..].contains('.') => &tail[i + 1..],
+        _ => tail,
+    };
+    format!("…{tail}{port}")
+}
+
+/// The link as the card shows it: when the host was cut, the shown host in
+/// place of the whole one, so the line under it does not lead with the part
+/// that was cut away (`https://paypal.com.login.…`).
+fn shown_url(link: &Link, host: &str) -> String {
+    if host == link.host {
+        return link.url.clone();
+    }
+    let Some((scheme, rest)) = link.url.split_once("://") else { return link.url.clone() };
+    let path = &rest[rest.find(['/', '?', '#']).unwrap_or(rest.len())..];
+    format!("{scheme}://{host}{path}")
+}
+
 /// What the card shows: "Open a link from <Laptop>?", then the host, the
 /// title in quotes when there is one, and the link, shortened. The name is
 /// this computer's record of the sender; every part is made plain text.
-/// The host as the card shows it: whole up to [`HOST_SHOWN`] characters,
-/// otherwise "…" and its end, from the first whole label inside that end.
-fn shown_host(host: &str) -> String {
-    let chars: Vec<char> = host.chars().collect();
-    if chars.len() <= HOST_SHOWN {
-        return host.to_string();
-    }
-    let tail: String = chars[chars.len() - (HOST_SHOWN - 1)..].iter().collect();
-    let tail = match tail.find('.') {
-        Some(i) if i + 1 < tail.len() => tail[i + 1..].to_string(),
-        _ => tail,
-    };
-    format!("…{tail}")
-}
-
 pub fn card_shown(from_name: &str, link: &Link, title: Option<&str>) -> Shown {
     use crate::mirror::clean;
     let from = clean(from_name, crate::mirror::APP_CAP, 0, false);
     let from = if from.is_empty() { "a paired computer".to_string() } else { from };
-    let mut body = clean(&shown_host(&link.host), HOST_SHOWN + 1, 0, true);
+    let host = shown_host(&link.host);
+    let mut body = clean(&host, HOST_SHOWN + 1, 0, true);
     if let Some(t) = title {
         body.push_str(&format!("\n“{}”", clean(t, MAX_TITLE, 0, true)));
     }
     body.push('\n');
-    body.push_str(&clean(&link.url, URL_SHOWN, 0, true));
+    body.push_str(&clean(&shown_url(link, &host), URL_SHOWN, 0, true));
     Shown {
         app_name: "Rime Remote".into(),
         summary: format!("Open a link from {from}?"),
@@ -717,9 +737,22 @@ mod tests {
         assert!(first.chars().count() <= HOST_SHOWN, "{first}");
         // Starts at a whole label.
         assert!(first.starts_with("…login-") || first.starts_with("…secure-") || first.starts_with("…evil."), "{first}");
-        // A host that fits is whole.
+        // The line under it does not lead with the part that was cut away.
+        let url = s.body.lines().last().unwrap();
+        assert!(url.starts_with("https://…") && !url.contains("paypal") && url.ends_with(":8443/x"), "{url}");
+        // A long last label: the cut never leaves only the top-level label.
+        let label = "a".repeat(63);
+        for port in ["", ":8443"] {
+            let long = checked_url(&format!("https://paypal.com.{label}.com{port}/")).expect("ok");
+            let first = card_shown("Laptop", &long, None).body.lines().next().unwrap().to_string();
+            assert!(first.starts_with("…a") && first.ends_with(&format!("a.com{port}")), "{first}");
+            assert!(!first.contains("paypal") && first.chars().count() <= HOST_SHOWN, "{first}");
+        }
+        // A host that fits is whole, and its link line is the link.
         let fits = "a".repeat(HOST_SHOWN - 4) + ".com";
         assert_eq!(shown_host(&fits), fits);
+        let whole = checked_url(&format!("https://{fits}/p")).expect("ok");
+        assert_eq!(card_shown("Laptop", &whole, None).body.lines().last(), Some(format!("https://{fits}/p").as_str()));
     }
 
     #[test]
