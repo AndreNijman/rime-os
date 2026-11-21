@@ -154,6 +154,38 @@ impl LinkReader {
 /// computer syncs up to [`crate::files::MAX_FILE_BYTES`] to disk first.
 const OUTCOME: Duration = Duration::from_secs(150);
 
+/// How long a sender waits for any one frame while its file is on the way:
+/// the window the receiver itself gives a silent peer (three of its pings).
+///
+/// Not [`READ`]. A receiver that is alive writes a progress line every
+/// [`crate::files::WINDOW`] and a ping every [`crate::serve::PING_INTERVAL`],
+/// and nothing else: below about 0.8 Mbit/s a MiB takes longer than ten
+/// seconds to cross, so a healthy transfer could pass ten seconds with
+/// neither and was given up as "no answer". A receiver that is really gone
+/// is still noticed here, and the whole transfer keeps its deadline.
+///
+/// This is the shipped receiver's window and the least a sender waits. A
+/// receiver started with a longer `--ping-interval-ms` names its own window
+/// when it takes the file (`silent_after_ms`), and [`uploading_wait`] follows
+/// it up to [`UPLOADING_MOST`].
+const UPLOADING: Duration =
+    Duration::from_secs(crate::serve::PING_INTERVAL.as_secs() * crate::serve::LIVENESS_MISSES as u64);
+
+/// The longest window a receiver can name: three of the longest ping
+/// interval the daemon accepts. A larger number is not believed.
+const UPLOADING_MOST: Duration =
+    Duration::from_secs(crate::serve::PING_INTERVAL_RANGE.1.as_secs() * crate::serve::LIVENESS_MISSES as u64);
+
+/// How long to wait for any one frame while the file is on the way, given
+/// the receiver's acceptance: its own window, never less than [`UPLOADING`]
+/// (an older receiver names none, and waiting longer for a live one costs
+/// nothing) and never more than [`UPLOADING_MOST`].
+fn uploading_wait(accepted: &serde_json::Value) -> Duration {
+    accepted["silent_after_ms"]
+        .as_u64()
+        .map_or(UPLOADING, |ms| Duration::from_millis(ms).clamp(UPLOADING, UPLOADING_MOST))
+}
+
 /// An open session to another computer.
 pub struct Link {
     stream: Box<dyn Stream>,
@@ -371,10 +403,22 @@ impl Link {
         len: u64,
         read_at: impl Fn(&mut [u8], u64) -> std::io::Result<usize>,
     ) -> Result<serde_json::Value, String> {
-        const CH: u32 = 1;
         // The whole transfer, however the other computer paces its frames:
         // what it gives itself to receive, and the wait for its outcome.
         let deadline = Instant::now() + crate::files::budget(len) + OUTCOME;
+        self.upload_until(request, len, read_at, deadline)
+    }
+
+    /// [`Link::upload`] with the whole transfer's deadline given. No wait
+    /// for a frame runs past it.
+    fn upload_until(
+        &mut self,
+        request: &[u8],
+        len: u64,
+        read_at: impl Fn(&mut [u8], u64) -> std::io::Result<usize>,
+        deadline: Instant,
+    ) -> Result<serde_json::Value, String> {
+        const CH: u32 = 1;
         self.send(Frame::Open { channel: CH, request: request.to_vec() })?;
         let accepted = loop {
             if Instant::now() >= deadline {
@@ -393,6 +437,7 @@ impl Link {
         if accepted["reply"] != crate::files::FILE_VERB || accepted["len"].as_u64() != Some(len) {
             return Ok(accepted);
         }
+        let uploading = uploading_wait(&accepted);
         let mut lines = Lines::default();
         let mut sent = 0u64;
         let mut acked = 0u64;
@@ -409,7 +454,7 @@ impl Link {
                 }
                 sent += n as u64;
                 while sent - acked >= crate::files::IN_FLIGHT {
-                    match self.channel_line(CH, &mut lines, deadline)? {
+                    match self.channel_line(CH, &mut lines, uploading, deadline)? {
                         Some(v) if v["reply"] == "peer_file_progress" => {
                             acked = acked.max(v["got"].as_u64().unwrap_or(0).min(sent))
                         }
@@ -431,9 +476,8 @@ impl Link {
         if let Some(v) = early {
             return Ok(v);
         }
-        self.stream.wait(OUTCOME).map_err(|e| e.to_string())?;
         loop {
-            match self.channel_line(CH, &mut lines, deadline)? {
+            match self.channel_line(CH, &mut lines, OUTCOME, deadline)? {
                 Some(v) if v["reply"] == "peer_file_progress" => continue,
                 Some(v) => return Ok(v),
                 None => return Err("the other computer closed the transfer without saying whether it saved it".into()),
@@ -442,21 +486,33 @@ impl Link {
     }
 
     /// The next line the other computer wrote on `channel`, answering pings;
-    /// `None` when it closed the channel. An error once `deadline` passes.
+    /// `None` when it closed the channel. Each frame is waited for up to
+    /// `per_frame`, and never past `deadline`, which is an error.
     fn channel_line(
         &mut self,
         channel: u32,
         lines: &mut Lines,
+        per_frame: Duration,
         deadline: Instant,
     ) -> Result<Option<serde_json::Value>, String> {
+        const LATE: &str = "the other computer took too long to take the file";
         loop {
             if let Some(l) = lines.next() {
                 return serde_json::from_slice(&l).map(Some).map_err(|e| format!("an unreadable answer: {e}"));
             }
-            if Instant::now() >= deadline {
-                return Err("the other computer took too long to take the file".into());
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err(LATE.into());
             }
-            match self.next()? {
+            // A zero read timeout is refused, so never less than a millisecond.
+            let wait = per_frame.min(left).max(Duration::from_millis(1));
+            self.stream.wait(wait).map_err(|e| e.to_string())?;
+            let frame = match self.next() {
+                Ok(f) => f,
+                Err(_) if Instant::now() >= deadline => return Err(LATE.into()),
+                Err(e) => return Err(e),
+            };
+            match frame {
                 Frame::Ping { token } => self.send(Frame::Pong { token })?,
                 Frame::Data { channel: c, bytes } if c == channel => lines.push(&bytes)?,
                 Frame::Close { channel: c, .. } if c == channel => return Ok(None),
@@ -718,6 +774,188 @@ mod tests {
         assert!(reached.join().expect("thread"), "this computer's own relay was not dialled");
         assert_eq!(theirs.load(std::sync::atomic::Ordering::SeqCst), 0, "the relay the other computer named was dialled");
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_sender_waits_for_a_frame_as_long_as_the_receiver_waits_for_a_pong() {
+        // A live receiver is heard from at least once a ping interval, and
+        // it lets a silent sender go after LIVENESS_MISSES of them; the
+        // sender must not give up on it sooner, or a link slow enough that a
+        // MiB takes longer than the old ten seconds fails a healthy transfer.
+        assert!(UPLOADING > crate::serve::PING_INTERVAL);
+        assert_eq!(UPLOADING, crate::serve::PING_INTERVAL * crate::serve::LIVENESS_MISSES as u32);
+        assert!(UPLOADING > READ);
+        assert_eq!(UPLOADING, crate::serve::liveness_window(crate::serve::PING_INTERVAL));
+    }
+
+    #[test]
+    fn a_sender_waits_as_long_as_the_receiver_says_it_waits() {
+        use serde_json::json;
+        let accepted = |extra: serde_json::Value| {
+            let mut v = json!({"reply": crate::files::FILE_VERB, "len": 5});
+            if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
+                o.extend(e.clone());
+            }
+            v
+        };
+        // A receiver that names nothing (an older one): the shipped window.
+        assert_eq!(uploading_wait(&accepted(json!({}))), UPLOADING);
+        assert_eq!(uploading_wait(&accepted(json!({"silent_after_ms": "60000"}))), UPLOADING);
+        // A receiver started with pings every 40 s waits 120 s for a sign of
+        // life, and so does its sender.
+        let slow = crate::serve::liveness_window(Duration::from_secs(40));
+        let named = accepted(json!({"silent_after_ms": slow.as_millis() as u64}));
+        assert_eq!(uploading_wait(&named), Duration::from_secs(120));
+        // The longest interval the daemon accepts is followed exactly...
+        let longest = crate::serve::liveness_window(crate::serve::PING_INTERVAL_RANGE.1);
+        let named = accepted(json!({"silent_after_ms": longest.as_millis() as u64}));
+        assert_eq!(uploading_wait(&named), longest);
+        assert_eq!(longest, UPLOADING_MOST);
+        // ...and nothing past it is believed.
+        assert_eq!(uploading_wait(&accepted(json!({"silent_after_ms": u64::MAX}))), UPLOADING_MOST);
+        // A quicker receiver does not make the sender give up sooner.
+        let quick = crate::serve::liveness_window(Duration::from_millis(100));
+        let named = accepted(json!({"silent_after_ms": quick.as_millis() as u64}));
+        assert_eq!(uploading_wait(&named), UPLOADING);
+    }
+
+    /// A stream that remembers every per-read wait it is given.
+    struct Recording {
+        inner: TcpStream,
+        waits: Arc<Mutex<Vec<Duration>>>,
+    }
+
+    impl Read for Recording {
+        fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+            self.inner.read(out)
+        }
+    }
+
+    impl Write for Recording {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.inner.write(bytes)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    impl Stream for Recording {
+        fn wait(&self, d: Duration) -> std::io::Result<()> {
+            self.waits.lock().expect("waits").push(d);
+            self.inner.set_read_timeout(Some(d))
+        }
+        fn writer(&self) -> std::io::Result<Box<dyn Write + Send>> {
+            Ok(Box::new(self.inner.try_clone()?))
+        }
+        fn socket(&self) -> std::io::Result<TcpStream> {
+            self.inner.try_clone()
+        }
+    }
+
+    /// A link to a receiver on loopback that takes a `len`-byte file (its
+    /// acceptance carrying `take`'s fields too) and then sends nothing, or
+    /// only a `Close` for the file after `close_after`. It reads and drops
+    /// what arrives, so the sender never blocks writing, and lives until the
+    /// returned sender is dropped. Also: every per-read wait the link set.
+    #[allow(clippy::type_complexity)]
+    fn a_receiver(
+        len: u64,
+        take: serde_json::Value,
+        close_after: Option<Duration>,
+    ) -> (Link, std::sync::mpsc::Sender<()>, Arc<Mutex<Vec<Duration>>>) {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        let receiver_secret = [7u8; 32];
+        let receiver_key = rime_remote_core::noise::public_from_secret(&receiver_secret).expect("key");
+        let (stop, stopped) = std::sync::mpsc::channel::<()>();
+        std::thread::spawn(move || {
+            let (mut s, _) = listener.accept().expect("accept");
+            let mut hello = [0u8; 1];
+            s.read_exact(&mut hello).expect("hello");
+            let mut hs = Handshake::session_responder(&receiver_secret, rime_remote_core::REMOTE_PROTOCOL_VERSION)
+                .expect("responder");
+            let m1 = read_message(&mut s).expect("m1");
+            hs.read(&m1).expect("read m1");
+            let m2 = hs.write(b"").expect("m2");
+            write_message(&mut s, &m2).expect("write m2");
+            let mut ch = hs.into_transport().expect("transport");
+            let offer = read_message(&mut s).expect("offer");
+            assert!(matches!(Frame::decode(&ch.open(&offer).expect("open")), Ok(Frame::Open { .. })));
+            let mut reply = serde_json::json!({"reply": crate::files::FILE_VERB, "len": len});
+            if let (Some(o), Some(t)) = (reply.as_object_mut(), take.as_object()) {
+                o.extend(t.clone());
+            }
+            let sealed = ch.seal(&Frame::Control(reply.to_string().into_bytes()).encode().expect("encode")).expect("seal");
+            write_message(&mut s, &sealed).expect("take");
+            let mut drain = s.try_clone().expect("clone");
+            std::thread::spawn(move || {
+                let mut sink = [0u8; 64 * 1024];
+                while matches!(drain.read(&mut sink), Ok(n) if n > 0) {}
+            });
+            if let Some(after) = close_after {
+                std::thread::sleep(after);
+                let close = Frame::Close { channel: 1, reason: String::new() };
+                let sealed = ch.seal(&close.encode().expect("encode")).expect("seal");
+                let _ = write_message(&mut s, &sealed);
+            }
+            let _ = stopped.recv();
+            drop(s);
+        });
+        let s = TcpStream::connect(addr).expect("connect");
+        s.set_read_timeout(Some(READ)).expect("timeout");
+        let waits = Arc::new(Mutex::new(Vec::new()));
+        let recording = Recording { inner: s, waits: Arc::clone(&waits) };
+        let (stream, channel) = handshake(Box::new(recording), &[9u8; 32], &receiver_key).expect("handshake");
+        (Link { stream, channel, path: "lan", address: None }, stop, waits)
+    }
+
+    /// `upload_until` against a silent receiver with the transfer's deadline
+    /// one second away: how long it took, and what it said.
+    fn upload_to_silence(len: u64) -> (Duration, Result<serde_json::Value, String>) {
+        let (done, finished) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut link, _receiver, _) = a_receiver(len, serde_json::json!({}), None);
+            let started = Instant::now();
+            let request = br#"{"cmd":"peer_file"}"#;
+            let outcome = link.upload_until(request, len, |buf, _| Ok(buf.len()), started + Duration::from_secs(1));
+            let _ = done.send((started.elapsed(), outcome));
+        });
+        // Far below both the 45 s and the 150 s waits a capped wait replaces.
+        finished.recv_timeout(Duration::from_secs(15)).expect("the sender waited past the transfer's deadline")
+    }
+
+    #[test]
+    fn the_sender_waits_for_a_frame_as_long_as_this_receiver_said() {
+        // A receiver pinging every 40 s lets a sender be silent for 120 s;
+        // it closes the transfer soon after taking it, so the test is short.
+        let len = crate::files::IN_FLIGHT + 1;
+        let window = crate::serve::liveness_window(Duration::from_secs(40));
+        let take = serde_json::json!({"silent_after_ms": window.as_millis() as u64});
+        let (mut link, _receiver, waits) = a_receiver(len, take, Some(Duration::from_millis(300)));
+        let far = Instant::now() + Duration::from_secs(600);
+        let outcome = link.upload_until(br#"{"cmd":"peer_file"}"#, len, |buf, _| Ok(buf.len()), far);
+        assert_eq!(outcome.expect_err("closed"), "the other computer closed the transfer");
+        let waits = waits.lock().expect("waits").clone();
+        assert!(waits.contains(&Duration::from_secs(120)), "{waits:?}");
+        assert!(!waits.contains(&UPLOADING), "{waits:?}");
+    }
+
+    #[test]
+    fn no_wait_for_a_progress_line_runs_past_the_transfers_deadline() {
+        // More than the in-flight window, so the sender stops for a progress
+        // line that never comes.
+        let (took, outcome) = upload_to_silence(crate::files::IN_FLIGHT + 1);
+        assert_eq!(outcome.expect_err("nothing was saved"), "the other computer took too long to take the file");
+        assert!(took < Duration::from_secs(5), "{took:?}");
+    }
+
+    #[test]
+    fn no_wait_for_the_outcome_runs_past_the_transfers_deadline() {
+        // Every byte goes out at once; then the sender waits for the outcome.
+        let (took, outcome) = upload_to_silence(10);
+        assert_eq!(outcome.expect_err("nothing was saved"), "the other computer took too long to take the file");
+        assert!(took < Duration::from_secs(5), "{took:?}");
     }
 
     #[test]

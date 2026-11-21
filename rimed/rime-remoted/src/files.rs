@@ -294,7 +294,10 @@ fn open_incoming_with<S: Read + Write + Send + 'static>(
     let (theirs, ours) = UnixStream::pair().map_err(|e| refusal("unavailable", &e.to_string()))?;
     let len = offer.len;
     std::thread::spawn(move || arrive(ours, sink, offer, computer, files, slot));
-    Ok((theirs, json!({"reply": FILE_VERB, "len": len}).to_string().into_bytes()))
+    // How long this side lets the sender go without a frame; the sender
+    // waits as long for one of ours (`dialer::Link::upload`).
+    let silent_after_ms = crate::serve::liveness_window(state.ping_interval).as_millis() as u64;
+    Ok((theirs, json!({"reply": FILE_VERB, "len": len, "silent_after_ms": silent_after_ms}).to_string().into_bytes()))
 }
 
 /// `save_file` on `rime-agentd` for computer `sender`: the connection, taken
@@ -682,7 +685,10 @@ mod tests {
         let (sink, saved) = fake_agentd("a.txt", 5);
         let (mut ch, reply) =
             open_incoming_with(&state, &lab.id, &line, Instant::now(), |_, _| Ok(sink)).expect("taken once allowed");
-        assert_eq!(serde_json::from_slice::<Value>(&reply).expect("json")["reply"], FILE_VERB);
+        let reply: Value = serde_json::from_slice(&reply).expect("json");
+        assert_eq!(reply["reply"], FILE_VERB);
+        // The sender is told how long this side lets it be silent.
+        assert_eq!(reply["silent_after_ms"], 45_000, "{reply}");
         ch.write_all(body).expect("write");
         assert_eq!(saved.join().expect("agentd").as_deref(), Some(&body[..]));
         // The code-paired one, switched off: refused.

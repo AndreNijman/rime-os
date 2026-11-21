@@ -33,7 +33,7 @@ use std::net::{TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -90,6 +90,10 @@ struct Relay {
     /// double — in practice `wrangler dev --local` serving `relay/src/index.js`.
     /// `None` is the normal run and nothing about it changes.
     external: Option<String>,
+    /// Bytes a second the double carries from a guest to its host, 0 for as
+    /// fast as it can: a slow uplink between two computers, set by
+    /// [`Relay::throttle_guest_to_host`].
+    throttle: Arc<AtomicU64>,
 }
 
 impl Relay {
@@ -132,6 +136,7 @@ impl Relay {
                 seen: Arc::new(Mutex::new(Observed::default())),
                 cut: Arc::new(Mutex::new(Vec::new())),
                 external: Some(url),
+                throttle: Arc::new(AtomicU64::new(0)),
             };
         }
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("bind loopback");
@@ -139,19 +144,22 @@ impl Relay {
         let seen = Arc::new(Mutex::new(Observed::default()));
         let cut: Arc<Mutex<Vec<TcpStream>>> = Arc::new(Mutex::new(Vec::new()));
         let rooms: Rooms = Arc::new(Mutex::new(HashMap::new()));
+        let throttle = Arc::new(AtomicU64::new(0));
         let recorder = Arc::clone(&seen);
         let holder = Arc::clone(&cut);
+        let pace = Arc::clone(&throttle);
         std::thread::spawn(move || {
             for stream in listener.incoming().flatten() {
                 let rooms = Arc::clone(&rooms);
                 let recorder = Arc::clone(&recorder);
                 let holder = Arc::clone(&holder);
+                let pace = Arc::clone(&pace);
                 std::thread::spawn(move || {
-                    let _ = serve(stream, rooms, recorder, holder);
+                    let _ = serve(stream, rooms, recorder, holder, pace);
                 });
             }
         });
-        Relay { host: "127.0.0.1".into(), port, seen, cut, external: None }
+        Relay { host: "127.0.0.1".into(), port, seen, cut, external: None, throttle }
     }
 
     fn url(&self) -> String {
@@ -219,6 +227,20 @@ impl Relay {
         }
     }
 
+    /// Carry at most `bytes_per_second` from each guest to its host, in the
+    /// sessions joined from now on: a slow uplink, without slowing the
+    /// pairing or the pings that came before it. Setting 0 later lets a
+    /// throttled session's queue go at full speed; a session joined while it
+    /// is 0 is copied as it always was.
+    fn throttle_guest_to_host(&self, bytes_per_second: u64) {
+        assert!(
+            !self.is_external(),
+            "the throttle is the double's own, a real relay has none — the test \
+             should have skipped in external mode"
+        );
+        self.throttle.store(bytes_per_second, Ordering::SeqCst);
+    }
+
     /// Drop every connection the relay holds, the way a network change does:
     /// no close frame, no warning, a socket that simply stops being there.
     fn cut_everything(&self) {
@@ -245,6 +267,7 @@ fn serve(
     rooms: Rooms,
     seen: Arc<Mutex<Observed>>,
     cut: Arc<Mutex<Vec<TcpStream>>>,
+    throttle: Arc<AtomicU64>,
 ) -> std::io::Result<()> {
     if let Ok(s) = stream.try_clone() {
         cut.lock().expect("cut").push(s);
@@ -372,8 +395,9 @@ fn serve(
             let (a1, b1) = (host.try_clone()?, stream.try_clone()?);
             let (a2, b2) = (host, stream);
             let seen2 = Arc::clone(&seen);
-            let up = std::thread::spawn(move || copy(a1, b1, seen2));
-            let _ = copy(b2, a2, seen);
+            let up = std::thread::spawn(move || copy(a1, b1, seen2, None));
+            let pace = (throttle.load(Ordering::SeqCst) > 0).then_some(throttle);
+            let _ = copy(b2, a2, seen, pace);
             let _ = up.join();
             Ok(())
         }
@@ -391,22 +415,63 @@ fn accept(stream: &mut TcpStream, key: &str) -> std::io::Result<()> {
 }
 
 /// Copy one direction, recording every payload the operator would see.
-fn copy(mut from: TcpStream, mut to: TcpStream, seen: Arc<Mutex<Observed>>) -> std::io::Result<()> {
+///
+/// With a `throttle`, what arrives is read at once and queued, and leaves at
+/// most that many bytes a second while it is not 0: a slow link with a deep
+/// buffer in front of it, which is what a sender meets on a real uplink —
+/// its writes are taken, and its bytes, and everything it writes after
+/// them, arrive at the link's pace.
+fn copy(
+    mut from: TcpStream,
+    mut to: TcpStream,
+    seen: Arc<Mutex<Observed>>,
+    throttle: Option<Arc<AtomicU64>>,
+) -> std::io::Result<()> {
+    // The queue and the thread that drains it at the link's pace.
+    let link = match throttle {
+        Some(pace) => {
+            let (queue, frames) = std::sync::mpsc::channel::<(u8, Vec<u8>)>();
+            let mut out = to.try_clone()?;
+            let drain = std::thread::spawn(move || {
+                for (op, payload) in frames {
+                    if out.write_all(&server_frame(op, &payload)).and_then(|()| out.flush()).is_err() || op == 0x8 {
+                        break;
+                    }
+                    // The time this payload takes on a link of that rate.
+                    if let Some(ns) = (payload.len() as u64 * 1_000_000_000).checked_div(pace.load(Ordering::SeqCst)) {
+                        std::thread::sleep(Duration::from_nanos(ns));
+                    }
+                }
+            });
+            Some((queue, drain))
+        }
+        None => None,
+    };
+    let forward = |to: &mut TcpStream, op: u8, payload: Vec<u8>| -> std::io::Result<()> {
+        match &link {
+            Some((queue, _)) => queue.send((op, payload)).map_err(|_| std::io::Error::other("the link is gone")),
+            None => write_server_frame(to, op, &payload),
+        }
+    };
     while let Some((op, payload)) = read_client_frame(&mut from)? {
         match op {
             0x2 | 0x0 => {
                 seen.lock().expect("seen").payloads.push(payload.clone());
-                write_server_frame(&mut to, 0x2, &payload)?;
+                forward(&mut to, 0x2, payload)?;
             }
             0x1 => seen.lock().expect("seen").client_text.push(payload),
             0x9 => write_server_frame(&mut from, 0xa, &payload)?,
             0xa => {}
             0x8 => {
-                let _ = write_server_frame(&mut to, 0x8, &[0x03, 0xe8]);
+                let _ = forward(&mut to, 0x8, vec![0x03, 0xe8]);
                 break;
             }
             _ => break,
         }
+    }
+    if let Some((queue, drain)) = link {
+        drop(queue);
+        let _ = drain.join();
     }
     let _ = to.shutdown(std::net::Shutdown::Both);
     Ok(())
@@ -452,6 +517,12 @@ fn read_client_frame(from: &mut TcpStream) -> std::io::Result<Option<(u8, Vec<u8
 }
 
 fn write_server_frame(to: &mut TcpStream, op: u8, payload: &[u8]) -> std::io::Result<()> {
+    to.write_all(&server_frame(op, payload))?;
+    to.flush()
+}
+
+/// One unmasked, unfragmented frame, as a server sends it.
+fn server_frame(op: u8, payload: &[u8]) -> Vec<u8> {
     let mut out = vec![0x80 | op];
     let n = payload.len();
     if n < 126 {
@@ -464,8 +535,7 @@ fn write_server_frame(to: &mut TcpStream, op: u8, payload: &[u8]) -> std::io::Re
         out.extend_from_slice(&(n as u64).to_be_bytes());
     }
     out.extend_from_slice(payload);
-    to.write_all(&out)?;
-    to.flush()
+    out
 }
 
 fn send_text(to: &mut TcpStream, text: &[u8]) -> std::io::Result<()> {
@@ -521,6 +591,12 @@ impl Harness {
     /// its own relay double (which still starts, unused): two computers that
     /// share one relay.
     fn start_on(tag: &str, relay_url: Option<&str>) -> Option<Harness> {
+        Harness::start_pinging(tag, relay_url, Duration::from_millis(100))
+    }
+
+    /// [`Harness::start_on`], with the daemon measuring its connections
+    /// every `ping` instead of every 100 ms.
+    fn start_pinging(tag: &str, relay_url: Option<&str>, ping: Duration) -> Option<Harness> {
         // The relay comes up first, so the daemon's very first dial succeeds
         // and the suite is not measuring the backoff.
         let relay = Relay::start();
@@ -567,7 +643,7 @@ impl Harness {
                 // a phone and wrong for a suite that has to watch a
                 // measurement happen. The daemon clamps this at 50 ms.
                 "--ping-interval-ms",
-                "100",
+                &ping.as_millis().to_string(),
             ])
             .env("XDG_RUNTIME_DIR", &runtime)
             .env("XDG_STATE_HOME", &state)
@@ -662,6 +738,11 @@ impl Harness {
         let mut reply = String::new();
         reader.read_line(&mut reply).expect("read");
         serde_json::from_str(reply.trim()).unwrap_or_else(|e| panic!("{e}: {reply}"))
+    }
+
+    /// What `rime-remoted` has written to its log so far.
+    fn log(&self) -> String {
+        std::fs::read_to_string(self.root.join("remoted.log")).unwrap_or_default()
     }
 
     fn rendezvous(&self) -> String {
@@ -1481,19 +1562,19 @@ fn wait_for(
     last
 }
 
-/// Two computers paired over the LAN reach each other through the relay when
-/// asked (docs/remote-live-contract.md §2.15, "Dialling"): the dialler joins
-/// the other computer's rendezvous on its OWN relay (both are configured with
-/// A's here), as a guest, and runs the same session it would over the LAN.
-#[test]
-fn two_paired_computers_reach_each_other_through_the_relay() {
-    let Some(a) = Harness::start("computer-a") else {
+/// Two computers, A with its own relay and B waiting on A's, paired with a
+/// code over the LAN: the two harnesses and each one's id for the other,
+/// `(a, b, a_on_b, b_on_a)`. A pings its connections every `a_ping`. `None`
+/// when this process may not pair (it says SKIP, and why); anything else
+/// that goes wrong fails the test.
+fn two_paired_computers(tag: &str, a_ping: Duration) -> Option<(Harness, Harness, String, String)> {
+    let Some(a) = Harness::start_pinging(&format!("{tag}-a"), None, a_ping) else {
         eprintln!("SKIP: the daemons did not come up in this environment");
-        return;
+        return None;
     };
-    let Some(b) = Harness::start_on("computer-b", Some(&a.relay.url())) else {
+    let Some(b) = Harness::start_on(&format!("{tag}-b"), Some(&a.relay.url())) else {
         eprintln!("SKIP: the daemons did not come up in this environment");
-        return;
+        return None;
     };
     // B waits on A's relay, so A's relay holds both computers' hosts.
     assert!(a.hosts_seen(2), "B never waited on the relay it shares with A");
@@ -1520,7 +1601,7 @@ fn two_paired_computers_reach_each_other_through_the_relay() {
             "RIME_REQUIRE_LOCAL_ORIGIN is set, so this run was supposed to hold a real logind session: {why}"
         );
         eprintln!("SKIP: this process may not pair — {why}");
-        return;
+        return None;
     }
     let code = shown["code"].as_str().expect("a code");
     let added = b.control(
@@ -1533,6 +1614,42 @@ fn two_paired_computers_reach_each_other_through_the_relay() {
         list["computers"][0]["id"].as_str().expect("one computer").to_string()
     };
     let (a_on_b, b_on_a) = (id_on(&b), id_on(&a));
+    Some((a, b, a_on_b, b_on_a))
+}
+
+/// A file of `len` bytes that is not a repeating pattern, by what each byte is.
+fn a_body(len: usize) -> Vec<u8> {
+    (0..len).map(|i: usize| ((i * 13 + i / 509) % 256) as u8).collect()
+}
+
+/// `computer_send` of `body` as `name` from `from` to its computer `to`
+/// through the relay: the reply line.
+fn send_through_relay(from: &Harness, to: &str, name: &str, body: &[u8]) -> serde_json::Value {
+    let outbox = from.root.join("outbox");
+    std::fs::create_dir_all(&outbox).expect("mkdir");
+    std::fs::write(outbox.join(name), body).expect("write");
+    let file = std::fs::File::open(outbox.join(name)).expect("open");
+    let stream = UnixStream::connect(&from.remoted_socket).expect("connect");
+    stream.set_read_timeout(Some(Duration::from_secs(120))).ok();
+    let line = format!("{}\n", serde_json::json!({"cmd": "computer_send", "computer": to, "name": name, "via": "relay"}));
+    {
+        use std::os::fd::AsRawFd;
+        rime_remote_core::fdpass::send_with_fd(&stream, line.as_bytes(), file.as_raw_fd()).expect("send");
+    }
+    let mut reply = String::new();
+    BufReader::new(&stream).read_line(&mut reply).expect("reply");
+    serde_json::from_str(reply.trim()).expect("json")
+}
+
+/// Two computers paired over the LAN reach each other through the relay when
+/// asked (docs/remote-live-contract.md §2.15, "Dialling"): the dialler joins
+/// the other computer's rendezvous on its OWN relay (both are configured with
+/// A's here), as a guest, and runs the same session it would over the LAN.
+#[test]
+fn two_paired_computers_reach_each_other_through_the_relay() {
+    let Some((a, b, a_on_b, b_on_a)) = two_paired_computers("computer", Duration::from_millis(100)) else {
+        return;
+    };
     let guests_before = a.relay.seen().arrivals.iter().filter(|x| *x == "guest").count();
     for (from, to) in [(&b, &a_on_b), (&a, &b_on_a)] {
         let pong = from.control(&serde_json::json!({"cmd": "computer_ping", "computer": to, "via": "relay"}).to_string());
@@ -1547,25 +1664,98 @@ fn two_paired_computers_reach_each_other_through_the_relay() {
     // A file through the relay, larger than the sender keeps unacknowledged:
     // the receiver's progress lines come back the same way and every byte
     // arrives, with the session's pings answered on the way.
-    let outbox = b.root.join("outbox");
-    std::fs::create_dir_all(&outbox).expect("mkdir");
-    let body: Vec<u8> = (0..(5 * 1024 * 1024 + 11)).map(|i: usize| ((i * 13 + i / 509) % 256) as u8).collect();
-    let file = std::fs::File::open({
-        std::fs::write(outbox.join("through.bin"), &body).expect("write");
-        outbox.join("through.bin")
-    })
-    .expect("open");
-    let stream = UnixStream::connect(&b.remoted_socket).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(120))).ok();
-    let line = format!("{}\n", serde_json::json!({"cmd": "computer_send", "computer": a_on_b, "name": "through.bin", "via": "relay"}));
-    {
-        use std::os::fd::AsRawFd;
-        rime_remote_core::fdpass::send_with_fd(&stream, line.as_bytes(), file.as_raw_fd()).expect("send");
-    }
-    let mut reply = String::new();
-    BufReader::new(&stream).read_line(&mut reply).expect("reply");
-    let sent: serde_json::Value = serde_json::from_str(reply.trim()).expect("json");
+    let body = a_body(5 * 1024 * 1024 + 11);
+    let sent = send_through_relay(&b, &a_on_b, "through.bin", &body);
     assert_eq!(sent["reply"], "computer_sent", "{sent}");
     let got = std::fs::read(a.root.join("desk/Downloads/through.bin")).expect("saved on A");
     assert!(got == body, "the file through the relay differs: {} of {} bytes", got.len(), body.len());
+}
+
+/// A file over a slow link keeps its session (docs/remote-live-contract.md
+/// §2.2 `liveness`, §2.15 "Flow"): the receiving computer counts the file's
+/// own frames as signs of life, so it does not close the session while the
+/// sender's pongs wait behind the file's bytes.
+///
+/// The relay carries 1 MiB/s from B to A, so the 4 MiB the sender keeps
+/// unacknowledged takes four seconds to drain, twice the receiver's liveness
+/// window at this suite's 100 ms pings (three missed and two seconds). Before
+/// the fix, A closed the session about two seconds in and B's next write
+/// failed with "Broken pipe"; a busy computer did the same on loopback.
+#[test]
+fn a_file_over_a_slow_relay_keeps_its_session_while_the_pongs_queue_behind_it() {
+    let Some((a, b, a_on_b, _)) = two_paired_computers("slow", Duration::from_millis(100)) else {
+        return;
+    };
+    if a.relay.is_external() {
+        eprintln!(
+            "SKIP-EXTERNAL: a_file_over_a_slow_relay_keeps_its_session_while_the_pongs_queue_behind_it: the throttle is the relay double's, and this run uses a real relay"
+        );
+        return;
+    }
+    const RATE: u64 = 1024 * 1024;
+    a.relay.throttle_guest_to_host(RATE);
+    let body = a_body(5 * 1024 * 1024 + 11);
+    let started = Instant::now();
+    let sent = send_through_relay(&b, &a_on_b, "slow.bin", &body);
+    let took = started.elapsed();
+    assert_eq!(sent["reply"], "computer_sent", "{sent}\n{}", a.log());
+    // The link really was slow: longer than the window the receiver gives a
+    // silent peer, so the pongs really did arrive too late to keep it.
+    assert!(took >= Duration::from_secs(4), "the throttle did not hold: {took:?}");
+    let got = std::fs::read(a.root.join("desk/Downloads/slow.bin")).expect("saved on A");
+    assert!(got == body, "the file through the slow relay differs: {} of {} bytes", got.len(), body.len());
+    assert_eq!(a.log().matches("answered none of the last").count(), 0, "{}", a.log());
+}
+
+/// A sender over a link too slow for a progress line every ten seconds keeps
+/// waiting (docs/remote-live-contract.md §2.15, "Flow"): it gives the
+/// receiver the same window the receiver gives it, three of its pings.
+///
+/// A pings at the shipped fifteen seconds. The relay carries 64 KiB/s from B
+/// to A for the first twelve seconds, so A has fewer than 1 MiB by then:
+/// no progress line, and no ping after the one at the session's start. B
+/// has nothing to read for twelve seconds; then the link speeds up and the
+/// rest crosses at once. Before the fix B gave up after ten seconds with
+/// "no answer".
+#[test]
+fn a_sender_keeps_waiting_through_a_link_slower_than_a_progress_line_every_ten_seconds() {
+    let Some((a, b, a_on_b, _)) = two_paired_computers("quiet", Duration::from_secs(15)) else {
+        return;
+    };
+    if a.relay.is_external() {
+        eprintln!(
+            "SKIP-EXTERNAL: a_sender_keeps_waiting_through_a_link_slower_than_a_progress_line_every_ten_seconds: the throttle is the relay double's, and this run uses a real relay"
+        );
+        return;
+    }
+    const RATE: u64 = 64 * 1024;
+    const SLOW_FOR: Duration = Duration::from_secs(12);
+    // Fewer bytes than a progress line takes, in the whole slow stretch.
+    const _: () = assert!(RATE * 12 < 1024 * 1024);
+    a.relay.throttle_guest_to_host(RATE);
+    let body = a_body(4 * 1024 * 1024 + 11);
+    let sent = std::thread::scope(|s| {
+        let (done, finished) = std::sync::mpsc::channel();
+        let (b, a_on_b, body) = (&b, &a_on_b, &body);
+        s.spawn(move || {
+            let _ = done.send(send_through_relay(b, a_on_b, "quiet.bin", body));
+        });
+        std::thread::sleep(SLOW_FOR);
+        // Still on the way: the slow stretch is what the send went through
+        // (a throttle that let it all past would have finished it by now),
+        // and the sender did not give up during it.
+        match finished.try_recv() {
+            Err(std::sync::mpsc::TryRecvError::Empty) => {}
+            Ok(early) => {
+                a.relay.throttle_guest_to_host(0);
+                panic!("the send ended while the link was still slow: {early}\n{}", a.log());
+            }
+            Err(e) => panic!("the sending thread ended without a reply: {e}"),
+        }
+        a.relay.throttle_guest_to_host(0);
+        finished.recv_timeout(Duration::from_secs(120)).expect("the send finished once the link was fast")
+    });
+    assert_eq!(sent["reply"], "computer_sent", "{sent}\n{}", a.log());
+    let got = std::fs::read(a.root.join("desk/Downloads/quiet.bin")).expect("saved on A");
+    assert!(got == body, "the file through the quiet link differs: {} of {} bytes", got.len(), body.len());
 }

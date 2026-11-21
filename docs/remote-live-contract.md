@@ -217,7 +217,10 @@ features". `lan` is the current list of addresses this machine listens on
   as control is safe; the phone may then stop dialling a connection per
   terminal.
 - `liveness`: the session ping (15 s) now expects pongs; 3 missed → close the
-  connection (the phone reconnects).
+  connection (the phone reconnects). Any other frame from the device counts as
+  a sign of life too (it is sealed by the session, so it is the device, now),
+  and only pings sent after the last sign of life count as missed: a pong
+  queued behind a file the device is sending is late, not missing.
 - Relay waiting socket: a read deadline (no frame for 75 s despite 30 s pings →
   re-dial); re-dial backoff capped at **10 s** (was 60); a `409` meaning "a host
   is already waiting" is not counted as a failure.
@@ -1694,7 +1697,7 @@ them.
 
 ```json
 Open {"cmd":"peer_file","name":"notes.txt","len":1234,"sha256":"<64 lowercase hex>"}
-→ Control {"reply":"peer_file","len":1234}            then Data from the sender: exactly len bytes
+→ Control {"reply":"peer_file","len":1234,"silent_after_ms":45000}   then Data from the sender: exactly len bytes
 → Control {"reply":"error","kind":"not_shared"|"rate_limited"|"bad_request"|"too_large"|"busy"|"unavailable","message":"…"}, Close
 Data from the receiver, one JSON line each:
   {"reply":"peer_file_progress","got":1048576}         every 1 MiB received
@@ -1735,8 +1738,16 @@ Data from the receiver, one JSON line each:
   keeps at most 4 MiB unacknowledged, and while it waits it reads its frames
   and answers the receiver's pings, so a long transfer keeps its session alive
   over the LAN and the relay alike, and a slow disk slows the sender. The
-  sender gives the whole transfer the receiver's budget plus 150 s for the
-  outcome.
+  file's own frames keep the session alive on the receiver (§2.2
+  `liveness`), so a pong that waits behind up to 4 MiB on a slow link does
+  not close it. The acceptance names `silent_after_ms`, how long the receiver
+  lets the sender go without a frame (three of its pings, 45 s at the shipped
+  interval). While its bytes are on the way the sender waits that long for any
+  frame (never less than 45 s, an older receiver names none, and never more
+  than three of the longest interval `--ping-interval-ms` accepts), not the
+  10 s it gives other answers: below about 0.8 Mbit/s a MiB takes longer than
+  10 s to cross. The sender gives the whole transfer the receiver's budget
+  plus 150 s for the outcome, and no wait for one frame runs past that.
 - Saved: a notification "<computer> sent you <name>", "Saved in Downloads.
   Nothing was opened.", with one button, "Show in folder", which asks the file
   manager (`org.freedesktop.FileManager1.ShowItems`) to show the file, taken
