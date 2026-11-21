@@ -2967,12 +2967,13 @@ mod tests {
         );
     }
 
+    /// Every request a scripted compositor got, as (object, opcode, body).
+    type Requests = Arc<Mutex<Vec<(u32, u16, Vec<u8>)>>>;
+
     /// A scripted compositor on the other end of a socket pair: answers the
     /// registry with `globals`, every `sync` with `done`, and records every
     /// request as (object, opcode, body).
-    fn compositor(
-        globals: &'static [&'static str],
-    ) -> (UnixStream, Arc<Mutex<Vec<(u32, u16, Vec<u8>)>>>) {
+    fn compositor(globals: &'static [&'static str]) -> (UnixStream, Requests) {
         let (ours, theirs) = UnixStream::pair().expect("pair");
         let seen = Arc::new(Mutex::new(Vec::new()));
         let log = Arc::clone(&seen);
