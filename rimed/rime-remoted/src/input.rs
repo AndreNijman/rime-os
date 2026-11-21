@@ -2179,13 +2179,10 @@ pub mod wayland {
             let Ok(stream) = UnixStream::connect(path) else {
                 continue;
             };
-            match classify(path, &stream) {
-                Some((session, pid)) if session == display => {
-                    if !chosen.iter().any(|(p, _)| *p == pid) {
-                        chosen.push((pid, stream));
-                    }
+            if let Some((session, pid)) = classify(path, &stream) {
+                if session == display && !chosen.iter().any(|(p, _)| *p == pid) {
+                    chosen.push((pid, stream));
                 }
-                _ => {}
             }
         }
         match chosen.len() {
@@ -3907,10 +3904,10 @@ mod tests {
                 .map(|i| char::from_u32(0x4e00 + k * 5 + i).expect("char"))
                 .collect()
         };
-        let mut seq = 3;
         let mut ended = None;
         for k in 0..MAX_KEYMAPS_PER_SEC + 1 {
             r.fake.take();
+            let seq = 3 + u64::from(k);
             match r.frame(20 + u64::from(k), seq, json!([{"t":"text","s":full(k)}])) {
                 Step::Go => {}
                 end => {
@@ -3918,7 +3915,6 @@ mod tests {
                     break;
                 }
             }
-            seq += 1;
         }
         let (k, end) = ended.expect("never limited");
         assert!(
