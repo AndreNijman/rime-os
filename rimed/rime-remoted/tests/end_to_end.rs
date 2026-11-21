@@ -4563,7 +4563,7 @@ fn after_spacing() {
 #[test]
 fn a_link_offered_to_a_paired_computer_is_a_card_there_and_opens_only_when_open_is_pressed() {
     let a = harness!("handoff-a");
-    let b = harness!("handoff-b");
+    let mut b = harness!("handoff-b");
     let Some((b_on_a, a_on_b)) = pair_computers(&a, &b) else { return };
     let a_name = computer_on(&b, &a_on_b)["name"].as_str().expect("a name").to_string();
     let hello = identity_of(&a).connect(&b).expect("a peer session").call(r#"{"cmd":"remote_hello"}"#);
@@ -4656,6 +4656,14 @@ fn a_link_offered_to_a_paired_computer_is_a_card_there_and_opens_only_when_open_
     // And too soon after that.
     assert_eq!(peer.call(&card(1))["why"], "busy");
     assert_eq!(opened_links(&b), ["http://ok/path?q=1"], "something opened by itself");
+    // B gone: A says it could not be reached, and nothing waits to be sent.
+    drop(peer);
+    let _ = b.remoted.kill();
+    let _ = b.remoted.wait();
+    let (rc, said) = rime_remote(&a, &["computers", "open", &b_on_a, "https://example.com/later", "--json"], b"");
+    assert_eq!(rc, 1, "{said}");
+    let reply: serde_json::Value = serde_json::from_str(said.lines().next().unwrap_or("")).expect("json");
+    assert_eq!((reply["shown"].clone(), reply["why"].clone()), (serde_json::json!(false), serde_json::json!("offline")), "{reply}");
 }
 
 #[test]
