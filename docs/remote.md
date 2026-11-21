@@ -542,9 +542,9 @@ laptop$ rime remote computers peek desk 3
 - Raising it asks you to type the computer's name; `--yes` skips that, but it
   still only works from a terminal. Like every other switch here, only you at
   the computer can change it: an agent, a scheduled job, a phone or another
-  computer cannot. Reading or attaching to another computer's sessions must be
-  you at the computer too, so an agent on Laptop cannot reach Desk's agents
-  through it.
+  computer cannot. Listing, reading or attaching to another computer's
+  sessions must be you at the computer too, so an agent on Laptop cannot reach
+  Desk's agents through it.
 - A computer your phone introduced gets nothing until you `allow` it and then
   grant it.
 - `rime remote computers list` shows both directions on one line: what you let

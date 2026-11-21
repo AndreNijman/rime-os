@@ -723,13 +723,14 @@ fn authorized_by(
         // person's decision, like removing it. An agent could otherwise give
         // itself a way back in through another computer.
         Request::ComputerGrant { .. } => computers_caller(peer, observe, may_grant_agents),
-        // Reading or typing into another computer's agent sessions: a person
-        // here only. `rime-agentd` keeps an agent out of its siblings'
-        // terminals on one machine; one here must not get round that
-        // through another.
-        Request::ComputerAgentPeek { .. } | Request::ComputerAttach { .. } | Request::ComputerAgentResize { .. } => {
-            computers_caller(peer, observe, may_reach_agents)
-        }
+        // Listing, reading or typing into another computer's agent
+        // sessions: a person here only. `rime-agentd` keeps an agent out of
+        // its siblings' sessions on one machine; one here must not get round
+        // that through another, not even to read their command lines.
+        Request::ComputerAgents { .. }
+        | Request::ComputerAgentPeek { .. }
+        | Request::ComputerAttach { .. }
+        | Request::ComputerAgentResize { .. } => computers_caller(peer, observe, may_reach_agents),
         _ => own_user(peer),
     }
 }
@@ -836,7 +837,7 @@ pub fn may_reach_agents(origin: RequestOrigin) -> Result<(), String> {
     }
     Err(format!(
         "a {origin} request cannot read or type into another computer's agent sessions: only a person at this \
-         machine may. Run `rime remote computers peek` or `attach` from a terminal"
+         machine may. Run `rime remote computers agents`, `peek` or `attach` from a terminal"
     ))
 }
 
@@ -1884,7 +1885,10 @@ mod tests {
                     rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_grant_agents(o).is_ok()),
                     "{req:?} stopped asking the origin rule"
                 ),
-                Request::ComputerAgentPeek { .. } | Request::ComputerAttach { .. } | Request::ComputerAgentResize { .. } => {
+                Request::ComputerAgents { .. }
+                | Request::ComputerAgentPeek { .. }
+                | Request::ComputerAttach { .. }
+                | Request::ComputerAgentResize { .. } => {
                     assert_eq!(
                         verdict.is_ok(),
                         rime_agent_core::origin::observe_pid(me.pid).is_ok_and(|o| may_reach_agents(o).is_ok()),
@@ -1960,6 +1964,7 @@ mod tests {
             Request::ComputerGrant { computer: "desk".into(), agents: "off".into() },
             Request::ComputerAgentPeek { computer: "desk".into(), id: 1, bytes: Some(10) },
             Request::ComputerAttach { computer: "desk".into(), id: 1, cols: 80, rows: 24 },
+            Request::ComputerAgents { computer: "desk".into() },
             Request::ComputerAgentResize { computer: "desk".into(), id: 1, cols: 80, rows: 24 },
         ];
         for o in RequestOrigin::ALL {
@@ -1970,10 +1975,6 @@ mod tests {
                     assert!(why.contains(o.as_str()) && why.contains("rime remote computers"), "{why}");
                 }
             }
-            // Listing is the owner's, as `computers` is; the other computer
-            // still decides whether it answers.
-            let list = Request::ComputerAgents { computer: "desk".into() };
-            assert!(authorized_by(&list, Some(me), |_| Ok(*o)).is_ok(), "{o}");
         }
         for req in &gated {
             assert!(authorized_by(req, Some(me), |_| Err("no cgroup".into())).is_err());

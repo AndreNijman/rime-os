@@ -2110,11 +2110,11 @@ Open {"cmd":"peer_agent_attach","id":3,"cols":80,"rows":24}
   for one). It cannot answer `rime-agentd`'s privilege requests or grant
   anything, which go through `decide` and §7's local-origin rule.
 
-*The controlling side.* `computer_agents` is own user, any origin, like
-`computers`. `computer_agent_peek`, `computer_attach` and
-`computer_agent_resize` need a §7 local origin: an agent here may not read or
-type into another computer's sessions (that would step around `rime-agentd`'s
-own rule that one agent session never reaches another). Each request dials
+*The controlling side.* `computer_agents`, `computer_agent_peek`,
+`computer_attach` and `computer_agent_resize` need a §7 local origin: an
+agent here may not list, read or type into another computer's sessions (that
+would step around `rime-agentd`'s own rule that one agent session never
+reaches another, and a listing carries command lines). Each request dials
 the other computer (a resize too: one dial each). `computer_attach` holds
 the control connection: after its reply line the connection is the terminal,
 both ways. rime-remoted answers the other computer's keepalives while it is

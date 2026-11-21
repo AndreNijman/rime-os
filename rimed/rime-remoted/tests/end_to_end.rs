@@ -4940,6 +4940,14 @@ fn a_computer_given_view_lists_and_peeks_given_control_types_and_lowering_or_rem
     let (rc, said) = rime_remote(&b, &["computers", "agents", &a_on_b, "--json"], b"");
     assert_eq!(rc, 0, "{said}");
     assert!(said.contains("\"sessions\""), "{said}");
+    // An agent or a job on B gets nothing of A's sessions, granted or not:
+    // not even the list, which carries command lines.
+    let sid = id.to_string();
+    for args in [&["computers", "agents", &a_on_b, "--json"][..], &["computers", "peek", &a_on_b, &sid]] {
+        let (rc, said) = rime_remote_as_a_job(&b, args);
+        assert_ne!(rc, 0, "{args:?}: {said}");
+        assert!(said.contains("cannot read or type into another computer's agent sessions"), "{args:?}: {said}");
+    }
     assert_eq!(b.control(&peek)["reply"], "computer_agent_peek");
     let refused = attach_from(&b, &a_on_b, id, 80, 24).expect_err("attached with view");
     assert!(refused["message"].as_str().unwrap().contains("does not let this computer"), "{refused}");
