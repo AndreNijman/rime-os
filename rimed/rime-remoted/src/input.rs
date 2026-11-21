@@ -1789,6 +1789,26 @@ mod logind {
         display: Option<String>,
     }
 
+    impl Seen {
+        /// The watcher lost logind and starts again. `LockedHint` is unknown
+        /// (locked) until it is read again; an outstanding `Lock` stays, as
+        /// only an `Unlock` or `LockedHint` going true→false clears it, and an
+        /// `Unlock` sent while nobody listened is not known to have been.
+        fn restarted(&mut self) {
+            self.hint = None;
+        }
+
+        /// logind names the user's graphical session (`None`: there is none).
+        /// A `Lock` heard for another session is not this one's.
+        fn session(&mut self, id: Option<String>) {
+            if self.display != id {
+                self.signal = false;
+            }
+            self.no_session = id.is_none();
+            self.display = id;
+        }
+    }
+
     /// What the watcher last saw.
     #[derive(Clone)]
     pub struct Watch(Arc<Mutex<Seen>>);
@@ -1833,11 +1853,7 @@ mod logind {
                         }
                         // Whatever happened, nothing is known until the next
                         // connection says so.
-                        w2.set(|s| {
-                            s.hint = None;
-                            s.signal = false;
-                            s.display = None;
-                        });
+                        w2.set(Seen::restarted);
                         tokio::time::sleep(Duration::from_secs(2)).await;
                     }
                 });
@@ -1891,8 +1907,7 @@ mod logind {
         if display.as_str() == "/" {
             w.set(|s| {
                 s.hint = None;
-                s.no_session = true;
-                s.display = None;
+                s.session(None);
             });
             // Wait for a login: the user's Display changes.
             let _ = user_changes.next().await;
@@ -1911,9 +1926,8 @@ mod logind {
             .await?;
         let hint: bool = session.get_property("LockedHint").await?;
         w.set(|s| {
+            s.session(Some(display_id.clone()));
             s.hint = Some(hint);
-            s.no_session = false;
-            s.display = Some(display_id.clone());
         });
         // Signals can be missed; the property is read again now and then.
         let mut again = tokio::time::interval(Duration::from_secs(5));
@@ -1960,6 +1974,40 @@ mod logind {
             }
             s.hint = now;
         });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        #[test]
+        fn a_lock_outlives_the_watcher_starting_again_and_only_an_unlock_clears_it() {
+            let w = Watch(Arc::new(Mutex::new(Seen::default())));
+            w.set(|s| s.session(Some("3".into())));
+            apply_hint(&w, Some(false));
+            // Lock heard; then the bus goes and the watcher starts again.
+            w.set(|s| s.signal = true);
+            w.set(Seen::restarted);
+            assert_eq!(w.read(), (None, true));
+            // The same session again, LockedHint false: no true→false was
+            // seen, so the Lock stands.
+            w.set(|s| s.session(Some("3".into())));
+            apply_hint(&w, Some(false));
+            assert_eq!(w.read(), (Some(false), true));
+            assert_eq!(w.display().as_deref(), Some("3"));
+            // A true→false clears it.
+            apply_hint(&w, Some(true));
+            apply_hint(&w, Some(false));
+            assert_eq!(w.read(), (Some(false), false));
+            // A Lock for a session that is no longer the graphical one is
+            // not the new one's.
+            w.set(|s| s.signal = true);
+            w.set(|s| s.session(Some("7".into())));
+            assert!(!w.read().1);
+            w.set(|s| s.session(None));
+            assert!(w.no_session());
+            assert_eq!(w.display(), None);
+        }
     }
 }
 
