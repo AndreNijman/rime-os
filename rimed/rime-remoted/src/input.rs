@@ -91,6 +91,10 @@ pub const IDLE_TICK: Duration = Duration::from_millis(250);
 /// Distinct characters per text keymap. Below 247 so every keycode fits the
 /// 8..255 range an X11 client under Xwayland can receive.
 const TEXT_CHUNK: usize = 200;
+/// New text keymaps in one second. Each is compiled by the compositor, so
+/// text that needs more than this (every word in characters the keymap has
+/// not seen) ends the channel. Typing reuses the keymap it has.
+pub const MAX_KEYMAPS_PER_SEC: u32 = 20;
 
 /// Keys a phone may never press: a touchpad needs none of them, and a
 /// keyboard grant must not be a way to turn the computer off or suspend it.
@@ -718,11 +722,44 @@ pub enum Step {
     End(Why, String),
 }
 
-/// Frames and text in the current second.
+/// Frames, text and text keymaps in the current second.
 struct Rate {
     start: Instant,
     frames: u32,
     text: usize,
+    keymaps: u32,
+}
+
+/// How `chars` is typed when the text keyboard has the keymap `map`: each
+/// run with the keymap it needs. A run's keymap is the one before it with
+/// the run's new characters added while there is room, so text in
+/// characters it already has needs no new one; when it is full of others,
+/// a keymap of the run's own characters.
+fn text_runs(map: &[char], chars: &[char]) -> Vec<(Vec<char>, std::ops::Range<usize>)> {
+    let mut runs = Vec::new();
+    let mut cur = map.to_vec();
+    let mut i = 0;
+    while i < chars.len() {
+        let mut next = cur.clone();
+        let mut end = i;
+        while end < chars.len() {
+            if !next.contains(&chars[end]) {
+                if next.len() == TEXT_CHUNK {
+                    break;
+                }
+                next.push(chars[end]);
+            }
+            end += 1;
+        }
+        if end == i {
+            cur.clear();
+            continue;
+        }
+        runs.push((next.clone(), i..end));
+        cur = next;
+        i = end;
+    }
+    runs
 }
 
 /// One phone driving this computer: what it holds and what it may do. Pure
@@ -746,6 +783,8 @@ pub struct Session {
     /// When the tick's checks last ran, by a tick or after a frame.
     last_tick: Instant,
     rate: Rate,
+    /// The text keyboard's keymap: key `1 + i` types `text_map[i]`.
+    text_map: Vec<char>,
     crash: Option<PathBuf>,
 }
 
@@ -780,7 +819,9 @@ impl Session {
                 start: now,
                 frames: 0,
                 text: 0,
+                keymaps: 0,
             },
+            text_map: Vec::new(),
             crash,
         }
     }
@@ -892,16 +933,23 @@ impl Session {
         Ok(())
     }
 
-    fn rate_ok(&mut self, now: Instant, text: usize) -> Result<(), String> {
+    fn rate_ok(&mut self, now: Instant, text: usize, keymaps: u32) -> Result<(), String> {
         if now.duration_since(self.rate.start) >= Duration::from_secs(1) {
             self.rate = Rate {
                 start: now,
                 frames: 0,
                 text: 0,
+                keymaps: 0,
             };
         }
         self.rate.frames += 1;
         self.rate.text += text;
+        self.rate.keymaps += keymaps;
+        if self.rate.keymaps > MAX_KEYMAPS_PER_SEC {
+            return Err(format!(
+                "text needing more than {MAX_KEYMAPS_PER_SEC} new keymaps in a second"
+            ));
+        }
         if self.rate.frames > MAX_FRAMES_PER_SEC {
             return Err(format!("more than {MAX_FRAMES_PER_SEC} frames in a second"));
         }
@@ -948,7 +996,22 @@ impl Session {
                 }
             })
             .sum();
-        if let Err(why) = self.rate_ok(now, text) {
+        // The keymaps the batch's text would need, counted before any of it
+        // is typed: a batch is taken or refused whole.
+        let mut map = self.text_map.clone();
+        let mut keymaps = 0u32;
+        for e in &events {
+            if let Ev::Text(t) = e {
+                let chars: Vec<char> = t.chars().collect();
+                for (m, _) in text_runs(&map, &chars) {
+                    if m != map {
+                        keymaps += 1;
+                        map = m;
+                    }
+                }
+            }
+        }
+        if let Err(why) = self.rate_ok(now, text, keymaps) {
             return Step::End(Why::Refused, why);
         }
         // A frame sent twice (a resend after a lost write) is not applied twice.
@@ -1064,35 +1127,32 @@ impl Session {
     /// before every character; a lock mid-text stops it there.
     fn text(&mut self, s: &str) -> std::io::Result<()> {
         let chars: Vec<char> = s.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            // The longest run with at most TEXT_CHUNK distinct characters.
-            let mut distinct: Vec<char> = Vec::new();
-            let mut end = i;
-            while end < chars.len() {
-                if !distinct.contains(&chars[end]) {
-                    if distinct.len() == TEXT_CHUNK {
-                        break;
-                    }
-                    distinct.push(chars[end]);
-                }
-                end += 1;
+        for (map, run) in text_runs(&self.text_map, &chars) {
+            if map != self.text_map {
+                // Forgotten first: if the upload fails, what the compositor
+                // has is unknown.
+                self.text_map.clear();
+                self.backend.text_keymap(&map)?;
+                self.text_map = map;
             }
-            self.backend.text_keymap(&distinct)?;
-            self.held.text_keys = (1..=distinct.len() as u32).collect();
+            self.held.text_keys = (1..=self.text_map.len() as u32).collect();
             self.record();
-            for c in &chars[i..end] {
+            for c in &chars[run] {
                 if self.locked_now() {
                     self.held.text_keys.clear();
                     return self.pause();
                 }
-                let code = distinct.iter().position(|d| d == c).expect("in the keymap") as u32 + 1;
+                let code = self
+                    .text_map
+                    .iter()
+                    .position(|d| d == c)
+                    .expect("in the keymap") as u32
+                    + 1;
                 self.backend.text_key(code, true)?;
                 self.backend.text_key(code, false)?;
             }
             self.held.text_keys.clear();
             self.record();
-            i = end;
         }
         Ok(())
     }
@@ -3348,19 +3408,69 @@ mod tests {
         );
         // Each character is pressed then released, never left down.
         assert!(r.session.held().is_empty());
+        // The keymap has room for two more: they are added to it, so the 50
+        // it has keep their keys.
         r.frame(10, 2, json!([{"t":"text","s":"aba"}]));
         assert_eq!(
             r.fake.take(),
             [
-                "keymap 2",
-                "text 1 true",
-                "text 1 false",
-                "text 2 true",
-                "text 2 false",
-                "text 1 true",
-                "text 1 false"
+                "keymap 52",
+                "text 51 true",
+                "text 51 false",
+                "text 52 true",
+                "text 52 false",
+                "text 51 true",
+                "text 51 false"
             ]
         );
+    }
+
+    #[test]
+    fn text_in_characters_the_keymap_has_reuses_it_and_new_keymaps_are_limited() {
+        let mut r = rig("keymaps");
+        assert_eq!(r.frame(0, 1, json!([{"t":"text","s":"hello"}])), Step::Go);
+        assert_eq!(
+            r.fake
+                .take()
+                .iter()
+                .filter(|l| l.starts_with("keymap"))
+                .count(),
+            1
+        );
+        // Characters it already has: no new keymap, the same keys.
+        assert_eq!(r.frame(10, 2, json!([{"t":"text","s":"hole"}])), Step::Go);
+        let log = r.fake.take();
+        assert!(!log.iter().any(|l| l.starts_with("keymap")), "{log:?}");
+        assert_eq!(log[0], "text 1 true", "h is still key 1: {log:?}");
+        // Text that needs a new keymap every time (five characters it has
+        // not seen in each frame) ends the channel past the limit, and the
+        // batch over it is not typed at all.
+        let full = |k: u32| -> String {
+            (0..5)
+                .map(|i| char::from_u32(0x4e00 + k * 5 + i).expect("char"))
+                .collect()
+        };
+        let mut seq = 3;
+        let mut ended = None;
+        for k in 0..MAX_KEYMAPS_PER_SEC + 1 {
+            r.fake.take();
+            match r.frame(20 + u64::from(k), seq, json!([{"t":"text","s":full(k)}])) {
+                Step::Go => {}
+                end => {
+                    ended = Some((k, end));
+                    break;
+                }
+            }
+            seq += 1;
+        }
+        let (k, end) = ended.expect("never limited");
+        assert!(
+            matches!(end, Step::End(Why::Refused, ref m) if m.contains("keymaps")),
+            "{end:?}"
+        );
+        // "hello" took one, so the 20th frame's keymap is one too many.
+        assert_eq!(k, MAX_KEYMAPS_PER_SEC - 1);
+        assert!(r.fake.take().is_empty(), "the refused batch was typed");
     }
 
     #[test]
