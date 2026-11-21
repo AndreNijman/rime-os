@@ -3939,16 +3939,40 @@ jobs:
           skipped="$(printf '%s' "$summary" | awk '{print $7}')"
           echo "measured: passed=$passed failed=$failed skipped=$skipped"
           [ "$failed" = 0 ] || { echo "::error::$failed rime hypr-lua assertions failed"; exit 1; }
-          # Two halves: the lua_str checks need only python3 and run everywhere
-          # (2 assertions, before the compositor probe); everything after needs
+          # Two halves: the lua_str checks and the lock-restore key in
+          # appearance.lua (with its three self-test mutants) need only python3
+          # and run everywhere (6 assertions, before the compositor probe);
+          # everything after needs
           # a nested labwc + Hyprland, and the suite SKIPs (and stops) when it
           # cannot start one. A skip therefore means the compositor half did not
           # run, and only the static floor can be held.
           if [ "$skipped" -gt 0 ]; then
-              [ "$passed" -ge 2 ] || { echo "::error::only $passed rime hypr-lua assertions ran; the static lua_str half alone is 2"; exit 1; }
+              [ "$passed" -ge 6 ] || { echo "::error::only $passed rime hypr-lua assertions ran; the static half alone (lua_str + lock restore) is 6"; exit 1; }
               echo "::warning::test-rime-hypr-lua.sh ran only its static half on this runner ($passed passed, $skipped skipped) — the compositor half needs a nested labwc and ubuntu-24.04 has none, so that half is a could-not-run, not a pass. Its 22 assertions only ever run on a machine with the compositors installed."
           else
-              [ "$passed" -ge 24 ] || { echo "::error::only $passed rime hypr-lua assertions ran; a full run is the 2 static ones plus the 22 compositor ones that ran on 2026-09-18, so some no longer execute"; exit 1; }
+              [ "$passed" -ge 29 ] || { echo "::error::only $passed rime hypr-lua assertions ran; a full run is the 6 static ones plus at least the 23 compositor ones that ran on 2026-09-18 and 2026-11-22, so some no longer execute"; exit 1; }
+          fi
+
+      # A Rime Shell killed while the screen is locked and started again gets
+      # its lock back from Hyprland (misc.allow_session_lock_restore). It needs
+      # labwc, Hyprland and quickshell plus a Rime Shell with LockKeeper, none of
+      # which this runner has, so here it can only skip; the skip is said, not
+      # passed. Its static half is the lock-restore check in test-rime-hypr-lua.sh
+      # above, and the NixOS VM check hypr-lua runs the same restart for real.
+      - name: Run the Hyprland lock-restore check (nested; skips without a compositor)
+        if: ${{ !cancelled() }}
+        run: |
+          set -uo pipefail
+          rc=0; out="$(./tests/test-rime-hypr-lock-restore.sh 2>&1)" || rc=$?
+          printf '%s\n' "$out"
+          [ "$rc" = 0 ] || { echo "::error::test-rime-hypr-lock-restore.sh exited $rc"; exit 1; }
+          summary="$(printf '%s\n' "$out" | grep -E '^rime hypr-lock-restore: [0-9]+ passed, [0-9]+ failed, [0-9]+ skipped$' || true)"
+          [ -n "$summary" ] || { echo "::error::test-rime-hypr-lock-restore.sh printed no summary line"; exit 1; }
+          failed="$(printf '%s' "$summary" | awk '{print $5}')"
+          skipped="$(printf '%s' "$summary" | awk '{print $7}')"
+          [ "$failed" = 0 ] || { echo "::error::$failed rime hypr-lock-restore assertions failed"; exit 1; }
+          if [ "$skipped" -gt 0 ]; then
+              echo "::warning::test-rime-hypr-lock-restore.sh could not run here (no nested compositor or Shell): a could-not-run, not a pass."
           fi
 
       # The compositor's motion classes (UI/UX roadmap v3 Phase 20) and the
