@@ -593,6 +593,12 @@ fn received(given: Vec<Value>) -> (Vec<SessionInfo>, usize) {
     (sessions, unreadable)
 }
 
+/// The session label another computer put in its `peer_agent_attached`,
+/// made safe to print: the person here reads it in the attach messages.
+fn attached_label(answer: &Value) -> String {
+    crate::mirror::clean(answer["label"].as_str().unwrap_or(""), crate::mirror::TITLE_CAP, 0, false)
+}
+
 /// The longest text field kept from another computer's session list.
 pub const FIELD_CAP: usize = 1024;
 
@@ -731,7 +737,7 @@ pub fn attach_out(
         let message = refusal_text(&c.name, ATTACH_VERB, &answer);
         return crate::control::reply(&mut w, &Reply::Error { message });
     }
-    let label = crate::mirror::clean(answer["label"].as_str().unwrap_or(""), crate::mirror::TITLE_CAP, 0, false);
+    let label = attached_label(&answer);
     crate::control::reply(
         &mut w,
         &Reply::ComputerAttached {
@@ -1136,6 +1142,17 @@ mod tests {
         assert_eq!(hostile.cwd, "/tmp/[2J31m");
         assert_eq!((hostile.args.len(), hostile.args[0].as_str()), (64, "ab"));
         assert_eq!(hostile.title.map(|t| t.chars().count()), Some(FIELD_CAP));
+    }
+
+    #[test]
+    fn an_attach_label_from_another_computer_cannot_act_on_the_terminal() {
+        let hostile = json!({"reply": ATTACHED, "label": "\u{1b}]52;c;aGk=\u{7}fix\u{202e}\u{1b}[2Jit\n\u{9b}x"});
+        let label = attached_label(&hostile);
+        assert!(!label.chars().any(|c| c.is_control() || crate::mirror::is_bidi_control(c)), "{label:?}");
+        assert!(label.contains("fix") && label.contains("it"), "{label:?}");
+        let long = json!({"label": "l".repeat(10_000)});
+        assert!(attached_label(&long).chars().count() <= crate::mirror::TITLE_CAP + 1, "capped, with an ellipsis");
+        assert_eq!(attached_label(&json!({"label": 7})), "");
     }
 
     #[test]
