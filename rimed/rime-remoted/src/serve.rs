@@ -2114,6 +2114,25 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn no_phone_companion_or_computer_session_can_stop_or_watch_the_touchpad() {
+        // `input_stop` and `input_status` are the local control socket's, for
+        // the Shell and `rime` (§2.16). Nothing a session over the network
+        // sends reaches them: no module here answers them, no allow list
+        // names them, and no router opens them as a channel. A phone's own
+        // line goes to `rime-agentd`, which answers neither.
+        for verb in ["input_stop", "input_status"] {
+            assert!(!every_reserved_verb().contains(&verb), "{verb} is answered for a session");
+            assert!(!crate::companion::ALLOWED_VERBS.contains(&verb), "{verb}");
+            assert!(!crate::companion::allowed(Scope::Companion, Some(verb)), "{verb}");
+            assert!(!crate::computers::PEER_VERBS.contains(&verb), "{verb}");
+            let line = format!(r#"{{"cmd":"{verb}"}}"#);
+            assert!(!crate::input::is_channel(line.as_bytes()), "{verb} opens the touchpad");
+            assert!(!may_open(Scope::Companion, line.as_bytes()), "{verb}");
+            assert!(!may_open(Scope::Peer, line.as_bytes()), "{verb}");
+        }
+    }
+
+    #[test]
     fn every_channel_a_router_claims_is_decided_and_only_the_phones_open() {
         // Candidates: every name a module answers or routes, `rime-agentd`'s
         // channels, near misses and garbage. The decision is then read off

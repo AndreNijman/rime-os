@@ -96,6 +96,18 @@ const TEXT_CHUNK: usize = 200;
 /// not seen) ends the channel. Typing reuses the keymap it has.
 pub const MAX_KEYMAPS_PER_SEC: u32 = 20;
 
+/// The file the Shell watches to show "in use as a touchpad", in the runtime
+/// directory's `rime-remote` (§2.16).
+pub const STATUS_FILE: &str = "input.json";
+
+/// The most characters of a phone's name the status file carries. The name
+/// is the phone's own choice, so it is bounded where it is written.
+pub const STATUS_NAME_MAX: usize = 64;
+
+/// How long a phone stopped at the computer is refused a new channel, unless
+/// a person raises its grant again before then.
+pub const COOL_DOWN: Duration = Duration::from_secs(30);
+
 /// Keys a phone may never press: a touchpad needs none of them, and a
 /// keyboard grant must not be a way to turn the computer off or suspend it.
 pub const FORBIDDEN_KEYS: [u32; 4] = [
@@ -707,6 +719,8 @@ pub enum Why {
     Refused = 3,
     /// This process is stopping.
     Stopping = 4,
+    /// Somebody at the computer pressed Stop (`input_stop`).
+    StoppedHere = 5,
 }
 
 impl Why {
@@ -716,6 +730,7 @@ impl Why {
             Why::Unavailable => "unavailable",
             Why::Refused => "refused",
             Why::Stopping => "stopping",
+            Why::StoppedHere => "stopped",
         }
     }
 
@@ -725,6 +740,7 @@ impl Why {
             Why::Unavailable,
             Why::Refused,
             Why::Stopping,
+            Why::StoppedHere,
         ]
         .into_iter()
         .find(|w| *w as u8 == v)
@@ -1431,6 +1447,173 @@ pub fn stop_for(device: &str, why: Why) -> bool {
     }
 }
 
+/// The words the phone is told when somebody at the computer stopped it.
+pub const STOPPED_HERE: &str = "stopped at the computer";
+
+/// End the live input channel (only `device`'s, when given) because somebody
+/// at this computer asked: everything it holds is released, the phone gets
+/// `input_closed` with `stopped`, and that phone is refused a new channel for
+/// [`COOL_DOWN`], unless a person raises its grant again. The grant itself is
+/// not changed. The id of the phone stopped, if one was.
+///
+/// The start's recovery (an empty device) is never stopped this way: what it
+/// releases is what a crashed run left held.
+pub fn stop_here(device: Option<&str>, now: Instant) -> Option<String> {
+    let guard = lock_live();
+    let l = guard
+        .as_ref()
+        .filter(|l| !l.device.is_empty() && device.map_or(true, |d| d == l.device))?;
+    // The cool-down first, while the slot is still held: the phone can open
+    // again only once this channel has given the slot back, and by then it
+    // is refused.
+    lock_cooling().insert(l.device.clone(), now + COOL_DOWN);
+    l.stop.store(Why::StoppedHere as u8, Ordering::SeqCst);
+    if let Some(w) = &l.wake {
+        let _ = w.shutdown(std::net::Shutdown::Read);
+    }
+    Some(l.device.clone())
+}
+
+fn lock_cooling() -> std::sync::MutexGuard<'static, std::collections::HashMap<String, Instant>> {
+    static COOLING: OnceLock<Mutex<std::collections::HashMap<String, Instant>>> = OnceLock::new();
+    COOLING
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+}
+
+/// How long `device` is still refused after a stop at the computer.
+pub fn cool_down_left(device: &str, now: Instant) -> Option<Duration> {
+    let mut cooling = lock_cooling();
+    match cooling.get(device) {
+        Some(until) if *until > now => Some(*until - now),
+        Some(_) => {
+            cooling.remove(device);
+            None
+        }
+        None => None,
+    }
+}
+
+/// A person raised `device`'s grant again: it may open a channel at once.
+pub fn lift_cool_down(device: &str) {
+    lock_cooling().remove(device);
+}
+
+/// A phone's name as the status file and `input_status` carry it: no
+/// control, format or line-breaking characters (a name could otherwise
+/// reorder or break the Shell's line), trimmed, at most [`STATUS_NAME_MAX`]
+/// characters, and never empty.
+pub fn shown_name(name: &str) -> String {
+    let kept: String = name
+        .chars()
+        .filter(|c| {
+            !c.is_control()
+                && !matches!(
+                    c,
+                    '\u{200b}'..='\u{200f}'
+                        | '\u{2028}'..='\u{202e}'
+                        | '\u{2060}'..='\u{2069}'
+                        | '\u{feff}'
+                        | '\u{061c}'
+                )
+        })
+        .collect();
+    let shown: String = kept.trim().chars().take(STATUS_NAME_MAX).collect();
+    let shown = shown.trim_end().to_string();
+    if shown.is_empty() {
+        "a phone".to_string()
+    } else {
+        shown
+    }
+}
+
+/// The phone using this computer as a touchpad, as `input_status` answers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Shown {
+    pub device: String,
+    pub name: String,
+    pub since_ms: u64,
+}
+
+fn lock_shown() -> std::sync::MutexGuard<'static, Option<Shown>> {
+    static SHOWN: Mutex<Option<Shown>> = Mutex::new(None);
+    SHOWN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Who is using this computer as a touchpad right now, if anybody.
+pub fn shown() -> Option<Shown> {
+    lock_shown().clone()
+}
+
+/// Write the status file whole, through a rename, 0600 in a 0700 directory,
+/// as `focus.json` is: `{"v":1,"live":false}`, or with `live` true the
+/// phone's id, its [`shown_name`] and when it started. Nothing about what is
+/// typed. Called with the [`lock_shown`] lock held, so two writes never race.
+fn write_status(path: &Path, live: Option<&Shown>) -> std::io::Result<()> {
+    let dir = path.parent().unwrap_or(Path::new("."));
+    rime_agent_core::paths::ensure_private_dir(dir)?;
+    let tmp = dir.join(format!(".{STATUS_FILE}.{}", std::process::id()));
+    let body = match live {
+        Some(s) => {
+            json!({"v": 1, "live": true, "device": s.device, "name": s.name, "since_ms": s.since_ms})
+        }
+        None => json!({"v": 1, "live": false}),
+    };
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(body.to_string().as_bytes())?;
+    }
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600))?;
+    std::fs::rename(&tmp, path)
+}
+
+/// Say `live` (or not) in memory and in the status file. A file that could
+/// not be written is said in the journal; the channel goes on.
+fn set_shown(path: &Path, live: Option<Shown>) {
+    let mut shown = lock_shown();
+    if let Err(e) = write_status(path, live.as_ref()) {
+        eprintln!(
+            "rime-remoted: touchpad: could not write {}: {e}",
+            path.display()
+        );
+    }
+    *shown = live;
+}
+
+/// While this lives, the status file says the phone is using the computer;
+/// when it is dropped (also by a panic) it says nobody is.
+struct Showing {
+    path: PathBuf,
+}
+
+impl Showing {
+    fn new(path: PathBuf, device: &str, name: &str, since_ms: u64) -> Showing {
+        set_shown(
+            &path,
+            Some(Shown {
+                device: device.to_string(),
+                name: shown_name(name),
+                since_ms,
+            }),
+        );
+        Showing { path }
+    }
+}
+
+impl Drop for Showing {
+    fn drop(&mut self) {
+        set_shown(&self.path, None);
+    }
+}
+
 /// End whatever channel is live and wait up to `within` for it to have let
 /// go of everything: this process is stopping.
 pub fn shutdown(within: Duration) {
@@ -1523,6 +1706,17 @@ pub fn open(
             ),
         ));
     }
+    if let Some(left) = cool_down_left(device, Instant::now()) {
+        return Err(error(
+            "stopped",
+            &format!(
+                "this touchpad was stopped at the computer; try again in {} s, or allow it there at \
+                 once with `rime remote devices grant {} input on`",
+                left.as_secs() + u64::from(left.subsec_nanos() > 0),
+                name.as_deref().map_or(device.to_string(), shown_name)
+            ),
+        ));
+    }
     let env = env();
     if let Err(why) = env.available() {
         return Err(error("unavailable", &why));
@@ -1569,6 +1763,7 @@ pub fn open(
                 "unavailable",
                 "Rime Remote on this computer is stopping",
             )),
+            Some(Why::StoppedHere) => Err(error("stopped", STOPPED_HERE)),
             Some(_) => Err(error("unavailable", "the touchpad was stopped")),
         }
     };
@@ -1626,10 +1821,17 @@ pub fn open(
         name.unwrap_or_else(|| device.to_string()),
     );
     let opened_line = audit_open(&who.0, &who.1);
-    // The slot goes with the thread, which gives it back however it ends.
+    let showing = Showing::new(
+        env.runtime_file(STATUS_FILE),
+        &who.0,
+        &who.1,
+        rime_remote_core::now_ms(),
+    );
+    // The slot goes with the thread, which gives it back however it ends,
+    // and the status file with it, which says the end first.
     std::thread::Builder::new()
         .name("rime-input".into())
-        .spawn(move || run(session, mine, stop, slot, who))
+        .spawn(move || run(session, mine, stop, slot, showing, who))
         .map_err(|e| error("unavailable", &format!("no thread for the touchpad: {e}")))?;
     eprintln!("{opened_line}");
     Ok((
@@ -1641,15 +1843,22 @@ pub fn open(
 /// The session thread: frames in, ticks between, everything released at the
 /// end however it ends.
 fn run(
-    mut session: Session,
+    session: Session,
     sock: UnixStream,
     stop: Arc<AtomicU8>,
     slot: Slot,
+    showing: Showing,
     who: (String, String),
 ) {
     // Dropped last, even by a panic: the slot is given back after the
-    // session (whose drop lets go of what it holds) is gone.
+    // session (whose drop lets go of what it holds) is gone, and after the
+    // status file says nobody is using the computer, so it never says that
+    // over the next phone's channel.
     let _slot = slot;
+    let _showing = showing;
+    // Bound after both, so a panic drops it (letting go of what it holds)
+    // before them: parameters would be dropped after every local.
+    let mut session = session;
     let opened = Instant::now();
     let mut buf = vec![0u8; MAX_FRAME_BYTES + 1];
     let ended = loop {
@@ -1687,6 +1896,7 @@ fn run(
                     "this phone is no longer allowed to use this computer as a touchpad".into()
                 }
                 Why::Stopping => "Rime Remote on this computer is stopping".into(),
+                Why::StoppedHere => STOPPED_HERE.into(),
                 _ => String::new(),
             }
         } else {
@@ -1826,7 +2036,11 @@ impl Env {
 /// At start: begin following logind, so the first channel a phone opens
 /// finds the lock state already known instead of unknown (and refused).
 pub fn prepare() {
-    if let Env::Real = env() {
+    let env = env();
+    // A run that was killed outright may have left "live" in the file: the
+    // Shell must never show a touchpad in use that is not.
+    set_shown(&env.runtime_file(STATUS_FILE), None);
+    if let Env::Real = env {
         let _ = logind::watch();
     }
 }
@@ -3566,6 +3780,10 @@ mod tests {
 
     /// Tests that use the process's one live slot or its stub desktop, one
     /// at a time.
+    fn read_status(path: &Path) -> Value {
+        serde_json::from_slice(&std::fs::read(path).expect("status file")).expect("json")
+    }
+
     fn serial() -> std::sync::MutexGuard<'static, ()> {
         static M: Mutex<()> = Mutex::new(());
         M.lock().unwrap_or_else(|e| e.into_inner())
@@ -3680,8 +3898,18 @@ mod tests {
         );
         let (slot, stop) = reserve("pixel", None).expect("free");
         let (theirs, mine) = seqpacket_pair().expect("pair");
+        let status = dir.join(STATUS_FILE);
+        let showing = Showing::new(status.clone(), "pixel", "Pixel", 1);
+        assert_eq!(read_status(&status)["live"], true);
         let t = std::thread::spawn(move || {
-            run(session, mine, stop, slot, ("pixel".into(), "Pixel".into()))
+            run(
+                session,
+                mine,
+                stop,
+                slot,
+                showing,
+                ("pixel".into(), "Pixel".into()),
+            )
         });
         for (seq, ev) in [
             (1, json!([{"t": "k", "code": 30, "p": true}])),
@@ -3695,7 +3923,223 @@ mod tests {
         assert!(lock_live().is_none(), "the slot was kept");
         assert!(fake.take().contains(&"key 30 false".to_string()));
         assert!(read_held(&held).is_none());
+        // And the Shell is not left showing a touchpad in use.
+        assert_eq!(read_status(&status), json!({"v": 1, "live": false}));
+        assert_eq!(shown(), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A paired phone with the grant, in a fresh state.
+    fn granted_phone(tag: &str) -> (Arc<State>, PathBuf, String) {
+        let (state, sdir) = crate::serve::tests::a_state(tag);
+        let id = {
+            let mut store = state.devices().expect("store");
+            let id = store
+                .pair(&rime_remote_core::b64_encode(&[9; 32]), "Pixel", 1, false)
+                .expect("pair")
+                .id;
+            store.set_phone_input(&id, true).expect("grant");
+            id
+        };
+        (state, sdir, id)
+    }
+
+    /// Lines the session thread wrote to the phone, until one has `event`
+    /// `until` (or 5 s pass).
+    fn lines_until(sock: &UnixStream, until: &str) -> Vec<Value> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut got = Vec::new();
+        let mut buf = vec![0u8; 4096];
+        sock.set_read_timeout(Some(Duration::from_millis(50)))
+            .expect("timeout");
+        while Instant::now() < deadline {
+            match (&*sock).read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    for l in String::from_utf8_lossy(&buf[..n]).lines() {
+                        let v: Value = serde_json::from_str(l).expect("json line");
+                        let last = v["event"] == until;
+                        got.push(v);
+                        if last {
+                            return got;
+                        }
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        got
+    }
+
+    fn wait_until(what: &str, mut ok: impl FnMut() -> bool) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !ok() {
+            assert!(Instant::now() < deadline, "waited 5 s for {what}");
+            std::thread::sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn stopping_at_the_computer_lets_go_tells_the_phone_and_holds_it_off() {
+        let _s = serial();
+        let dir = fresh_stub();
+        let (state, sdir, id) = granted_phone("input-stop");
+        let status = env().runtime_file(STATUS_FILE);
+        let req = br#"{"cmd":"input","v":1}"#;
+        let (theirs, ready) = open(&state, &id, Scope::Full, req).expect("opened");
+        assert_eq!(
+            serde_json::from_slice::<Value>(&ready).expect("json")["reply"],
+            "input_ready"
+        );
+        // The status file says who, from the moment it is live.
+        let live = read_status(&status);
+        assert_eq!(live["v"], 1);
+        assert_eq!(live["live"], true);
+        assert_eq!(live["device"], id.as_str());
+        assert_eq!(live["name"], "Pixel");
+        assert!(live["since_ms"].as_u64().is_some_and(|ms| ms > 0), "{live}");
+        assert_eq!(
+            live.as_object().expect("object").len(),
+            5,
+            "nothing else in it: {live}"
+        );
+        assert_eq!(shown().map(|s| s.device), Some(id.clone()));
+        (&theirs)
+            .write_all(br#"{"seq":1,"ev":[{"t":"k","code":30,"p":true}]}"#)
+            .expect("send");
+        wait_until("the key press", || {
+            stub_actions(&dir).contains(&"key 30 true".to_string())
+        });
+        // A stop for another phone stops nothing.
+        assert_eq!(stop_here(Some("someone-else"), Instant::now()), None);
+        let at = Instant::now();
+        assert_eq!(stop_here(None, at).as_deref(), Some(id.as_str()));
+        let said = lines_until(&theirs, "input_closed");
+        let closed = said.last().expect("a line");
+        assert_eq!(closed["event"], "input_closed", "{said:?}");
+        assert_eq!(closed["why"], "stopped");
+        assert_eq!(closed["message"], STOPPED_HERE);
+        wait_until("the slot back", || lock_live().is_none());
+        // Everything held was let go, and the Shell is told nobody is on it.
+        assert!(stub_actions(&dir).contains(&"key 30 false".to_string()));
+        assert!(read_held(&env().crash_file()).is_none());
+        assert_eq!(read_status(&status), json!({"v": 1, "live": false}));
+        assert_eq!(shown(), None);
+        // The grant is as it was.
+        assert!(granted(&state, &id));
+        // The same phone is held off, with its own kind...
+        let again: Value =
+            serde_json::from_slice(&open(&state, &id, Scope::Full, req).expect_err("reopened"))
+                .expect("json");
+        assert_eq!(again["kind"], "stopped", "{again}");
+        assert!(
+            again["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("grant Pixel input on"),
+            "{again}"
+        );
+        // ...for the cool-down, and not after it.
+        assert!(cool_down_left(&id, at + COOL_DOWN - Duration::from_secs(1)).is_some());
+        assert_eq!(cool_down_left(&id, at + COOL_DOWN), None);
+        // Nothing is live now: a stop says so.
+        assert_eq!(stop_here(None, Instant::now()), None);
+        lift_cool_down(&id);
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(sdir);
+    }
+
+    #[test]
+    fn a_person_raising_the_grant_again_lifts_the_cool_down() {
+        let _s = serial();
+        let dir = fresh_stub();
+        let (state, sdir, id) = granted_phone("input-lift");
+        let req = br#"{"cmd":"input","v":1}"#;
+        let (theirs, _) = open(&state, &id, Scope::Full, req).expect("opened");
+        assert!(stop_here(Some(&id), Instant::now()).is_some());
+        let _ = lines_until(&theirs, "input_closed");
+        wait_until("the slot back", || lock_live().is_none());
+        assert!(open(&state, &id, Scope::Full, req).is_err(), "cooling down");
+        // Through the control socket's own handler, as `rime remote devices
+        // grant <phone> input on` does.
+        let r = crate::control::tests::grant(&state, &id, "on");
+        assert!(r.contains("device_granted"), "{r}");
+        let (theirs, _) = open(&state, &id, Scope::Full, req).expect("allowed again at once");
+        drop(theirs);
+        wait_until("the slot back", || lock_live().is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(sdir);
+    }
+
+    #[test]
+    fn the_starts_recovery_is_never_stopped_from_the_computer() {
+        let _s = serial();
+        let (slot, stop) = reserve("", None).expect("free");
+        assert_eq!(stop_here(None, Instant::now()), None);
+        assert_eq!(stop.load(Ordering::SeqCst), 0);
+        drop(slot);
+    }
+
+    #[test]
+    fn the_status_file_says_nobody_at_start_and_is_private() {
+        let _s = serial();
+        let dir = fresh_stub();
+        let status = env().runtime_file(STATUS_FILE);
+        // What a run killed outright would leave.
+        std::fs::write(
+            &status,
+            r#"{"v":1,"live":true,"device":"x","name":"x","since_ms":1}"#,
+        )
+        .expect("stale");
+        prepare();
+        assert_eq!(read_status(&status), json!({"v": 1, "live": false}));
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&status)
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "{mode:o}");
+        // In its own 0700 directory, written whole (no temporary left).
+        let private =
+            std::env::temp_dir().join(format!("rime-input-status-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&private);
+        let path = private.join("rime-remote").join(STATUS_FILE);
+        let s = Shown {
+            device: "d".into(),
+            name: "n".into(),
+            since_ms: 7,
+        };
+        write_status(&path, Some(&s)).expect("write");
+        let dmode = std::fs::metadata(path.parent().expect("dir"))
+            .expect("meta")
+            .permissions()
+            .mode();
+        assert_eq!(dmode & 0o777, 0o700, "{dmode:o}");
+        let names: Vec<_> = std::fs::read_dir(path.parent().expect("dir"))
+            .expect("ls")
+            .map(|e| e.expect("entry").file_name())
+            .collect();
+        assert_eq!(names, [std::ffi::OsString::from(STATUS_FILE)]);
+        assert_eq!(
+            read_status(&path),
+            json!({"v": 1, "live": true, "device": "d", "name": "n", "since_ms": 7})
+        );
+        let _ = std::fs::remove_dir_all(&private);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_phones_name_reaches_the_shell_bounded_and_without_control_characters() {
+        assert_eq!(shown_name("Pixel 8"), "Pixel 8");
+        assert_eq!(shown_name("Pix\nel\r\t\u{1b}[2J8"), "Pixel[2J8");
+        // Bidi overrides and isolates would reorder the Shell's line.
+        assert_eq!(shown_name("\u{202e}lexip\u{2066}x\u{2069}"), "lexipx");
+        assert_eq!(shown_name("a\u{200b}b\u{feff}c\u{2028}d"), "abcd");
+        assert_eq!(shown_name("   "), "a phone");
+        assert_eq!(shown_name("\u{7}\u{0}"), "a phone");
+        let long = "é".repeat(500);
+        assert_eq!(shown_name(&long).chars().count(), STATUS_NAME_MAX);
+        assert_eq!(shown_name("  Pixel  "), "Pixel");
     }
 
     #[test]

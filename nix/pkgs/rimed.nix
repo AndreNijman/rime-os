@@ -269,6 +269,7 @@ let
       "a_subagent_start_and_stop_become_one_finished_child"
       "a_task_with_two_sessions_is_refused_and_both_ids_are_named"
       "a_terminal_streams_both_ways_over_one_channel"
+      "a_touchpad_stopped_at_the_computer_lets_go_tells_the_phone_and_holds_it_off"
       "a_user_with_no_status_line_gets_no_status_line"
       "a_wrong_code_uses_the_code_up_and_with_no_screen_open_nothing_pairs"
       "an_agents_terminal_title_reaches_the_session_and_the_record"
