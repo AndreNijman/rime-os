@@ -183,16 +183,16 @@ class InputBatcherTest {
 
     @Test
     fun `the keymap count follows the computer's while every frame is applied`() {
-        val a = Keymap.EMPTY.cost(cps("hello"))
+        val a = TextKeymap.EMPTY.cost(cps("hello"))
         assertEquals(1, a.keymaps)
         assertEquals(0, a.after.cost(cps("hole")).keymaps)
         assertEquals(1, a.after.cost(cps("help")).keymaps)
-        assertEquals(2, Keymap(emptyList(), emptySet(), known = false).cost(cps("hello")).keymaps)
+        assertEquals(2, TextKeymap(emptyList(), emptySet(), known = false).cost(cps("hello")).keymaps)
     }
 
     @Test
     fun `after a pause a character the computer may have missed counts as a new keymap, once`() {
-        val k = Keymap.EMPTY.cost(cps("hello")).after.doubted()
+        val k = TextKeymap.EMPTY.cost(cps("hello")).after.doubted()
         val first = k.cost(cps("hole"))
         assertEquals(1, first.keymaps)
         assertEquals(0, first.after.cost(cps("hello")).keymaps)
@@ -216,7 +216,7 @@ class InputBatcherTest {
         val rnd = java.util.Random(7)
         repeat(300) { round ->
             val alphabet = if (round % 3 == 0) 400 else 40
-            var mine = Keymap.EMPTY
+            var mine = TextKeymap.EMPTY
             val server = mutableListOf<Int>()
             val sent = mutableListOf<List<Int>>()
             repeat(60) { step ->

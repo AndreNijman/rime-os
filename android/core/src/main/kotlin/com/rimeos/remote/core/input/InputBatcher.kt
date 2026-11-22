@@ -45,7 +45,7 @@ class InputBatcher {
     private val keymapTimes = ArrayDeque<Pair<Long, Int>>()
 
     /** The computer's text keymap as this phone works it out. */
-    private var keymap: Keymap = Keymap.EMPTY
+    private var keymap: TextKeymap = TextKeymap.EMPTY
 
     /** The last sequence number sent; the first frame is 1. */
     val lastSeq: Long get() = seq
@@ -177,7 +177,7 @@ class InputBatcher {
      */
     fun fresh() {
         forget()
-        keymap = Keymap.EMPTY
+        keymap = TextKeymap.EMPTY
     }
 
     /** The computer let go of everything (its lease ran out): so does this phone. */

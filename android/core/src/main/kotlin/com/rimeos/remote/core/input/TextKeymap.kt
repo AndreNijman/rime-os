@@ -18,12 +18,12 @@ package com.rimeos.remote.core.input
  * up (two hundred distinct characters), this phone stops following it
  * ([known] false) and counts each text at the most it could ever need.
  */
-data class Keymap(val chars: List<Int>, val doubt: Set<Int>, val known: Boolean) {
+data class TextKeymap(val chars: List<Int>, val doubt: Set<Int>, val known: Boolean) {
     /** What text would cost: keymaps, the keymap after, and a shorter prefix that costs one fewer. */
-    data class Cost(val keymaps: Int, val after: Keymap, val shorter: Int)
+    data class Cost(val keymaps: Int, val after: TextKeymap, val shorter: Int)
 
     /** After a pause: every character may be missing on the computer. */
-    fun doubted(): Keymap = copy(doubt = chars.toSet())
+    fun doubted(): TextKeymap = copy(doubt = chars.toSet())
 
     fun cost(text: List<Int>): Cost {
         if (!known) {
@@ -40,7 +40,7 @@ data class Keymap(val chars: List<Int>, val doubt: Set<Int>, val known: Boolean)
             }
             val newChars = chars + text.distinct().filter { it in adds }
             val needs = if (adds.isNotEmpty() || text.any { it in doubt }) 1 else 0
-            return Cost(needs, Keymap(newChars, doubt - text.toSet(), true), 0)
+            return Cost(needs, TextKeymap(newChars, doubt - text.toSet(), true), 0)
         }
         var m = chars
         var count = 0
@@ -52,10 +52,10 @@ data class Keymap(val chars: List<Int>, val doubt: Set<Int>, val known: Boolean)
                 m = km
             }
         }
-        return Cost(count, Keymap(m, emptySet(), true), lastNew)
+        return Cost(count, TextKeymap(m, emptySet(), true), lastNew)
     }
 
     companion object {
-        val EMPTY: Keymap = Keymap(emptyList(), emptySet(), true)
+        val EMPTY: TextKeymap = TextKeymap(emptyList(), emptySet(), true)
     }
 }
