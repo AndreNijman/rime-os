@@ -27,6 +27,11 @@ class InputBatcher {
     private val heldKeys = LinkedHashSet<Int>()
     private var scrolling = false
 
+    // What the computer holds: what has been SENT pressed and not yet released.
+    private val sentButtons = LinkedHashSet<MouseButton>()
+    private val sentKeys = LinkedHashSet<Int>()
+    private var sentScrolling = false
+
     private var carryMx = 0.0
     private var carryMy = 0.0
     private var carrySx = 0.0
@@ -127,11 +132,32 @@ class InputBatcher {
         }
     }
 
-    /** Let go of everything held, after whatever is already waiting. */
-    fun releaseAll() {
-        if (scrolling) scrollEnd()
-        for (b in heldButtons.toList()) button(b, false)
-        for (k in heldKeys.toList()) key(k, false)
+    /**
+     * The touchpad is leaving (another screen, the app in the background, the
+     * channel closing): what is waiting is dropped, and the frame returned
+     * lets go of everything the computer holds, by what was sent. Null when
+     * it holds nothing. Sent even past this phone's own frame rate: one
+     * frame more cannot reach the computer's.
+     */
+    fun letGo(now: Long): String? {
+        queue.clear()
+        heldButtons.clear()
+        heldKeys.clear()
+        scrolling = false
+        val out = mutableListOf<InputEvent>()
+        if (sentScrolling) out += InputEvent.Scroll(0.0, 0.0, stop = true)
+        for (b in sentButtons) out += InputEvent.Button(b, false)
+        for (k in sentKeys) out += InputEvent.Key(k, false)
+        sentButtons.clear()
+        sentKeys.clear()
+        sentScrolling = false
+        carrySx = 0.0
+        carrySy = 0.0
+        if (out.isEmpty()) return null
+        seq += 1
+        lastSentAt = now
+        frameTimes.addLast(now)
+        return Input.frame(seq, out)
     }
 
     /**
@@ -152,6 +178,9 @@ class InputBatcher {
         heldButtons.clear()
         heldKeys.clear()
         scrolling = false
+        sentButtons.clear()
+        sentKeys.clear()
+        sentScrolling = false
     }
 
     /** When a frame will next be due if nothing new happens, for a timer, or null. */
@@ -215,6 +244,7 @@ class InputBatcher {
                     val stop = e.stop && !more
                     if (sx != 0.0 || sy != 0.0 || stop) {
                         if (!fits(InputEvent.Scroll(sx, sy, e.finger, stop).json().toString())) break@build
+                        if (e.finger) sentScrolling = !stop
                     }
                     carrySx = px - sx
                     carrySy = py - sy
@@ -251,6 +281,11 @@ class InputBatcher {
                 else -> {
                     if (!fits(e.json().toString())) break@build
                     queue.removeFirst()
+                    when (e) {
+                        is InputEvent.Button -> if (e.pressed) sentButtons += e.button else sentButtons -= e.button
+                        is InputEvent.Key -> if (e.pressed) sentKeys += e.code else sentKeys -= e.code
+                        else -> {}
+                    }
                 }
             }
         }

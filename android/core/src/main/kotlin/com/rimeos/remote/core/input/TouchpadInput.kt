@@ -127,15 +127,18 @@ class TouchpadInput(
     }
 
     /**
-     * The screen is leaving or the channel is closing: let go of everything
-     * the pad, the buttons and the keyboard hold, before the channel goes.
+     * The screen is leaving or the channel is closing: the frame that lets go
+     * of everything the pad, the buttons and the keyboard hold on the
+     * computer, to send before the channel goes; null when nothing is held.
      */
-    fun leave() {
-        apply(gestures.cancel())
-        batcher.releaseAll()
+    fun leave(now: Long): String? {
+        gestures.cancel()
         pressedMods = emptySet()
         armed = emptySet()
         locked = emptySet()
+        downs.clear()
+        curve.reset()
+        return batcher.letGo(now)
     }
 
     /** The computer paused (locked): it let go of everything already. */

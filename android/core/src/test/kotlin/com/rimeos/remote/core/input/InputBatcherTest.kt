@@ -308,21 +308,51 @@ class InputBatcherTest {
     }
 
     @Test
-    fun `letting go releases every button and key held, and ends a scroll`() {
+    fun `letting go releases every button and key the computer holds, and ends a scroll`() {
         val b = InputBatcher()
         b.button(MouseButton.LEFT, true)
         b.key(KeyMap.LEFT_CTRL, true)
         b.key(30, true)
         b.scroll(0.0, 5.0)
         b.next(0)
-        b.releaseAll()
-        val ev = Frames.events(b.next(1)!!)
+        // Waiting, never sent: dropped, and nothing to release for it.
+        b.button(MouseButton.RIGHT, true)
+        b.text("unsent")
+        val f = b.letGo(1)!!
+        val ev = Frames.events(f)
         assertEquals(
             listOf("s" to null, "b" to false, "k" to false, "k" to false),
             ev.map { Frames.t(it) to it["p"]?.jsonPrimitive?.boolean },
         )
         assertTrue(ev[0]["stop"]!!.jsonPrimitive.boolean)
+        assertEquals(2L, Frames.seq(f))
         assertFalse(b.holding)
+        assertFalse(b.pending)
+        assertNull(b.letGo(2), "nothing held: nothing to send")
+    }
+
+    @Test
+    fun `letting go goes even when this phone's own frame rate is used up`() {
+        val b = InputBatcher()
+        b.button(MouseButton.LEFT, true)
+        var t = 0L
+        while (t < 1_000) {
+            b.motion(1.0, 0.0)
+            b.next(t)
+            t++
+        }
+        b.motion(1.0, 0.0)
+        assertNull(b.next(999))
+        assertNotNull(b.letGo(999))
+    }
+
+    @Test
+    fun `a press released before it was sent leaves nothing to let go`() {
+        val b = InputBatcher()
+        b.button(MouseButton.LEFT, true)
+        b.button(MouseButton.LEFT, false)
+        b.next(0)
+        assertNull(b.letGo(1))
     }
 
     @Test

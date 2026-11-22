@@ -163,6 +163,12 @@ class LiveTest {
         )
         assertTrue(r.has(Features.MUX_ATTACH))
         assertEquals(listOf("192.168.1.232:7717"), r.lanHints())
+        assertEquals(null, r.input, "a computer without the touchpad says nothing about it")
+        val touchpad = Agentd.readRemoteHello(
+            """{"reply":"remote","version":1,"features":["mux_attach","phone_input"],"input":"off"}""",
+        )
+        assertTrue(touchpad.has(com.rimeos.remote.core.input.Input.FEATURE))
+        assertEquals("off", touchpad.input)
         // What an old rime-remoted produces by forwarding the verb to agentd.
         val e = assertThrows<AgentError> {
             Agentd.readRemoteHello(

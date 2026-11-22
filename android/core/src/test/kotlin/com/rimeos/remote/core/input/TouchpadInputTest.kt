@@ -45,10 +45,10 @@ class TouchpadInputTest {
         t.hardware(29, pressed = true, repeat = false) // A
         frames(t, 130)
         assertTrue(t.batcher.holding)
-        t.leave()
-        val after = frames(t, 200).map { it.brief() }
+        val after = Frames.events(t.leave(200)!!).map { it.brief() }
         assertEquals(setOf("b left false", "b right false", "k 30 false"), after.toSet())
         assertFalse(t.batcher.holding)
+        assertEquals(emptyList<JsonObject>(), frames(t, 300))
     }
 
     @Test
