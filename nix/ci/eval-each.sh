@@ -183,6 +183,12 @@ if [ "$MODE" = merge ]; then
         [ -f "$d/shard" ] || continue
         parts=$((parts + 1))
         read -r k pn < "$d/shard"
+        case "$k/$pn" in
+            [1-9]*/[1-9]*) ;;
+            *) refuse "part $d has no shard number ('$k/$pn')"; continue ;;
+        esac
+        case "$k$pn" in *[!0-9]*) refuse "part $d has no shard number ('$k/$pn')"; continue ;; esac
+        [ "$k" -le "$pn" ] || refuse "part $d says shard $k of $pn"
         [ -n "$n" ] || n=$pn
         [ "$pn" = "$n" ] || refuse "part $d says shard $k of $pn, another says of $n"
         [ -z "${seen_k[$k]:-}" ] || refuse "shard $k of $n has two parts ($d and ${seen_k[$k]})"

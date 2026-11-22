@@ -130,6 +130,12 @@ k=$(grep -l . "$t/x"/eval-*/drvs.tsv | head -1); k=${k%/drvs.tsv}
 a=$(head -1 "$k/drvs.tsv" | cut -f1); grep -vF "$a" "$k/drvs.tsv" > "$k/d"; mv "$k/d" "$k/drvs.tsv"
 expect nonzero "an item marked OK with no value" -- env RIME_EVAL_OUT="$t/x.tsv" bash "$EACH" --merge "$t/x" path:.
 has "has no drvPath"
+rm -rf "$t/x"; cp -r "$t/p6" "$t/x"; echo "7 6" > "$t/x/eval-5/shard"
+expect nonzero "a part numbered past N" -- env RIME_EVAL_OUT="$t/x.tsv" bash "$EACH" --merge "$t/x" path:.
+has "shard 5 of 6 left no part"
+rm -rf "$t/x"; cp -r "$t/p6" "$t/x"; echo "x 6" > "$t/x/eval-5/shard"
+expect nonzero "a part with no shard number" -- env RIME_EVAL_OUT="$t/x.tsv" bash "$EACH" --merge "$t/x" path:.
+has "has no shard number"
 expect nonzero "--shard 7/6 does not exist" -- bash "$EACH" --shard 7/6 path:.
 expect nonzero "--shard 0/6 does not exist" -- bash "$EACH" --shard 0/6 path:.
 expect nonzero "--shard x/6 is not a number" -- bash "$EACH" --shard x/6 path:.
