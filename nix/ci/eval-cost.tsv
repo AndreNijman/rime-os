@@ -3,6 +3,7 @@
 # RIME_EVAL_DEFAULT_SECONDS (45), a stale line only skews the balance, and --merge refuses any item no shard ran.
 # Measured on GitHub-hosted ubuntu-24.04 (4 cores, 16 GB): the median seconds and the highest peak of Nix runs
 # 44968969858, 44975989375 and 44990757301 (2026-11-22), light items 4 at a time, heavy ones (eval-heavy.txt) alone.
+# nixosModules and overlays: ~1 s on the L16 (2026-11-22; no hosted figure, they only check the attrsets).
 # Refresh from a run's "Evaluate shard" logs: every "OK <item>.drvPath <s>s <MiB>MiB" line is one row.
 checks.x86_64-linux.activation	56	3252
 checks.x86_64-linux.avahi-resolvconf	25	1738
@@ -135,3 +136,5 @@ packages.x86_64-linux.rime-scx	1	133
 packages.x86_64-linux.rime-shell	3	371
 packages.x86_64-linux.rime-terminal	3	340
 packages.x86_64-linux.rimed	2	332
+nixosModules	1	0
+overlays	1	0

@@ -1,7 +1,7 @@
 # Nix CI on GitHub-hosted runners
 
 `.github/workflows/nix.yml` on `ubuntu-24.04` hosted runners (4 vCPU, 16 GB, an empty Nix store every job, no Rime
-binary cache yet, R2). Jobs: **eval** (six "Evaluate shard N" runners, each evaluating its share of the flake outputs
+binary cache yet, R2). Jobs: **eval** (eight "Evaluate shard N" runners, each evaluating its share of the flake outputs
 one per process with `nix/ci/eval-each.sh --shard K/N`), **plan** ("Evaluate and plan": merge the shards, refusing
 anything less than every output evaluated exactly once and OK, then pick the checks, leaving out the ones that PASSED
 EARLIER on the same inputs), **packages** (what many legs would
@@ -45,17 +45,26 @@ alone) are 709 s and the 123 light ones (<= 4.3 GB, 4 at a time) ~3,080 s. Check
 configurations only ~260 s, so leaving them out of the gate would save ~4 % and is not done: a broken expression
 anywhere still stops the run before any leg starts.
 
-Now: a matrix of 6 shards. `eval-each.sh --shard K/N` assigns items greedily, longest first, to the least loaded
-shard, weighting a heavy item 4x (it runs alone), so a shard's estimate is Σ heavy + Σ light / 4: 251-252 s for each
-of the 6 (`eval-each.sh --shards 6 path:.`; 1,511 s for 1 shard, against the 1,500 s measured, so the model holds for
-the single runner). Membership is a pure function of the flake's outputs and N (`strategy.job-total`, the matrix's own
+Now: a matrix of 8 shards. `eval-each.sh --shard K/N` assigns items greedily, longest first, to the least loaded
+shard, weighting a heavy item 4x (it runs alone), so a shard's estimate is Σ heavy + Σ light / 4: 186 s for each of
+the 8 (`eval-each.sh --shards 8 path:.`; 248 s for 6; 1,511 s for 1 shard, against the 1,500 s measured, so the model
+holds for the single runner). Replaying the hosted per-item times through the shard's own scheduler (lights in
+listing order, 4 at a time) gives a worst shard of 218 s for 8 (270 s for 6). Starting the lights longest first would
+make that 199 s, but it starts a shard's biggest light evaluators together: their peaks sum to ~14.9 GB in one shard,
+against ~12.2 GB in listing order and ~14.7 GB on the single runner before, so it is not done. 8, not
+6, for margin: one runner's per-item times varied by up to ~50 % between two runs of the same tree (L16 below). Membership is a pure function of the flake's outputs and N (`strategy.job-total`, the matrix's own
 size): the cost table only moves the balance. Memory per runner is unchanged (the same 4-at-a-time gate and heavy
-items alone). The plan job downloads the 6 parts and `eval-each.sh --merge` refuses a missing or duplicated part, a
+items alone). The plan job downloads the 8 parts and `eval-each.sh --merge` refuses a missing or duplicated part, a
 part from another revision, an output no shard or two shards evaluated, and an output without its drvPath and output
 path; each shard resolves its output paths itself, since the plan runner never instantiates the derivations.
 `nix/ci/check-eval-shards.py` (checks.ci, with mutants) refuses a nix.yml where a failed shard could let the plan,
-a check leg or the summary pass. Expected gate: ~250 s of evaluation + ~40 s setup and listing per shard, then
-~1 min for the plan job: about 6 min instead of 26 (modelled; the first CI run measures it).
+a check leg or the summary pass. Expected gate: ~220 s of evaluation + ~35 s setup and listing per shard, then
+~1 min for the plan job: about 5 min instead of 26 (modelled; the first CI run measures it).
+
+Measured on the L16 (16 threads, 29 GB, Nix 2.34.9, `RIME_EVAL_JOBS=4`, `--option eval-cache false`, same tree,
+2026-11-22; ~0.68x the hosted per-item time, so these show the mechanism, not the hosted minutes): one unsharded run
+1,026 s; 6 shards one after another 184-261 s each; 8 shards 136-196 s each (evaluation 127-183 s). Both merges were byte-identical to the
+unsharded `drvs.tsv`. Peak memory of one evaluator per shard 4.2-12.0 GB (the heavy items), lights <= ~3.4 GB.
 
 Why not `nix-eval-jobs` or Nix's evaluation cache: every runner starts cold (the eval cache would need to be carried
 between runs, keyed by the flake's hash, so it helps only a re-run of the same revision), and the cost is dominated by
@@ -69,7 +78,7 @@ GitHub's 6 h:
 | Limit | before | now | slowest seen |
 |---|---|---|---|
 | plan job (one runner evaluating everything) | 45 min | 25 min | 11.2 min; 25.3 min by 11-22, so it went back to 45 |
-| eval shard / plan job (11-22, the shards) | | 25 / 15 min | modelled ~5 min per shard, ~1 min plan |
+| eval shard / plan job (11-22, the shards) | | 25 / 15 min | modelled ~4 min per shard, ~1 min plan |
 | packages job | 150 min | 50 min | 23.5 min |
 | `RIME_CHECK_TIMEOUT` (the build, recorded as TIMED OUT with its time) | 9900 s | 6600 s | 3211 s |
 | check step / check job | 170 / 180 min | 115 / 125 min | 53.5 min |

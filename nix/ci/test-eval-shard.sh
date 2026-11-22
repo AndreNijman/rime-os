@@ -185,7 +185,8 @@ import sys
 s = open(sys.argv[1]).read()
 old = 'while IFS=$\'\\t\' read -r o item; do [ "$o" = "$SHARD" ] && echo "$item" >> "$work/mine"; done < "$work/assign"'
 assert s.count(old) == 1, "mutant: pattern not found"
-s = s.replace(old, old + '\n[ "$SHARD" = 2 ] && head -1 "$work/attrs" >> "$work/mine"')
+# Another shard's item (one shard 2 does not own), so it is a real cross-shard double.
+s = s.replace(old, old + '\n[ "$SHARD" = 2 ] && grep -vxFf "$work/mine" "$work/attrs" | head -1 >> "$work/mine"')
 open(sys.argv[2], "w").write(s)
 PY
 shards 6 "$t/pdup" "$t/each-dup.sh"

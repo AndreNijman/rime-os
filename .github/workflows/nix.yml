@@ -77,13 +77,13 @@ jobs:
     # here cannot leave an output unevaluated; the plan job's --merge refuses one that is). Per runner, nothing
     # changes in memory: the light items peak at ~3-4 GB, 4 at a time (the runner's core count), each started only
     # with 5 GB available; the ones in nix/ci/eval-heavy.txt (up to ~12.5 GB) run alone after them. Estimate per shard:
-    # ~250 s of evaluation (eval-each.sh --shards 6) plus setup; 25 leaves room for a slow runner.
+    # ~190 s of evaluation (eval-each.sh --shards 8) plus setup; 25 leaves room for a slow runner.
     timeout-minutes: 25
     strategy:
       # Every shard to the end, so one run names every broken output, not just the first shard's.
       fail-fast: false
       matrix:
-        shard: [1, 2, 3, 4, 5, 6]
+        shard: [1, 2, 3, 4, 5, 6, 7, 8]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
       # Nix 2.35.4, the same as the build container the checks were proven in. It authenticates GitHub fetches

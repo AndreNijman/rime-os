@@ -312,6 +312,9 @@ export FLAKE work HEAVY_MIB
 export NIX_ARGS_STR="${NIX_ARGS[*]-}"
 
 : > "$work/light"; : > "$work/alone"
+# In listing order, not longest first: longest first would take the worst of 8 shards from ~218 s to ~199 s on the
+# hosted per-item times, but it starts a shard's biggest light evaluators together, and summing their peaks puts
+# one shard at ~14.9 GB on a 16 GB runner. In listing order no shard sums above ~12.2 GB (the single runner: ~14.7).
 while read -r attr; do
     if grep -qxF "${attr%.drvPath}" "$work/heavy"; then echo "$attr" >> "$work/alone"; else echo "$attr" >> "$work/light"; fi
 done < "$work/mine"

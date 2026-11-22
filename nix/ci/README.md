@@ -9,8 +9,8 @@ nix/ci/run-checks.sh plan /work/scratch/plan        # prints WILL RUN / SKIPPED 
 nix/ci/run-checks.sh build rimed /work/scratch/res  # one check, as one matrix leg runs it
 nix/ci/run-checks.sh summary /work/scratch/plan /work/scratch/res
 nix/ci/eval-each.sh path:.                        # evaluate every output, one process each
-nix/ci/eval-each.sh --shards 6 path:.             # which shard evaluates which output, and each one's estimate
-RIME_EVAL_PART=/work/scratch/parts/eval-3 nix/ci/eval-each.sh --shard 3/6 path:.   # one shard, as one eval leg runs it
+nix/ci/eval-each.sh --shards 8 path:.             # which shard evaluates which output, and each one's estimate
+RIME_EVAL_PART=/work/scratch/parts/eval-3 nix/ci/eval-each.sh --shard 3/8 path:.   # one shard, as one eval leg runs it
 RIME_EVAL_OUT=/work/scratch/drvs.tsv nix/ci/eval-each.sh --merge /work/scratch/parts path:.   # the plan job's merge
 bash nix/ci/test-eval-shard.sh                    # the shards and the merge with a stub nix (checks.ci runs it)
 RIME_FLAKE_CHECKS_FILE=/work/scratch/plan/checks.txt tests/check-suites-run-in-ci.sh
