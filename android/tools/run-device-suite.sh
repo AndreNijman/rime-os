@@ -510,6 +510,32 @@ def machine_stub_actions():
         actions = []
     return json.dumps({"reply": "ok", "actions": actions})
 
+INPUT = os.path.join(ROOT, "input")
+
+def input_stub_actions():
+    """Every action the stub touchpad (contract §2.16) took, oldest first:
+    the pointer, buttons, scrolls and keys a phone's input reached."""
+    try:
+        with open(os.path.join(INPUT, "actions.jsonl")) as f:
+            actions = [json.loads(l) for l in f if l.strip()]
+    except FileNotFoundError:
+        actions = []
+    return json.dumps({"reply": "ok", "actions": actions})
+
+def input_stub_gate(locked):
+    """Lock or unlock the stub computer, as its touchpad's lock gate reads
+    it: logind's LockedHint, and a compositor that offers a lock notifier
+    (so no Shell lock file is needed). Written whole and renamed, so the
+    daemon never reads half a file and counts it as locked."""
+    if not isinstance(locked, bool):
+        return json.dumps({"reply": "error", "message": "locked must be true or false"})
+    os.makedirs(INPUT, exist_ok=True)
+    tmp = os.path.join(INPUT, ".sources.json.tmp")
+    with open(tmp, "w") as f:
+        json.dump({"locked_hint": locked, "lock_signal": False, "notifier": locked}, f)
+    os.replace(tmp, os.path.join(INPUT, "sources.json"))
+    return json.dumps({"reply": "ok"})
+
 DESK = os.path.join(ROOT, "desk")
 
 def desk_clipboard():
@@ -980,6 +1006,10 @@ class H(socketserver.StreamRequestHandler):
                 out = machine_stub_seed(req.get("state"))
             elif cmd == "machine_stub_actions":
                 out = machine_stub_actions()
+            elif cmd == "input_stub_actions":
+                out = input_stub_actions()
+            elif cmd == "input_stub_gate":
+                out = input_stub_gate(req.get("locked"))
             elif cmd == "desk_clipboard":
                 out = desk_clipboard()
             elif cmd == "desk_downloads":

@@ -180,6 +180,41 @@ open class Computer(private val brokerArg: String, private val lanArg: String) {
     }
 
     /**
+     * Every action the stub touchpad took, oldest first. The runner always
+     * starts rime-remoted with `RIME_REMOTED_INPUT_STUB`, so nothing a test
+     * does with the touchpad reaches the pointer or keyboard of the computer
+     * the suite runs on.
+     */
+    fun inputStubActions(): List<JSONObject> {
+        val reply = ask(JSONObject().put("cmd", "input_stub_actions").toString())
+        check(reply.optString("reply") == "ok") { "the broker did not read the stub touchpad's actions: $reply" }
+        val a = reply.getJSONArray("actions")
+        return (0 until a.length()).map { a.getJSONObject(it) }
+    }
+
+    /** Lock or unlock the stub computer, as the touchpad's lock gate reads it. */
+    fun inputStubGate(locked: Boolean) {
+        val reply = ask(JSONObject().put("cmd", "input_stub_gate").put("locked", locked).toString())
+        check(reply.optString("reply") == "ok") { "the broker did not set the stub lock: $reply" }
+    }
+
+    /** Allow or stop [device] using this computer as a touchpad, as the person at it would. */
+    fun grantInput(device: String, on: Boolean): JSONObject {
+        val reply = ask(
+            JSONObject().put("cmd", "device_grant").put("device", device).put("input", if (on) "on" else "off").toString(),
+        )
+        check(reply.optString("reply") == "device_granted") { "the computer did not change the grant: $reply" }
+        return reply
+    }
+
+    /** "Stop the touchpad" at the computer: `rime remote input stop`. */
+    fun stopInput(): JSONObject {
+        val reply = ask(JSONObject().put("cmd", "input_stop").toString())
+        check(reply.optString("reply") == "input_stopped") { "the computer did not stop the touchpad: $reply" }
+        return reply
+    }
+
+    /**
      * What the stub desktop's clipboard holds, or null when nothing wrote it.
      * The runner always starts rime-agentd with `RIME_AGENTD_DESKTOP_STUB`,
      * so "Send to Rime" never touches the clipboard of the computer the
