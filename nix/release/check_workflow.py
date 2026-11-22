@@ -18,8 +18,9 @@ Refuses, for every workflow given:
     without being restricted to refs/heads/main;
   - for nix-release.yml, an oras push (the bridge payload) before rime-bridge-payload-release signed the payload
     against files/system/trust/nixos-bridge-payload.pub, or with no --verify of the pulled-back copy after it;
-  - pull_request_target, a workflow-level permission grant, and the stand-in's test-only switches (--test-signing,
-    --allow-test-variants, RIME_TEST_BEFORE_PUSH);
+  - pull_request_target, a workflow-level permission grant, the stand-in's test-only switches (--test-signing,
+    --allow-test-variants, RIME_TEST_BEFORE_PUSH) and the VM tests' fast stage (--test-stage-level: a release stages
+    at zstd level 19, delta.md §8);
   - for nix-release.yml, a concurrency other than: group nix-release, never cancelled; or exactly PER_REF_GROUP and
     PER_REF_CANCEL below (main keeps that group and is never cancelled; other refs, which only dry-run, get a group
     of their own and cancel). Anything else could let one push cancel a release running on main;
@@ -47,8 +48,9 @@ SECRETS = ("RIME_NIX_CACHE_KEY", "RIME_CACHE_TOKEN", "RIME_R2_ACCESS_KEY_ID", "R
 PAYLOAD_RELEASE = "rime-bridge-payload-release"
 PAYLOAD_PUB = "files/system/trust/nixos-bridge-payload.pub"
 PUSH_RE = re.compile(r"oras\"?\s+push\b")
-# a test key, a test configuration (rime-vm's test account) and a shell hook from the environment
-TEST_ONLY = ("--test-signing", "--allow-test-variants", "RIME_TEST_BEFORE_PUSH")
+# a test key, a test configuration (rime-vm's test account), a shell hook from the environment and a stage below
+# level 19 (update-e2e's; `stage` takes no abbreviation of it, so the full name is the only spelling)
+TEST_ONLY = ("--test-signing", "--allow-test-variants", "RIME_TEST_BEFORE_PUSH", "--test-stage-level")
 FORK_GUARD = "github.event.pull_request.head.repo.full_name == github.repository"
 PER_REF_GROUP = "${{ github.ref == 'refs/heads/main' && 'nix-release' || format('nix-release-{0}', github.ref) }}"
 PER_REF_CANCEL = "${{ github.ref != 'refs/heads/main' }}"
@@ -338,7 +340,7 @@ def check(path):
         bad.append("workflow-level permissions must grant nothing (permissions: {})")
     for t in TEST_ONLY:
         if t in text:
-            bad.append(f"{t} is the stand-in's; it never appears in a workflow")
+            bad.append(f"{t} is for tests only; it never appears in a workflow")
     if path.endswith("nix-release.yml"):
         c = wf.get("concurrency") or {}
         fixed = c.get("group") == "nix-release" and c.get("cancel-in-progress") is False

@@ -292,6 +292,9 @@ def missing_from_error(err):
 
 # The zstd level of the Rime cache's NARs (`stage`); delta.md §8 measured it against level 3.
 STAGE_LEVEL = 19
+# `stage --test-stage-level N` stages at another level: VM tests only (update-e2e: level 19 in a 4-core VM was ~12
+# min per release). A release never passes it: check_workflow.py refuses it in every release workflow (TEST_ONLY).
+TEST_STAGE_LEVELS = range(1, STAGE_LEVEL + 1)
 
 
 def store_url(base, **params):
@@ -773,11 +776,14 @@ def cmd_stage(a):
         placeholders.append(f)
     refs = {p: i["references"] for p, i in clo["paths"].items()}
     order = topo_order(rime, refs)
+    level = STAGE_LEVEL if getattr(a, "test_stage_level", None) is None else a.test_stage_level
+    if level != STAGE_LEVEL:
+        log(f"stage: TEST zstd level {level} (a release stages at {STAGE_LEVEL})")
     if order:
         # Level 19 (delta.md §8): 14-20 % fewer bytes than zstd's default level 3 for every client, and it decodes
         # with any zstd's default window (no --long). parallel-compression: the same bytes, less wall clock.
         run(NIX + ["copy", "--no-recursive", "--to", store_url("file://" + os.path.abspath(cache), compression="zstd",
-                                                               compression_level=STAGE_LEVEL,
+                                                               compression_level=level,
                                                                parallel_compression="true")] + FRESH + order)
     for f in placeholders:
         if "rime-placeholder" not in open(f).read():
@@ -2386,10 +2392,12 @@ def main(argv=None):
         p.add_argument("--upstream", default="https://cache.nixos.org")
         p.add_argument("--upstream-key", action="append", default=[])
 
-    p = sub.add_parser("stage")
+    p = sub.add_parser("stage", allow_abbrev=False)  # --test-stage-level has one spelling (check_workflow.py)
     p.add_argument("--closure", required=True)
     p.add_argument("--split", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--test-stage-level", type=int, choices=TEST_STAGE_LEVELS, metavar="N",
+                   help=f"TESTS ONLY: zstd level N instead of {STAGE_LEVEL} (no release workflow may pass it)")
     p.set_defaults(fn=cmd_stage)
 
     p = sub.add_parser("deltas", help="build job: zstd --patch-from deltas against the previous release")
