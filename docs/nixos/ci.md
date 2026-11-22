@@ -68,7 +68,8 @@ GitHub's 6 h:
 
 | Limit | before | now | slowest seen |
 |---|---|---|---|
-| plan job | 45 min | 25 min | 11.2 min (11-22: 25.3 min, so 45; with the shards: eval 25 min, plan 15 min) |
+| plan job (one runner evaluating everything) | 45 min | 25 min | 11.2 min; 25.3 min by 11-22, so it went back to 45 |
+| eval shard / plan job (11-22, the shards) | | 25 / 15 min | modelled ~5 min per shard, ~1 min plan |
 | packages job | 150 min | 50 min | 23.5 min |
 | `RIME_CHECK_TIMEOUT` (the build, recorded as TIMED OUT with its time) | 9900 s | 6600 s | 3211 s |
 | check step / check job | 170 / 180 min | 115 / 125 min | 53.5 min |

@@ -107,9 +107,9 @@ jobs:
           kill "$mon" 2>/dev/null || true
           exit "$rc"
       # The part the plan job merges (which items this shard was given, how each went, their drvPaths and output
-      # paths). Uploaded after a failure too, for the record; the plan job does not run then.
+      # paths). Only from a shard that succeeded: the plan job does not run otherwise, and "re-run failed jobs" then
+      # uploads the shard's part once.
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
-        if: ${{ !cancelled() }}
         with:
           name: eval-${{ matrix.shard }}
           path: ${{ runner.temp }}/eval-${{ matrix.shard }}
