@@ -85,6 +85,7 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
   mutant "boot path outside the closure accepted" 'elif boot[k] not in clo:' 'elif False:'
   mutant "any signer accepted" 'if sans[0] not in signers:' 'if False:'
   mutant "any OIDC issuer accepted" 'if got != issuer:' 'if False:'
+  mutant "a reissue may repeat the ID of another candidate" '        if not held:' '        if True:'
   mutant "a channel may move backwards" 'if parse_release(new_rel) < parse_release(old_rel):' 'if False:'
   mutant "the signed digest is not compared" \
     'if (crit.get("image") or {}).get("docker-manifest-digest") != digest:' 'if False:'

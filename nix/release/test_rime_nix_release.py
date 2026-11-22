@@ -272,6 +272,26 @@ class ReleaseId(unittest.TestCase):
                             {"id": "2026.11.01.3", "os": "x", "shell": "y"}]), "2026.11.01.4")
         # same pair = a reissue keeps its ID
         self.assertEqual(f([{"id": "2026.11.01.3", "os": SHA_A, "shell": SHA_B}]), "2026.11.01.3")
+        # ... unless another candidate already holds that ID (or a newer one) for another source: runs 42907767160,
+        # 43794108179 and 44216463487 were refused "not newer" this way
+        for day, bootc, edge, want in (("2026.11.11", "2026.11.11", "2026.11.11", "2026.11.11.2"),
+                                       ("2026.11.16", "2026.11.16", "2026.11.16", "2026.11.16.2"),
+                                       ("2026.11.18", "2026.11.18.2", "2026.11.18.2", "2026.11.18.3"),
+                                       ("2026.11.18", "2026.11.18.2", "2026.11.18.4", "2026.11.18.5")):
+            b = {"id": bootc, "os": SHA_A, "shell": SHA_B}
+            e = {"id": edge, "os": "x", "shell": "y"}
+            g = lambda cands, day=day: r.next_release_id(self.script, day, SHA_A, SHA_B, cands)
+            self.assertEqual(g([b, e]), want, (bootc, edge))
+            self.assertEqual(g([e, b]), want, (bootc, edge))
+        # an OLDER other candidate leaves the reissue alone, also on a later day
+        self.assertEqual(f([{"id": "2026.11.01.3", "os": SHA_A, "shell": SHA_B},
+                            {"id": "2026.11.01.2", "os": "x", "shell": "y"}]), "2026.11.01.3")
+        self.assertEqual(r.next_release_id(self.script, "2026.11.03", SHA_A, SHA_B,
+                                           [{"id": "2026.11.01.3", "os": SHA_A, "shell": SHA_B},
+                                            {"id": "2026.10.30", "os": "x", "shell": "y"}]), "2026.11.01.3")
+        # the Nix edge itself holding this source is a reissue (publish stops at its tag before this matters)
+        self.assertEqual(f([{"id": "2026.11.01", "os": "x", "shell": "y"},
+                            {"id": "2026.11.01.2", "os": SHA_A, "shell": SHA_B}]), "2026.11.01.2")
 
 
 class Oci(unittest.TestCase):

@@ -112,6 +112,10 @@ candidates: bootc's `:daily` labels and the release named by the Nix channel doc
 reads both again immediately before it pushes, and bumps `.N` if bootc published the same ID in the meantime. The two
 pipelines do not share a concurrency group, so this re-read is the only guard; the rimeos.com chain test catches a
 duplicate if it slips through (residual risk, §17).
+A reissue (this source is the newest candidate's) is still counted on past the OTHER candidate when that one holds
+the same ID or a newer one: bootc names its release from its own `:daily` only, so after a Nix-only release X the
+next bootc release is also X, and the Nix release of that source becomes X.2 instead of being refused as "not newer"
+(runs 42907767160, 43794108179, 44216463487). On such a day bootc and Nix name the same source differently.
 
 ---
 

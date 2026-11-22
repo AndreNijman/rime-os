@@ -2094,10 +2094,25 @@ def cmd_channels(a):
 def next_release_id(script, today, os_rev, shell_rev, candidates):
     """next-release-id with its published-* inputs = the newest of the candidates (bootc :daily, Nix edge)."""
     cands = [c for c in candidates if c and c.get("id") and RELEASE_RE.match(c["id"])]
-    newest = max(cands, key=lambda c: parse_release(c["id"])) if cands else {"id": "", "os": "", "shell": ""}
-    p = run([script, today, os_rev, shell_rev, newest["id"], newest.get("os", ""), newest.get("shell", "")])
-    rid = p.stdout.decode().strip()
-    parse_release(rid)
+
+    def ask(pub):
+        p = run([script, today, os_rev, shell_rev, pub["id"], pub.get("os", ""), pub.get("shell", "")])
+        rid = p.stdout.decode().strip()
+        parse_release(rid)
+        return rid
+
+    rid = ask(max(cands, key=lambda c: parse_release(c["id"])) if cands else {"id": "", "os": "", "shell": ""})
+    # A reissue of one candidate's ID must still be newer than every OTHER candidate, or publish refuses it as "not
+    # newer". It happened three times (runs 42907767160, 43794108179, 44216463487): a Nix-only merge published Nix
+    # release X, the next bootc release (build-image reads only bootc's own :daily) was ALSO named X, and the Nix
+    # release of that same source followed bootc's X as a reissue. Count on from the other candidate instead: on such
+    # a day bootc and Nix name the same source differently.
+    others = [c for c in cands if (c.get("os", ""), c.get("shell", "")) != (os_rev, shell_rev)]
+    for _ in range(len(others)):
+        held = [c for c in others if parse_release(c["id"]) >= parse_release(rid)]
+        if not held:
+            break
+        rid = ask(max(held, key=lambda c: parse_release(c["id"])))
     return rid
 
 
