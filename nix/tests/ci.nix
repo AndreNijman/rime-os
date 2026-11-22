@@ -7,7 +7,8 @@
 #              ci/runner/check-workflows.py over the workflows. run-checks.sh's classify is proved on real logs
 #              (nix/ci/fixtures) and its single download retry with a stub nix; the dev cache and check reuse
 #              (prebuild, REUSED, export-result, results-merge, fresh runs, metrics) with a stub nix, and
-#              nix/ci/check-cache-isolation.py (no release builds from a CI cache), each with mutants.
+#              nix/ci/check-cache-isolation.py (no release builds from a CI cache), and the evaluation shards
+#              (nix/ci/test-eval-shard.sh), each with mutants.
 { pkgs, self }:
 
 let
@@ -72,6 +73,9 @@ in
       has "run by .github/workflows/nix.yml"
       expect 0 "actionlint accepts nix.yml" -- actionlint .github/workflows/nix.yml
       expect 0 "check-workflows.py: no self-hosted job breaks the fork/key rules" -- python3 ci/runner/check-workflows.py .github/workflows
+      # The evaluation shards: every flake output in exactly one shard, --merge refuses less, the job graph gates the
+      # plan and the summary (nix/ci/test-eval-shard.sh, a stub nix, with its own mutants).
+      expect 0 "eval-each.sh shards and --merge, nix.yml's shard graph (nix/ci/test-eval-shard.sh)" -- bash nix/ci/test-eval-shard.sh
       # The workflow runs only on hosted images.
       if grep -E '^\s*runs-on:' .github/workflows/nix.yml | grep -vE 'runs-on: ubuntu-24\.04\s*$' > /dev/null; then
         bad "nix.yml has a job off ubuntu-24.04"

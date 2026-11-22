@@ -36,7 +36,9 @@
 #   RIME_DEV_CACHE          build/prebuild: a file:// binary cache directory (the packages job's dev cache) added as
 #                           an extra substituter, trusted without a signature (it never leaves this workflow)
 #   RIME_DEV_CACHE_STATE    build: how the leg got the dev cache (exact / fallback <key> / none), for the metrics
-#   RIME_CHECK_DRVS         plan: "attribute<TAB>drvPath" lines (eval-each.sh's RIME_EVAL_OUT)
+#   RIME_CHECK_DRVS         plan: "attribute<TAB>drvPath[<TAB>outPath]" lines (eval-each.sh's RIME_EVAL_OUT; nix.yml
+#                           merges the shards' with --merge, which always writes the outPath: the plan runner never
+#                           instantiated the .drv, so the nix-store fallback below would find nothing there)
 #   RIME_RESULTS            plan: the restored results cache; a check whose evaluated outPath it holds, with a
 #                           manifest line, PASSED EARLIER on the same inputs and is not built again (REUSED)
 #   RIME_CI_FRESH           plan: 1 = build every planned check anyway (prior passes are still recorded, so a fresh

@@ -1,7 +1,7 @@
 name: Nix
 
-# The NixOS pivot's CI (feat/nixos and its nix/* branches): evaluate the flake, build Rime's packages, and run
-# every flake check that can finish on a GitHub-hosted runner without a Rime binary cache.
+# The NixOS pivot's CI (feat/nixos and its nix/* branches): evaluate the flake (in parallel shards), build Rime's
+# packages, and run every flake check that can finish on a GitHub-hosted runner without a Rime binary cache.
 #
 # Which checks run is not written here. nix/ci/run-checks.sh plan takes every check in the flake and removes the
 # ones in nix/ci/checks-not-in-ci.txt (each with its reason), so a new check runs the day it lands. The skipped ones
@@ -23,8 +23,8 @@ name: Nix
 #   it. The whole /nix store is NOT cached: the legs need 5-13 GB each against a 10 GB repository cap; the dev cache
 #   is the few hundred MB nothing upstream serves.
 # - A check that passed is kept, keyed by its output path (= its derivation = every input), in a small rolling
-#   results cache (one per ISO week). The plan job proves a prior pass with `nix path-info` on the output path it
-#   just evaluated, and does not build that check again: the summary shows it as REUSED, "PASSED EARLIER, same
+#   results cache (one per ISO week). The plan job proves a prior pass with `nix path-info` on the output path the
+#   shards just evaluated, and does not build that check again: the summary shows it as REUSED, "PASSED EARLIER, same
 #   inputs, run N", never as a pass of this run. A check that did not pass is never kept.
 # - Fresh run (reuse nothing): push a branch named nix/fresh-*, put the trailer "Rime-CI: fresh" in the head commit's
 #   message, or run it by hand with the `fresh` input.
@@ -65,13 +65,64 @@ env:
   RIME_FRESH_INPUT: ${{ inputs.fresh || false }}
 
 jobs:
+  eval:
+    name: Evaluate shard ${{ matrix.shard }}
+    runs-on: ubuntu-24.04
+    # Every flake output (every check, the skipped kernel ones included, every package and configuration, the modules
+    # and overlays), one evaluator process per attribute (nix/ci/eval-each.sh), split over this matrix's runners so
+    # the check legs wait minutes, not the 25 one runner took (1500-1517 s, hosted, 2026-11-08..22). Not `nix flake
+    # check --no-build`: one evaluator for all checks peaked at 27.9 GB and the 16 GB runner killed it (exit 143).
+    # eval-each.sh gives each shard its items by the measured seconds in nix/ci/eval-cost.tsv (balance only:
+    # membership is a pure function of the flake's outputs and N = this matrix's size, so a shard added or removed
+    # here cannot leave an output unevaluated; the plan job's --merge refuses one that is). Per runner, nothing
+    # changes in memory: the light items peak at ~3-4 GB, 4 at a time (the runner's core count), each started only
+    # with 5 GB available; the ones in nix/ci/eval-heavy.txt (up to ~12.5 GB) run alone after them. Estimate per shard:
+    # ~250 s of evaluation (eval-each.sh --shards 6) plus setup; 25 leaves room for a slow runner.
+    timeout-minutes: 25
+    strategy:
+      # Every shard to the end, so one run names every broken output, not just the first shard's.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4, 5, 6]
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+      # Nix 2.35.4, the same as the build container the checks were proven in. It authenticates GitHub fetches
+      # (the nixpkgs pin) with the job's own read-only github.token, for the rate limit; no other credential.
+      - uses: cachix/install-nix-action@75c75c31ebece974e48ebc36b4ad125bd97bd97b # v31.11.3
+      - name: Evaluate this shard's flake outputs, one process each
+        # A broken expression fails here. The runner's memory, disk and biggest processes are logged every 20 s: that
+        # log is how run 41720602044's lost runner was traced to release-plan + release-unit (~11 GB each) side by side.
+        env:
+          RIME_EVAL_JOBS: "4"
+          RIME_EVAL_PART: ${{ runner.temp }}/eval-${{ matrix.shard }}
+        run: |
+          ( while sleep 20; do
+              printf 'RES %s mem=%s disk=%s top=%s\n' "$(date +%T)" \
+                "$(free -m | awk 'NR==2 {print $3"/"$2"M avail "$7"M"}')" \
+                "$(df -m / | awk 'NR==2 {print $4"M free"}')" \
+                "$(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{printf "%s:%dM ", $2, $1/1024}')"
+            done ) &
+          mon=$!
+          rc=0; nix/ci/eval-each.sh --shard ${{ matrix.shard }}/${{ strategy.job-total }} "$FLAKE" || rc=$?
+          kill "$mon" 2>/dev/null || true
+          exit "$rc"
+      # The part the plan job merges (which items this shard was given, how each went, their drvPaths and output
+      # paths). Uploaded after a failure too, for the record; the plan job does not run then.
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: ${{ !cancelled() }}
+        with:
+          name: eval-${{ matrix.shard }}
+          path: ${{ runner.temp }}/eval-${{ matrix.shard }}
+          retention-days: 7
+
   plan:
     name: Evaluate and plan
+    # Only after EVERY shard succeeded (no if:): a broken expression anywhere leaves no plan, no check leg runs, and the
+    # summary fails (nix/ci/check-eval-shards.py, run by checks.ci, refuses a workflow where that could slip).
+    needs: [eval]
     runs-on: ubuntu-24.04
-    # Evaluation one attribute per process (nix/ci/eval-each.sh). Hosted runner 2026-11-04: 61 light attributes in
-    # 12.5 min at 3 at a time; with ~115 attributes, 4 at a time, and the ~11 GB ones (nix/ci/eval-heavy.txt) one at a
-    # time after them, the estimate is ~30 min. 45 leaves room for a slow runner.
-    timeout-minutes: 45
+    # Lists the outputs, merges the shards, plans: about a minute.
+    timeout-minutes: 15
     outputs:
       run: ${{ steps.plan.outputs.run }}
       week: ${{ steps.mode.outputs.week }}
@@ -99,24 +150,15 @@ jobs:
           path: ${{ runner.temp }}/rime-results
           key: rime-check-results-v1-${{ steps.mode.outputs.week }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: rime-check-results-v1-${{ steps.mode.outputs.week }}-
-      - name: Evaluate every flake output, one process each
-        # Every check (the skipped kernel ones included), package and configuration, so a broken expression fails
-        # here. Not `nix flake check --no-build`: one evaluator for all checks peaked at 27.9 GB and the 16 GB
-        # runner killed it (exit 143). One process per attribute: the light ones peak at ~3 GB, 4 at a time (the
-        # runner's core count), each started only with 5 GB available; the ones in nix/ci/eval-heavy.txt (up to
-        # ~12 GB) run alone afterwards. The runner's memory, disk and biggest processes are logged every 20 s: that
-        # log is how run 41720602044's lost runner was traced to release-plan + release-unit (~11 GB each) side by side.
-        run: |
-          ( while sleep 20; do
-              printf 'RES %s mem=%s disk=%s top=%s\n' "$(date +%T)" \
-                "$(free -m | awk 'NR==2 {print $3"/"$2"M avail "$7"M"}')" \
-                "$(df -m / | awk 'NR==2 {print $4"M free"}')" \
-                "$(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{printf "%s:%dM ", $2, $1/1024}')"
-            done ) &
-          mon=$!
-          rc=0; RIME_EVAL_JOBS=4 RIME_EVAL_OUT="$RUNNER_TEMP/drvs.tsv" nix/ci/eval-each.sh "$FLAKE" || rc=$?
-          kill "$mon" 2>/dev/null || true
-          exit "$rc"
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          pattern: eval-*
+          path: ${{ runner.temp }}/eval
+      - name: Every flake output evaluated exactly once, all OK (merge the shards)
+        # Refuses a shard that left no part, a part from another revision, an output no shard (or two) evaluated, and
+        # an output without its drvPath and output path; never decided from a shard's exit status. The merged
+        # drvs.tsv (attribute, drvPath, output path) is what the plan reuses earlier passes by.
+        run: RIME_EVAL_OUT="$RUNNER_TEMP/drvs.tsv" nix/ci/eval-each.sh --merge "$RUNNER_TEMP/eval" "$FLAKE"
       - name: Plan the checks
         id: plan
         env:
@@ -314,7 +356,7 @@ jobs:
 
   summary:
     name: Nix summary
-    needs: [plan, packages, check]
+    needs: [eval, plan, packages, check]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 10
@@ -342,6 +384,7 @@ jobs:
           restore-keys: rime-check-results-v1-${{ needs.plan.outputs.week }}-
       - name: Every flake check, RAN or SKIPPED
         env:
+          EVAL_RESULT: ${{ needs.eval.result }}
           PLAN_RESULT: ${{ needs.plan.result }}
           PACKAGES_RESULT: ${{ needs.packages.result }}
         run: |
@@ -356,12 +399,13 @@ jobs:
             echo
             echo "$table"
             echo
-            echo "Packages job: **$PACKAGES_RESULT**. Plan job: **$PLAN_RESULT**."
+            echo "Evaluation shards: **$EVAL_RESULT**. Packages job: **$PACKAGES_RESULT**. Plan job: **$PLAN_RESULT**."
           } >> "$GITHUB_STEP_SUMMARY"
           echo "$table"
           if [ -f "$RUNNER_TEMP/plan/skipped.tsv" ]; then
             while IFS=$'\t' read -r name reason; do echo "SKIPPED $name: $reason"; done < "$RUNNER_TEMP/plan/skipped.tsv"
           fi
+          [ "$EVAL_RESULT" = success ] || { echo "::error::an evaluation shard did not succeed: a flake output does not evaluate"; rc=1; }
           [ "$PLAN_RESULT" = success ] || { echo "::error::the plan job did not succeed"; rc=1; }
           [ "$PACKAGES_RESULT" = success ] || { echo "::error::the packages job did not succeed"; rc=1; }
           exit "$rc"

@@ -1,8 +1,10 @@
 # Nix CI on GitHub-hosted runners
 
 `.github/workflows/nix.yml` on `ubuntu-24.04` hosted runners (4 vCPU, 16 GB, an empty Nix store every job, no Rime
-binary cache yet, R2). Jobs: **plan** (evaluate every flake output one per process with `nix/ci/eval-each.sh`, then
-pick the checks, leaving out the ones that PASSED EARLIER on the same inputs), **packages** (what many legs would
+binary cache yet, R2). Jobs: **eval** (six "Evaluate shard N" runners, each evaluating its share of the flake outputs
+one per process with `nix/ci/eval-each.sh --shard K/N`), **plan** ("Evaluate and plan": merge the shards, refusing
+anything less than every output evaluated exactly once and OK, then pick the checks, leaving out the ones that PASSED
+EARLIER on the same inputs), **packages** (what many legs would
 each compile, `nix/ci/prebuild.txt`: rimed with its whole cargo test, Rime's other packages, the desktop's and
 COSMIC's overrides, built ONCE and kept as the dev cache), one **check** leg per flake check (`nix/ci/run-checks.sh
 build`, substituting from the dev cache), and **summary** (every check RAN, REUSED or SKIPPED; the metrics table;
@@ -33,6 +35,32 @@ evidence `/var/lab/rime-nix/artifacts/ci-accel/`).
 Dev cache size measured from the rime-nix store (11-04): the 12 items' unsigned runtime closure is 16 paths, 337 MB
 of NAR, 177 MB zstd with cosmic-initial-setup's `-debug` output (133 MB NAR), which the export now leaves out.
 
+## Evaluation in shards (11-22)
+
+Before: one "Evaluate and plan" runner evaluated all 131 outputs, 1500-1517 s every run (two weeks of runs, constant),
+and every check leg waited for it: a PR whose 93 checks were all REUSED still took 26 min. The work, per attribute,
+from three hosted plan logs (runs 44968969858, 44975989375, 44990757301; median per attribute, now
+`nix/ci/eval-cost.tsv`): 3,785 evaluator-seconds, of which the 8 heavy items (`eval-heavy.txt`, 7-12.5 GB each, run
+alone) are 709 s and the 123 light ones (<= 4.3 GB, 4 at a time) ~3,080 s. Checks are 3,466 s of it; packages and
+configurations only ~260 s, so leaving them out of the gate would save ~4 % and is not done: a broken expression
+anywhere still stops the run before any leg starts.
+
+Now: a matrix of 6 shards. `eval-each.sh --shard K/N` assigns items greedily, longest first, to the least loaded
+shard, weighting a heavy item 4x (it runs alone), so a shard's estimate is Σ heavy + Σ light / 4: 251-252 s for each
+of the 6 (`eval-each.sh --shards 6 path:.`; 1,511 s for 1 shard, against the 1,500 s measured, so the model holds for
+the single runner). Membership is a pure function of the flake's outputs and N (`strategy.job-total`, the matrix's own
+size): the cost table only moves the balance. Memory per runner is unchanged (the same 4-at-a-time gate and heavy
+items alone). The plan job downloads the 6 parts and `eval-each.sh --merge` refuses a missing or duplicated part, a
+part from another revision, an output no shard or two shards evaluated, and an output without its drvPath and output
+path; each shard resolves its output paths itself, since the plan runner never instantiates the derivations.
+`nix/ci/check-eval-shards.py` (checks.ci, with mutants) refuses a nix.yml where a failed shard could let the plan,
+a check leg or the summary pass. Expected gate: ~250 s of evaluation + ~40 s setup and listing per shard, then
+~1 min for the plan job: about 6 min instead of 26 (modelled; the first CI run measures it).
+
+Why not `nix-eval-jobs` or Nix's evaluation cache: every runner starts cold (the eval cache would need to be carried
+between runs, keyed by the flake's hash, so it helps only a re-run of the same revision), and the cost is dominated by
+single ~12 GB, ~100 s evaluations that neither can split.
+
 ## Timeouts (11-02, from these figures)
 
 Each limit is at least twice the slowest measurement, so a slow day passes and a hang is still stopped long before
@@ -40,7 +68,7 @@ GitHub's 6 h:
 
 | Limit | before | now | slowest seen |
 |---|---|---|---|
-| plan job | 45 min | 25 min | 11.2 min |
+| plan job | 45 min | 25 min | 11.2 min (11-22: 25.3 min, so 45; with the shards: eval 25 min, plan 15 min) |
 | packages job | 150 min | 50 min | 23.5 min |
 | `RIME_CHECK_TIMEOUT` (the build, recorded as TIMED OUT with its time) | 9900 s | 6600 s | 3211 s |
 | check step / check job | 170 / 180 min | 115 / 125 min | 53.5 min |
