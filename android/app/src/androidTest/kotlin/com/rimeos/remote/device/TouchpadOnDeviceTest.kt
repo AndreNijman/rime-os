@@ -267,6 +267,7 @@ class TouchpadOnDeviceTest {
         await("the touchpad to open") { it == TouchpadPhase.Ready }
         val (centre, dp) = padCentre()
         val before = Desktop.inputStubActions().size
+        val logFrom = Desktop.remotedLog(Long.MAX_VALUE).first
         // Tap, then touch again at once and hold: the left button is held for the drag.
         touch(centre, Offset.Zero, holdMs = 30)
         val down = SystemClock.uptimeMillis()
@@ -290,7 +291,14 @@ class TouchpadOnDeviceTest {
         assertEquals(listOf("${Input.BTN_LEFT}:true", "${Input.BTN_LEFT}:false"), buttons)
         val releaseAt = after.indexOfFirst { it.optString("a") == "button" && !it.getBoolean("p") }
         val closeAt = after.indexOfFirst { it.optString("a") == "close" }
-        assertTrue("the release came from the phone, before the close: $after", releaseAt in 0 until closeAt)
+        assertTrue("the release came before the close: $after", releaseAt in 0 until closeAt)
+        // The computer also lets go by itself when a channel closes, and the
+        // stub logs that the same way; its count of the button events the
+        // PHONE sent tells the two apart: the press and the release.
+        val ended = awaitValue(10_000, "the computer to log the session's end") {
+            Desktop.remotedLog(logFrom).second.lines().lastOrNull { "\"$name\"" in it && " stopped " in it && "button=" in it }
+        }
+        assertTrue("the phone sent the release itself: $ended", " button=2 " in ended)
         inject(down, MotionEvent.ACTION_UP, listOf(centre))
     }
 
