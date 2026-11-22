@@ -146,8 +146,10 @@ jobs:
   packages:
     name: Packages (built once, reused by every leg)
     runs-on: ubuntu-24.04
-    # Cold (nothing in the dev cache): rimed (~25 min with its cargo test) and COSMIC's initial setup (~35 min) build
-    # side by side on 4 cores; measured on the hosted runner, nix/ci/README.md. Warm: a few minutes.
+    # Cold (nothing in the dev cache): rimed's third-party crates (rimed.deps), rimed, and COSMIC's initial setup
+    # (~35 min) build side by side on 4 cores; measured on the hosted runner, nix/ci/README.md. rimed's cargo test is
+    # the rimed-cargo-test check, not this job. A change to Rime's code alone: rimed.deps from the dev cache, rimed
+    # compiled (its 13 members only).
     timeout-minutes: 100
     outputs:
       key: ${{ steps.items.outputs.key }}
@@ -194,13 +196,13 @@ jobs:
           path: ${{ runner.temp }}/rime-dev-cache
           key: ${{ steps.items.outputs.key }}
           restore-keys: rime-dev-pkgs-v1-
-      - name: Build rimed (and run its cargo test), rime-shell, rime-libexec and the rest, once
+      - name: Build rimed, rime-shell, rime-libexec and the rest, once
         env:
           RIME_DEV_CACHE: ${{ runner.temp }}/rime-dev-cache
-          # An exact hit has nothing new to keep: realise only rimed, for its test report.
+          # An exact hit has nothing new to keep: realise only rimed, for the line below.
           RIME_PREBUILD_ALL: ${{ steps.restore.outputs.cache-hit == 'true' && '0' || '1' }}
         run: nix/ci/run-checks.sh prebuild "$RUNNER_TEMP/pre"
-      - name: cargo test total
+      - name: What this job built
         if: ${{ !cancelled() }}
         env:
           RIME_DEV_CACHE: ${{ runner.temp }}/rime-dev-cache

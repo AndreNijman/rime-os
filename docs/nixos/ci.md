@@ -3,7 +3,8 @@
 `.github/workflows/nix.yml` on `ubuntu-24.04` hosted runners (4 vCPU, 16 GB, an empty Nix store every job, no Rime
 binary cache yet, R2). Jobs: **plan** (evaluate every flake output one per process with `nix/ci/eval-each.sh`, then
 pick the checks, leaving out the ones that PASSED EARLIER on the same inputs), **packages** (what many legs would
-each compile, `nix/ci/prebuild.txt`: rimed with its whole cargo test, Rime's other packages, the desktop's and
+each compile, `nix/ci/prebuild.txt`: rimed's third-party crates, rimed (compiled; its cargo test is the
+`rimed-cargo-test` check), Rime's other packages, the desktop's and
 COSMIC's overrides, built ONCE and kept as the dev cache), one **check** leg per flake check (`nix/ci/run-checks.sh
 build`, substituting from the dev cache), and **summary** (every check RAN, REUSED or SKIPPED; the metrics table;
 the results cache). How the two caches work and their limits: `nix/ci/README.md` "Dev cache and reuse"; measured
