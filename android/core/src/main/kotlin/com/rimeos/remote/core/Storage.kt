@@ -429,6 +429,16 @@ data class Settings(
      * `Introductions.afterPairing`).
      */
     @SerialName("auto_join") val autoJoin: Boolean? = null,
+
+    /**
+     * The touchpad's scroll direction (§2.16): on, content follows the
+     * fingers as it does on the phone; off, it moves the way a scroll wheel
+     * turns it. On by default, as on a touchpad on the computer.
+     */
+    @SerialName("touchpad_natural") val touchpadNatural: Boolean = true,
+
+    /** The touchpad's pointer speed, a multiplier on its curve: 0.5 to 2. */
+    @SerialName("touchpad_speed") val touchpadSpeed: Float = 1f,
 ) {
     /** The configured row, or the shipped one when nothing has been configured. */
     val accessoryRow: List<AccessoryKey> get() = accessory.ifEmpty { AccessoryKeys.DEFAULT }

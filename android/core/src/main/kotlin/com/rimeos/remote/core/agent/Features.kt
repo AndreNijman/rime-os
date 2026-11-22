@@ -99,6 +99,13 @@ data class RemoteHello(
      * ever narrows on it.
      */
     val scope: String? = null,
+    /**
+     * `"on"` or `"off"`: whether this phone may use the computer as a
+     * touchpad and keyboard (contract §2.16). Absent from a computer without
+     * the touchpad, and read once per connection, so a grant changed at the
+     * computer shows here only after the next connect.
+     */
+    val input: String? = null,
 ) {
     fun has(feature: String): Boolean = feature in features
 

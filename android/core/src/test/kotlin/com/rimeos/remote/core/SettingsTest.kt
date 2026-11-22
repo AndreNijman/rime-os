@@ -120,6 +120,21 @@ class SettingsTest {
     }
 
     @Test
+    fun `the touchpad scrolls naturally at normal speed by default, also for a store from before it`(@TempDir dir: Path) {
+        assertTrue(Settings().touchpadNatural)
+        assertEquals(1f, Settings().touchpadSpeed)
+        val file = dir.resolve("machines.json").toFile()
+        file.parentFile.mkdirs()
+        file.writeText("""{"v":1,"machines":[],"settings":{"media_on":true}}""")
+        assertTrue(AppStorage(dir.toFile()).load().settings.touchpadNatural)
+        val storage = AppStorage(dir.toFile())
+        storage.save(MachineStore(settings = Settings(touchpadNatural = false, touchpadSpeed = 1.5f)))
+        val back = storage.load().settings
+        assertFalse(back.touchpadNatural)
+        assertEquals(1.5f, back.touchpadSpeed)
+    }
+
+    @Test
     fun `Do Not Disturb following the computer is off until turned on, and survives a save`(@TempDir dir: Path) {
         // Contract §2.9: a computer changes nothing on the phone until the
         // person says so. A store from before the feature reads as off.
