@@ -141,6 +141,13 @@ class TouchpadInput(
         return batcher.letGo(now)
     }
 
+    /** A new channel opened: nothing is held on the computer yet. */
+    fun fresh() {
+        gestures.reset(downs.toSet())
+        batcher.fresh()
+        pressedMods = emptySet()
+    }
+
     /** The computer paused (locked): it let go of everything already. */
     fun paused() {
         gestures.reset(downs.toSet())

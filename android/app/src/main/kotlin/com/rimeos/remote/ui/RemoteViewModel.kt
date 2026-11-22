@@ -1949,6 +1949,18 @@ class RemoteViewModel(application: Application) : AndroidViewModel(application) 
         _state.update { it.copy(settings = store.settings) }
     }
 
+    /** The touchpad's scroll direction (contract §2.16): content follows the fingers, or a wheel's way. */
+    fun setTouchpadNatural(on: Boolean) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(touchpadNatural = on))
+        _state.update { it.copy(settings = store.settings) }
+    }
+
+    /** The touchpad's pointer speed, kept between half and twice the curve as drawn. */
+    fun setTouchpadSpeed(speed: Float) = viewModelScope.launch {
+        val store = repository.settings(_state.value.settings.copy(touchpadSpeed = speed.coerceIn(0.5f, 2f)))
+        _state.update { it.copy(settings = store.settings) }
+    }
+
     /** Send replies typed on a computer from this phone, or stop (contract §2.7). */
     fun setMirrorReply(on: Boolean) = viewModelScope.launch {
         val store = repository.settings(_state.value.settings.copy(mirrorReply = on))

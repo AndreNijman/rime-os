@@ -52,6 +52,10 @@ import com.rimeos.remote.ui.nex.NexSessionScreen
 import com.rimeos.remote.ui.nex.NexViewModel
 import com.rimeos.remote.core.nex.Nex
 import com.rimeos.remote.core.machine.Machine
+import com.rimeos.remote.core.input.Input
+import com.rimeos.remote.ui.touchpad.TouchpadScreen
+import com.rimeos.remote.ui.touchpad.TouchpadViewModel
+import kotlinx.coroutines.awaitCancellation
 import com.rimeos.remote.ui.machine.MachineScreen
 import com.rimeos.remote.ui.machine.MachineViewModel
 import androidx.lifecycle.Lifecycle
@@ -125,6 +129,9 @@ object Destinations {
 
     /** "Photos on your computer": the access and the switch. */
     const val PHOTOS = "photos"
+
+    /** The phone as the computer's touchpad and keyboard. */
+    const val TOUCHPAD = "touchpad"
 }
 
 @Composable
@@ -151,6 +158,7 @@ fun RimeRemoteApp(
     nexModel: NexViewModel = viewModel(),
     machineModel: MachineViewModel = viewModel(),
     sendModel: SendViewModel = viewModel(),
+    touchpadModel: TouchpadViewModel = viewModel(),
 ) {
     val state by viewModel.state.collectAsStateWithLifecycle()
     val nex by nexModel.state.collectAsStateWithLifecycle()
@@ -361,6 +369,17 @@ fun RimeRemoteApp(
                                 navigation.navigate(Destinations.MACHINE)
                             }
                         },
+                    // Offered when the computer's rime-remoted has the
+                    // touchpad (§2.16), whether or not this phone is allowed
+                    // yet: the screen says how to allow it.
+                    onTouchpad = state.agents.machine
+                        ?.takeIf { state.links[it.deviceId]?.remote?.has(Input.FEATURE) == true }
+                        ?.let { machine ->
+                            {
+                                touchpadModel.open(machine, deviceName)
+                                navigation.navigate(Destinations.TOUCHPAD)
+                            }
+                        },
                     onCopyFromMachine = { viewModel.pullMachineClipboard() },
                     clipboardPull = state.agents.clipboardPull,
                     onClipboardCopied = { viewModel.clipboardPullConsumed() },
@@ -561,6 +580,32 @@ fun RimeRemoteApp(
                     onDismiss = { machineModel.dismiss() },
                     onBack = { navigation.popBackStack() },
                     onSendClipboard = { machineModel.sendClipboard(it) },
+                )
+            }
+
+            composable(Destinations.TOUCHPAD) {
+                // Open only while the screen is started: leaving it, or the
+                // app going to the background, lets go of everything held on
+                // the computer and closes the channel.
+                val lifecycle = LocalLifecycleOwner.current.lifecycle
+                LaunchedEffect(lifecycle) {
+                    lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+                        touchpadModel.enter()
+                        try {
+                            awaitCancellation()
+                        } finally {
+                            touchpadModel.leave()
+                        }
+                    }
+                }
+                val touchpad by touchpadModel.state.collectAsStateWithLifecycle()
+                TouchpadScreen(
+                    model = touchpadModel,
+                    state = touchpad,
+                    settings = state.settings,
+                    onNatural = { viewModel.setTouchpadNatural(it) },
+                    onSpeed = { viewModel.setTouchpadSpeed(it) },
+                    onBack = { navigation.popBackStack() },
                 )
             }
 

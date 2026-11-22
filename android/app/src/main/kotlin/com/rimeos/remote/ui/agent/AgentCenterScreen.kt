@@ -84,6 +84,8 @@ fun AgentCenterScreen(
     onNex: (() -> Unit)? = null,
     /** Open the computer's own screen (status, lock, media), or null when it offers none. */
     onComputer: (() -> Unit)? = null,
+    /** Open the touchpad and keyboard, or null when the computer offers none. */
+    onTouchpad: (() -> Unit)? = null,
     /**
      * Ask the machine for its clipboard (P1-059 criterion 3, receive half).
      *
@@ -194,6 +196,7 @@ fun AgentCenterScreen(
             FlowRow(Modifier.fillMaxWidth().padding(horizontal = 8.dp)) {
                 onNex?.let { TextButton(onClick = it) { Text("nex") } }
                 onComputer?.let { TextButton(onClick = it) { Text("Computer") } }
+                onTouchpad?.let { TextButton(onClick = it) { Text("Touchpad") } }
                 TextButton(onClick = onProjects) { Text("Projects") }
                 TextButton(onClick = onApprovals) {
                     Text(

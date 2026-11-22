@@ -170,6 +170,16 @@ class InputBatcher {
         keymap = keymap.doubted()
     }
 
+    /**
+     * A new channel: a new session on the computer, holding nothing, with an
+     * empty text keymap. Sequence numbers keep growing; a new session takes
+     * any first one.
+     */
+    fun fresh() {
+        forget()
+        keymap = Keymap.EMPTY
+    }
+
     /** The computer let go of everything (its lease ran out): so does this phone. */
     fun released() = forget()
 
