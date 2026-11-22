@@ -46,6 +46,26 @@ hl.config({
         disable_hyprland_logo    = true,
         disable_splash_rendering = true,
         force_default_wallpaper  = 0,
+
+        -- A Rime Shell started again while the screen is locked gets the lock
+        -- back. The Shell draws the lock screen; if it is restarted mid-lock (a
+        -- crash, `kill`, or a configuration reload, which on Quickshell 0.3.2
+        -- ends the process), Hyprland keeps the session locked but, with this
+        -- off (its default), refuses the new Shell's lock: "Cannot re-lock,
+        -- misc:allow_session_lock_restore is disabled". The screen then stays
+        -- locked with nothing to type a password into. With it on, the new
+        -- Shell's lock replaces the abandoned one and the password prompt is
+        -- back (rime-shell LockKeeper.qml). labwc does the same by itself.
+        --
+        -- The trade (Hyprland 0.56.2 and 0.57.0, SessionLockManager.cpp
+        -- onNewSessionLock): any client the compositor does not sandbox may
+        -- then take a lock over and release it, a live one included. Those are
+        -- the user's own processes, which can already end a lock with no
+        -- password over Hyprland's IPC socket (kill the Shell, then
+        -- `hyprctl eval 'hl.clear_crashed_lockscreen()'`, or switch this on
+        -- with `hyprctl eval`). Apps that connect through a security context
+        -- (Flatpak) are not offered the session-lock protocol at all.
+        allow_session_lock_restore = true,
     },
 
     -- Hyprland's own "updated to <version>" window (hyprland-update-screen) at the

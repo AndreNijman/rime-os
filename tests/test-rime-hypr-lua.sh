@@ -85,6 +85,44 @@ for c in cases:
 sys.exit(bad)
 PY
 
+# ── a restarted Shell can take its lock back ─────────────────────────────────
+# Rime Shell draws the lock screen and, started again while the session is
+# locked, asks for the lock at once (rime-shell LockKeeper.qml). Hyprland grants
+# that only with misc.allow_session_lock_restore; without it the session stays
+# locked with no password prompt. Static, so it runs everywhere: the key must be
+# set to true INSIDE appearance.lua's misc table, in code, not in a comment.
+# The live half below reads it back from the running Hyprland, and
+# tests/test-rime-hypr-lock-restore.sh restarts a real Shell under it.
+sec "appearance.lua lets a restarted Shell take its lock back"
+APPEARANCE="${root}/files/desktop/hypr/rime/appearance.lua"
+lock_restore_set() {
+    python3 - "$1" <<'PY'
+import re, sys
+code = "\n".join(l.split("--", 1)[0] for l in open(sys.argv[1]).read().split("\n"))
+misc = re.search(r'\bmisc\s*=\s*\{([^{}]*)\}', code)
+sys.exit(0 if misc and re.search(r'\ballow_session_lock_restore\s*=\s*true\b', misc.group(1)) else 1)
+PY
+}
+if lock_restore_set "$APPEARANCE"; then
+    ok "misc.allow_session_lock_restore = true in appearance.lua's misc table"
+else
+    bad "misc.allow_session_lock_restore = true in appearance.lua's misc table"
+fi
+LRW="$(mktemp -d)"
+sed '/^ *allow_session_lock_restore *= *true/d' "$APPEARANCE" > "$LRW/removed.lua"
+sed 's/^\( *\)\(allow_session_lock_restore *= *true\)/\1-- \2/' "$APPEARANCE" > "$LRW/commented.lua"
+sed 's/^\( *allow_session_lock_restore *= *\)true/\1false/' "$APPEARANCE" > "$LRW/false.lua"
+for m in removed commented false; do
+    if cmp -s "$APPEARANCE" "$LRW/$m.lua"; then
+        bad "self-test lock-restore ${m}: the mutation did not apply"
+    elif lock_restore_set "$LRW/$m.lua"; then
+        bad "self-test lock-restore ${m}: SURVIVED"
+    else
+        ok "self-test lock-restore ${m}: caught"
+    fi
+done
+rm -rf "$LRW"
+
 for tool in labwc Hyprland hyprctl; do
     if ! command -v "$tool" >/dev/null 2>&1; then
         skip "$tool is not installed; cannot run a nested compositor"
@@ -191,6 +229,15 @@ fi
 hc getoption general:col.active_border | pipe_has -i '123abc' \
     && ok "appearance.lua loads rime/colors.lua (the wallpaper accent border)" \
     || bad "appearance.lua loads rime/colors.lua (got: $(hc getoption general:col.active_border | head -2 | tr '\n' ' '))"
+
+# The live half of the static check above: this Hyprland took the key, with the
+# value Rime set ("set: true" is Hyprland saying a config set it).
+lr="$(hc getoption misc:allow_session_lock_restore)"
+if printf '%s\n' "$lr" | pipe_has -xE '(bool|int): (true|1)' && printf '%s\n' "$lr" | pipe_has -x 'set: true'; then
+    ok "misc:allow_session_lock_restore reads true and set on the live Hyprland"
+else
+    bad "misc:allow_session_lock_restore reads true and set on the live Hyprland — got: $(printf '%s' "$lr" | tr '\n' ' ')"
+fi
 
 # The bind count is the sharp end of the migration: a keybinds module that
 # loaded but bound nothing would still give a clean configerrors.
