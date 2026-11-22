@@ -385,10 +385,12 @@ class TouchpadOnDeviceTest {
 
         // Gone from the screen: a link that comes back opens nothing.
         instrumentation.runOnMainSync { model.leave() }
+        val hellos = hub.state(machine.deviceId)!!.hellos
         Desktop.stopRemoted()
         Desktop.restartRemoted()
+        // A new hello, not the old connection's state: the link really came back.
         awaitValue(90_000, "the link to come back") {
-            hub.state(machine.deviceId)?.status?.takeIf { it == LinkHub.Status.CONNECTED }
+            hub.state(machine.deviceId)?.takeIf { it.hellos > hellos && it.status == LinkHub.Status.CONNECTED }
         }
         val away = opens()
         Thread.sleep(3_000)
@@ -443,6 +445,7 @@ class TouchpadOnDeviceTest {
         compose.onNodeWithText("Shift").performScrollTo().performClick()
         compose.onNodeWithText("Shift").performClick()
         compose.onNodeWithContentDescription("More keys").performScrollTo().performClick()
+        compose.onNodeWithText("Ctrl").performScrollTo()
         Thread.sleep(400)
         shot("keys")
         instrumentation.runOnMainSync { dark = true }
