@@ -10,7 +10,9 @@
 #           server:8080       a fake upstream cache (cache.nixos.org), signed with its own TEST key, holding nixpkgs'
 #                             closures of the kernel 6.12, systemd, nix, skopeo, glibc, coreutils and bash
 #         and runs `rime-nix-release closure | split | stage | publish --backend github` per release, from the
-#         toplevels below (extraDependencies: the build job's output, here the server's store).
+#         toplevels below (extraDependencies: the build job's output, here the server's store). `stage` runs at
+#         zstd level 3 (--test-stage-level): level 19 on the server's 4 cores took ~12 of the check's ~58 minutes per
+#         release, and nothing here depends on the level. release-github.nix stages at the release's level 19.
 # client  boots release A from its own disk (systemd-boot, so reboots are real) and runs `rime update` against it.
 #
 # Releases (the client's own configuration plus one change each, evaluated with extendModules):
@@ -257,7 +259,8 @@ pkgs.testers.runNixOSTest {
               f"mkdir -p {d}",
               f"rime-nix-release closure {vargs} --catalogue-out {HTOP} --out {d}/closure.json",
               f"rime-nix-release split --closure {d}/closure.json --upstream {UPSTREAM} --out {d}/split.json",
-              f"rime-nix-release stage --closure {d}/closure.json --split {d}/split.json --out {d}/artifact",
+              f"rime-nix-release stage --closure {d}/closure.json --split {d}/split.json --out {d}/artifact"
+              f" --test-stage-level 3",
           )
           rc, log = server.execute(
               f"RIME_CACHE_TOKEN={TOKEN} rime-nix-release publish --backend github --artifact {d}/artifact"
@@ -275,6 +278,7 @@ pkgs.testers.runNixOSTest {
           split = read_json(server, f"{d}/split.json")
           man = read_json(server, f"{d}/out/manifest.json")
           server.succeed(f"rm -rf {d}/artifact")  # two full copies of the Rime set do not fit twice over
+          print(server.succeed("df -h / && du -sh /var/lib/fake-github"))  # the room the stage level costs
           return st["manifest_digest"], split, man
 
       def checker():

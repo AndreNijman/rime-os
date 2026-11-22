@@ -65,6 +65,9 @@ let
   });
 
   g3 = pair != null;
+  # As update-e2e.nix: the tests stage at zstd level 3. G3 keeps the release's level 19: it measures download bytes,
+  # and the staged NARs are the yardstick a delta is kept against (DELTA_MAX_RATIO).
+  stageLevel = lib.optionalString (!g3) " --test-stage-level 3";
   # A plan for a toplevel with no configuration at hand (the pair): no components, which only `rime update`'s live
   # classification reads, and the G3 runs stop at --download-only.
   rawPlan = name: top: pkgs.writeText "rime-delta-plan-${name}.json" (builtins.toJSON {
@@ -321,7 +324,7 @@ pkgs.testers.runNixOSTest {
               f"mkdir -p {d}",
               f"rime-nix-release closure --variant plain={top} --out {d}/closure.json",
               f"rime-nix-release split --closure {d}/closure.json --upstream {UPSTREAM} --out {d}/split.json",
-              f"rime-nix-release stage --closure {d}/closure.json --split {d}/split.json --out {d}/artifact",
+              f"rime-nix-release stage --closure {d}/closure.json --split {d}/split.json --out {d}/artifact${stageLevel}",
           )
           if deltas:
               # As the build job: the previous release comes from the channel, its signature verified.
