@@ -6,7 +6,8 @@
   cache_gate.py serve                  the gate in the foreground (what ensure starts, detached)
   cache_gate.py retry [--ensure] -- CMD...
                                        run CMD (a nix build); run it again, after a backoff, only when it failed on a
-                                       transient error of Rime's cache (HTTP 429 or 5xx, or a dropped connection)
+                                       transient error of Rime's cache or cache.nixos.org (HTTP 429 or 5xx, a
+                                       dropped connection, or a 416 for a download Nix was resuming)
 
 The release build's Nix daemon trusts the gate (http://127.0.0.1:PORT) as its Rime substituter instead of
 https://cache.rimeos.com. The gate holds the cache's index: the names in the root of the rime-cache repository's main
@@ -23,7 +24,9 @@ index with no nix-cache-info or with no narinfo stops the gate, and the build wi
 own nix-cache-info (Priority 50, behind cache.nixos.org), so a path both caches hold still comes from upstream.
 
 Configuration comes from the environment the workflow already sets, or the flags: RIME_CACHE_GATE (the gate's
-http://127.0.0.1:PORT URL), CACHE_URL (the cache), CACHE_REPO (owner/name of the repository Pages serves).
+http://127.0.0.1:PORT URL), CACHE_URL (the cache), CACHE_REPO (owner/name of the repository Pages serves),
+UPSTREAM_CACHE (cache.nixos.org: `retry` also reruns on its transient errors; run 44893801498 lost a release when
+its CDN dropped NAR transfers and answered Nix's resume with HTTP 416).
 """
 
 import argparse
@@ -269,7 +272,11 @@ TRANSPORT = ("curl error", "Could not connect to server", "Couldn't connect to s
 # Nix's own follow-on errors after a substitution failed under fallback = false (measured, Nix 2.35: a NAR answering
 # 503 prints the download error, then these). Transient only beside a transient download error, never alone.
 FOLLOW_ON = ("some substitutes for the outputs of derivation",
-             "is required, but there is no substituter that can build it")
+             "is required, but there is no substituter that can build it",
+             "could not be realised")  # nix-store --realise: "some references of path '...' could not be realised"
+# Nix resumes a NAR whose transfer broke ("retrying from offset N"); a 416 (Range Not Satisfiable) answering that
+# resume is the same broken transfer, not a missing file. Nix checks every NAR's hash, so a fresh try is safe.
+RESUME_RE = re.compile(r"^warning: unable to download '([^']+)': .*retrying from offset \d+")
 # A derivation that could not start because an input failed. Its `Reason:` line tells it from a builder that failed
 # ("Reason: builder failed with exit code 1"), which is never transient.
 CANNOT_BUILD = "error: Cannot build '"
@@ -277,8 +284,9 @@ DEPENDENCY_FAILED_RE = re.compile(r"^\s*Reason: \d+ dependenc(?:y|ies) failed\.\
 REASON_RE = re.compile(r"^\s*Reason: ")
 
 
-def classify_download(line, prefixes):
-    """'transient' or 'fatal' for an `unable to download` line of a gated URL; None for any other line."""
+def classify_download(line, prefixes, resumed=frozenset()):
+    """'transient' or 'fatal' for an `unable to download` line of a gated URL; None for any other line. resumed: the
+    URLs Nix said it was resuming (a 416 for one of those is the broken transfer, a 416 for any other is fatal)."""
     m = DOWNLOAD_RE.match(line)
     if not m or not any(m.group(1).startswith(p) for p in prefixes):
         return None
@@ -286,6 +294,8 @@ def classify_download(line, prefixes):
     code = HTTP_RE.search(rest)
     if code and code.group(1) != "200":
         c = int(code.group(1))
+        if c == 416 and m.group(1) in resumed:
+            return "transient"
         return "transient" if c == 429 or 500 <= c <= 599 else "fatal"
     if any(t in rest for t in TRANSPORT):
         return "transient"
@@ -296,11 +306,14 @@ def transient(lines, prefixes):
     """(retry?, why) for a failed Nix command's stderr. Retry only when every top-level error is a transient download
     error of a gated URL, or one of Nix's follow-on errors after one; a build failure, a refused signature, a 404 or
     anything unrecognised fails at once. Warnings decide nothing: a download Nix retried into success is no reason."""
-    errors, seen = [], []
+    errors, seen, resumed = [], [], set()
     for raw in lines:
         ln = ANSI_RE.sub("", raw.rstrip("\r\n"))
+        r = RESUME_RE.match(ln)
+        if r:
+            resumed.add(r.group(1))
         if ln.startswith("error:"):
-            kind = classify_download(ln, prefixes)
+            kind = classify_download(ln, prefixes, resumed)
             if kind is None and any(f in ln for f in FOLLOW_ON):
                 kind = "follow-on"
             elif kind is None and ln.startswith(CANNOT_BUILD):
@@ -355,13 +368,13 @@ def retry(cmd, prefixes, tries=RETRY_TRIES, run=run_streaming, sleep=time.sleep,
         again, why = transient(lines, prefixes)
         if not again:
             if n > 1:
-                say(f"cache_gate: try {n} of {tries} failed, not on a transient error of Rime's cache: {why}")
+                say(f"cache_gate: try {n} of {tries} failed, not on a transient cache error: {why}")
             return code
         if n == tries:
-            say(f"{_annot('error')}cache_gate: Rime's cache still failed after {tries} tries ({why}); giving up")
+            say(f"{_annot('error')}cache_gate: the cache still failed after {tries} tries ({why}); giving up")
             return code
         wait = backoff(n, rand, base)
-        say(f"{_annot('warning')}cache_gate: try {n} of {tries} failed on a transient error of Rime's cache ({why}); "
+        say(f"{_annot('warning')}cache_gate: try {n} of {tries} failed on a transient cache error ({why}); "
             f"the same command again in {wait:.0f} s")
         sleep(wait)
     return code
@@ -403,6 +416,19 @@ def parse(argv):
     return a
 
 
+def retry_prefixes(a, env):
+    """The URL prefixes whose transient errors `retry` reruns on: --url as given, or the gate, the cache, the cache
+    repository's release assets and the upstream cache."""
+    if a.url:
+        return list(a.url)
+    prefixes = [u.rstrip("/") + "/" for u in (a.gate, a.cache) if u]
+    if env.get("CACHE_REPO"):
+        prefixes.append(f"https://github.com/{env['CACHE_REPO']}/releases/download/")
+    if env.get("UPSTREAM_CACHE"):
+        prefixes.append(env["UPSTREAM_CACHE"].rstrip("/") + "/")
+    return prefixes
+
+
 def _before(a):
     if a.ensure:
         return lambda: ensure(a)
@@ -422,9 +448,7 @@ def main(argv):
         cmd = a.command[1:] if a.command[:1] == ["--"] else a.command
         if not cmd:
             raise Refused("retry: no command after --")
-        prefixes = a.url or [u.rstrip("/") + "/" for u in (a.gate, a.cache) if u]
-        if not a.url and os.environ.get("CACHE_REPO"):
-            prefixes.append(f"https://github.com/{os.environ['CACHE_REPO']}/releases/download/")
+        prefixes = retry_prefixes(a, os.environ)
         if not prefixes:
             raise Refused("retry: no URL to retry on (--url, or RIME_CACHE_GATE / CACHE_URL)")
         return retry(cmd, prefixes, tries=a.tries, base=a.backoff,

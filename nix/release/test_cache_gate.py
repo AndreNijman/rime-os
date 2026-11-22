@@ -52,6 +52,27 @@ NAR_503 = [
 ]
 BUILD_FAILED = ["error: Cannot build '/nix/store/" + H + "-gate-proof-held-a.drv'.\n",
                 "       Reason: builder failed with exit code 1.\n"]
+# Run 44893801498, payload job, `nix-store --realise` of the plain toplevel: cache.nixos.org's CDN dropped NAR transfers
+# ("Failed sending data to the peer"), Nix resumed them, and one resume was answered HTTP 416.
+UPSTREAM = "https://cache.nixos.org"
+UP_PREFIXES = PREFIXES + [UPSTREAM + "/"]
+UP_NAR = f"{UPSTREAM}/nar/0p5qx9fnci60nm9i0hivd5d3yjyay88ivcs7nxpk0sda1srpbgag.nar.zst"
+UP_RESUME = dl("warning", UP_NAR, "HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset "
+               "2168575 in 63 ms (attempt 1/12)")
+UP_416 = dl("error", UP_NAR, "HTTP error 416")
+UP_REALISE = [
+    dl("warning", f"{UPSTREAM}/nar/1pzl04myxngy1nrxy6rrj9h8y9npf9ag61qc8arixmicad106mq9.nar.zst",
+       "HTTP error 200 (curl error: Failed sending data to the peer); retrying from offset 6282211 in 50 ms "
+       "(attempt 1/12)"),
+    UP_RESUME,
+    UP_416,
+    "error: path '/nix/store/8a46mr3apnr7f9yl1mdh96jnasxqs8wn-kwidgetsaddons-6.31.0' is required, but there is no "
+    "substituter that can build it\n",
+    "error: some references of path '/nix/store/gqjmf36vpssi4vi94kq9bvw6yb585xw4-fcitx5-configtool-5.1.16' could not "
+    "be realised\n",
+    "error: some references of path '/nix/store/nw0k2zq3rildykjvbr9bxxpkfx7vnwq6-nixos-system-rime-plain-26.11."
+    "20261030.1c89083' could not be realised\n",
+]
 
 
 class Index(unittest.TestCase):
@@ -229,6 +250,32 @@ class Classify(unittest.TestCase):
         for name, lines in cases.items():
             self.assertEqual(g.transient(lines, PREFIXES)[0], False, name)
 
+    def test_a_resumed_upstream_nar_answering_416_is_retried(self):
+        self.assertEqual(g.transient(UP_REALISE, UP_PREFIXES), (True, UP_416.rstrip("\n")))
+
+    def test_a_416_is_transient_only_for_a_download_nix_was_resuming(self):
+        self.assertFalse(g.transient([UP_416], UP_PREFIXES)[0])  # no resume: a real 416
+        other = dl("warning", f"{UPSTREAM}/nar/other.nar.zst", "HTTP error 200 (curl error: Failed sending data to "
+                   "the peer); retrying from offset 9 in 50 ms (attempt 1/12)")
+        self.assertFalse(g.transient([other, UP_416], UP_PREFIXES)[0])  # another URL was resumed
+        self.assertFalse(g.transient([UP_416, UP_RESUME], UP_PREFIXES)[0])  # the resume came after the error
+
+    def test_a_hash_mismatch_after_a_resume_is_never_retried(self):
+        mismatch = ("error: NAR hash mismatch in input '/nix/store/8a46mr3apnr7f9yl1mdh96jnasxqs8wn-kwidgetsaddons-"
+                    "6.31.0', expected 'sha256-aaaa' but got 'sha256-bbbb'\n")
+        self.assertFalse(g.transient(UP_REALISE[:3] + [mismatch] + UP_REALISE[3:], UP_PREFIXES)[0])
+        self.assertFalse(g.transient(UP_REALISE[:3] + [BAD_SIG], UP_PREFIXES)[0])
+
+    def test_unrealised_references_alone_never_retry(self):
+        self.assertFalse(g.transient(UP_REALISE[3:], UP_PREFIXES)[0])
+        self.assertFalse(g.transient([UP_RESUME] + UP_REALISE[3:], UP_PREFIXES)[0])
+
+    def test_upstream_errors_retry_only_when_upstream_is_gated(self):
+        up_503 = dl("error", f"{UPSTREAM}/{HELD}.narinfo", "HTTP error 503")
+        self.assertTrue(g.transient([up_503], UP_PREFIXES)[0])
+        self.assertFalse(g.transient([up_503], PREFIXES)[0])
+        self.assertFalse(g.transient(UP_REALISE, PREFIXES)[0])
+
     def test_a_nar_503_with_nix_follow_ons_is_retried(self):
         self.assertEqual(g.transient(NAR_503, PREFIXES)[0], True)
 
@@ -267,6 +314,17 @@ class Classify(unittest.TestCase):
         again, why = g.transient([BAD_SIG], PREFIXES)
         self.assertFalse(again)
         self.assertIn("signature is not valid", why)
+
+
+class Prefixes(unittest.TestCase):
+    def test_defaults_take_the_upstream_cache_from_the_environment(self):
+        a = args(url=[])
+        env = {"CACHE_REPO": "AndreNijman/rime-cache", "UPSTREAM_CACHE": UPSTREAM}
+        self.assertEqual(g.retry_prefixes(a, env), UP_PREFIXES)
+        self.assertEqual(g.retry_prefixes(a, {"CACHE_REPO": "AndreNijman/rime-cache"}), PREFIXES)
+
+    def test_url_replaces_the_defaults(self):
+        self.assertEqual(g.retry_prefixes(args(url=["http://x/"]), {"UPSTREAM_CACHE": UPSTREAM}), ["http://x/"])
 
 
 class Backoff(unittest.TestCase):

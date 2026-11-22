@@ -54,6 +54,10 @@ open("gate-mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"]
     'if not seen:  # follow-ons alone' 'if False:  # follow-ons alone'
   gmutant "a builder that failed counts as a follow-on" \
     'errors[-1][1] = "follow-on" if DEPENDENCY_FAILED_RE.match(ln) else None' 'errors[-1][1] = "follow-on"'
+  gmutant "a 416 is retried without a resume" 'if c == 416 and m.group(1) in resumed:' 'if c == 416:'
+  gmutant "a resumed download is not noticed" '            resumed.add(r.group(1))' '            pass'
+  gmutant "unrealised references fail the release" '             "could not be realised")' '             )'
+  gmutant "cache.nixos.org errors are never retried" '    if env.get("UPSTREAM_CACHE"):' '    if False:'
   gmutant "retry without a bound" 'if n == tries:' 'if False:'
   gmutant "the gate checked only before later tries" '        before()
         code, lines = run(cmd)' '        if n > 1:
