@@ -53,6 +53,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -60,6 +61,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.ReadOnlyComposable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -120,7 +122,7 @@ import com.rimeos.remote.core.input.Refusal
 import com.rimeos.remote.core.input.TouchpadPhase
 import com.rimeos.remote.core.input.TypedText
 import com.rimeos.remote.ui.theme.MachineText
-import com.rimeos.remote.ui.theme.RimePalette
+import com.rimeos.remote.ui.theme.RimeTones
 import com.rimeos.remote.ui.theme.labelColumnWidth
 import kotlin.math.ceil
 import kotlin.math.roundToInt
@@ -322,7 +324,8 @@ private fun fieldValue(f: TypedText.Field) = TextFieldValue(
 
 @Composable
 private fun TitleWithStatus(machine: String, phase: TouchpadPhase) {
-    val (word, colour) = statusWord(phase)
+    val word = statusWord(phase)
+    val colour = statusColour(phase)
     val dot by animateColorAsState(colour, tween(220), label = "status-dot")
     Column {
         Text(machine, style = MaterialTheme.typography.titleMedium, maxLines = 1)
@@ -342,23 +345,38 @@ private fun TitleWithStatus(machine: String, phase: TouchpadPhase) {
     }
 }
 
-private val Amber = Color(0xFFF2C46D)
+/** The desktop's own warning and danger tones, resolved for the surface in use. */
+private val Amber: Color
+    @Composable @ReadOnlyComposable get() = RimeTones.forToken("warning")
+private val Danger: Color
+    @Composable @ReadOnlyComposable get() = RimeTones.forToken("danger")
+private val Quiet: Color
+    @Composable @ReadOnlyComposable get() = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.55f)
 
-private fun statusWord(phase: TouchpadPhase): Pair<String, Color> = when (phase) {
-    TouchpadPhase.Ready -> "ready" to RimePalette.Teal
-    TouchpadPhase.Connecting -> "connecting" to RimePalette.Bone.copy(alpha = 0.5f)
-    TouchpadPhase.Paused -> "paused" to Amber
-    TouchpadPhase.LinkLost -> "reconnecting" to Amber
+private fun statusWord(phase: TouchpadPhase): String = when (phase) {
+    TouchpadPhase.Ready -> "ready"
+    TouchpadPhase.Connecting -> "connecting"
+    TouchpadPhase.Paused -> "paused"
+    TouchpadPhase.LinkLost -> "reconnecting"
     is TouchpadPhase.Waiting -> when (phase.why) {
-        Refusal.LOCKED -> "locked" to Amber
-        Refusal.BUSY -> "in use" to Amber
-        else -> "waiting" to Amber
+        Refusal.LOCKED -> "locked"
+        Refusal.BUSY -> "in use"
+        else -> "waiting"
     }
-    is TouchpadPhase.Stopped -> "stopped" to RimePalette.Alarm
-    is TouchpadPhase.GrantOff -> "off" to RimePalette.Bone.copy(alpha = 0.5f)
-    TouchpadPhase.Unsupported -> "not available" to RimePalette.Bone.copy(alpha = 0.5f)
-    is TouchpadPhase.Ended -> "closed" to RimePalette.Alarm
-    TouchpadPhase.Away -> "closed" to RimePalette.Bone.copy(alpha = 0.5f)
+    is TouchpadPhase.Stopped -> "stopped"
+    is TouchpadPhase.GrantOff -> "off"
+    TouchpadPhase.Unsupported -> "not available"
+    is TouchpadPhase.Ended -> "closed"
+    TouchpadPhase.Away -> "closed"
+}
+
+@Composable
+@ReadOnlyComposable
+private fun statusColour(phase: TouchpadPhase): Color = when (phase) {
+    TouchpadPhase.Ready -> MaterialTheme.colorScheme.primary
+    TouchpadPhase.Paused, TouchpadPhase.LinkLost, is TouchpadPhase.Waiting -> Amber
+    is TouchpadPhase.Stopped, is TouchpadPhase.Ended -> Danger
+    else -> Quiet
 }
 
 // ── options ─────────────────────────────────────────────────────────────
@@ -385,17 +403,23 @@ private fun Options(settings: Settings, onNatural: (Boolean) -> Unit, onSpeed: (
             Spacer(Modifier.height(6.dp))
             Text("Pointer speed", style = MaterialTheme.typography.bodyLarge)
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("Slow", style = MaterialTheme.typography.labelSmall)
+                Text("Slow", style = MaterialTheme.typography.labelMedium)
                 Slider(
                     value = settings.touchpadSpeed,
                     onValueChange = onSpeed,
                     valueRange = 0.5f..2f,
+                    // The Rime scheme leaves the container slots at Material's
+                    // defaults (lavender); the track takes the accent instead.
+                    colors = SliderDefaults.colors(
+                        inactiveTrackColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.18f),
+                        inactiveTickColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.5f),
+                    ),
                     modifier = Modifier
                         .weight(1f)
                         .padding(horizontal = 10.dp)
                         .semantics { contentDescription = "Pointer speed" },
                 )
-                Text("Fast", style = MaterialTheme.typography.labelSmall)
+                Text("Fast", style = MaterialTheme.typography.labelMedium)
             }
         }
     }
@@ -412,11 +436,11 @@ private fun Pad(model: TouchpadViewModel, state: TouchpadUiState, machine: Strin
     val ready = state.phase == TouchpadPhase.Ready
     val hintAlpha by animateFloatAsState(if (touched || !ready) 0f else 1f, tween(400), label = "hint")
     val edge by animateColorAsState(
-        if (ready) RimePalette.Teal.copy(alpha = 0.28f) else MaterialTheme.colorScheme.outline.copy(alpha = 0.35f),
+        if (ready) MaterialTheme.colorScheme.primary.copy(alpha = 0.35f) else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.10f),
         tween(250),
         label = "pad-edge",
     )
-    val teal = RimePalette.Teal
+    val teal = MaterialTheme.colorScheme.primary
 
     // The note that the computer let go by itself: shown for a few seconds.
     var releasedShown by remember { mutableStateOf(false) }
@@ -439,7 +463,7 @@ private fun Pad(model: TouchpadViewModel, state: TouchpadUiState, machine: Strin
             .testTag(TouchpadTags.PAD)
             .semantics {
                 contentDescription = "Touchpad for $machine"
-                stateDescription = statusWord(state.phase).first
+                stateDescription = statusWord(state.phase)
                 if (ready) {
                     customActions = listOf(
                         CustomAccessibilityAction("Left click") { model.click(MouseButton.LEFT); true },
@@ -600,7 +624,7 @@ private fun PhasePanel(model: TouchpadViewModel, phase: TouchpadPhase, machine: 
             }
             is TouchpadPhase.Stopped -> {
                 val left = ceil((phase.until - now) / 1000.0).roundToInt().coerceAtLeast(0)
-                Glyph("■", RimePalette.Alarm)
+                Glyph("■", Danger)
                 PanelTitle("Stopped at the computer")
                 PanelBody(
                     if (left > 0) {
@@ -619,7 +643,7 @@ private fun PhasePanel(model: TouchpadViewModel, phase: TouchpadPhase, machine: 
             is TouchpadPhase.GrantOff -> {
                 val clipboard = LocalClipboardManager.current
                 var copied by remember { mutableStateOf(false) }
-                Glyph("⌨", RimePalette.Teal)
+                Glyph("⌨", MaterialTheme.colorScheme.primary)
                 PanelTitle("Turn the touchpad on at the computer")
                 PanelBody(
                     "This phone is paired with $machine but is not allowed to move its pointer or type. " +
@@ -660,12 +684,12 @@ private fun PhasePanel(model: TouchpadViewModel, phase: TouchpadPhase, machine: 
                 )
             }
             TouchpadPhase.Unsupported -> {
-                Glyph("↑", RimePalette.Bone.copy(alpha = 0.6f))
+                Glyph("↑", Quiet)
                 PanelTitle("Update Rime on $machine")
                 PanelBody("Its Rime Remote is too old for the touchpad. Once it is updated, this screen works.")
             }
             is TouchpadPhase.Ended -> {
-                Glyph("×", RimePalette.Alarm)
+                Glyph("×", Danger)
                 PanelTitle("$machine closed the touchpad")
                 if (phase.message.isNotBlank()) PanelBody(phase.message)
                 Spacer(Modifier.height(16.dp))
@@ -813,7 +837,7 @@ private fun PadButton(label: String, enabled: Boolean, shape: Shape, modifier: M
     var down by remember { mutableStateOf(false) }
     val fill by animateColorAsState(
         when {
-            down -> RimePalette.Teal.copy(alpha = 0.30f)
+            down -> MaterialTheme.colorScheme.primaryContainer
             else -> MaterialTheme.colorScheme.surfaceVariant
         },
         tween(90),
@@ -824,6 +848,7 @@ private fun PadButton(label: String, enabled: Boolean, shape: Shape, modifier: M
             .height(60.dp)
             .clip(shape)
             .background(fill)
+            .border(BorderStroke(1.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)), shape)
             .pointerInput(enabled) {
                 if (!enabled) return@pointerInput
                 awaitEachGesture {
@@ -871,16 +896,25 @@ private fun Key(
     minWidth: Dp = 48.dp,
     onClick: () -> Unit,
 ) {
+    // Locked is the strongest fill the scheme has; armed (once) a quieter
+    // one with an edge, so the two read apart at a glance in either theme.
+    val scheme = MaterialTheme.colorScheme
     val container = when {
-        locked -> RimePalette.Teal
-        selected -> RimePalette.Teal.copy(alpha = 0.22f)
-        accent -> RimePalette.TealDeep.copy(alpha = 0.55f)
-        else -> MaterialTheme.colorScheme.surfaceVariant
-    }
+        locked -> scheme.primary
+        selected -> scheme.primaryContainer
+        else -> scheme.surfaceVariant
+    }.let { if (enabled || !(locked || selected)) it else it.copy(alpha = 0.45f) }
     val content = when {
-        locked -> RimePalette.InkSunken
-        selected -> RimePalette.Teal
-        else -> MaterialTheme.colorScheme.onSurfaceVariant
+        locked -> scheme.onPrimary
+        selected -> scheme.onPrimaryContainer
+        accent -> scheme.primary
+        else -> scheme.onSurfaceVariant
+    }
+    val edge = when {
+        locked -> null
+        selected -> BorderStroke(1.dp, scheme.primary)
+        accent -> BorderStroke(1.dp, scheme.primary.copy(alpha = if (enabled) 0.6f else 0.25f))
+        else -> BorderStroke(1.dp, scheme.onSurface.copy(alpha = 0.08f))
     }
     Surface(
         onClick = onClick,
@@ -888,7 +922,7 @@ private fun Key(
         shape = RoundedCornerShape(10.dp),
         color = container,
         contentColor = content,
-        border = if (selected && !locked) BorderStroke(1.dp, RimePalette.Teal.copy(alpha = 0.7f)) else null,
+        border = edge,
         modifier = Modifier
             .defaultMinSize(minWidth = minWidth, minHeight = 48.dp)
             .semantics {

@@ -7,6 +7,8 @@ import android.os.SystemClock
 import android.view.InputDevice
 import android.view.MotionEvent
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsNotEnabled
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
@@ -14,6 +16,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.compose.ui.test.performScrollTo
 import androidx.compose.ui.test.performTextInput
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -25,6 +28,7 @@ import com.rimeos.remote.core.input.Input
 import com.rimeos.remote.core.input.KeyMap
 import com.rimeos.remote.core.input.TouchpadPhase
 import com.rimeos.remote.link.LinkHub
+import com.rimeos.remote.ui.theme.RimeRemoteTheme
 import com.rimeos.remote.ui.touchpad.TouchpadScreen
 import com.rimeos.remote.ui.touchpad.TouchpadTags
 import com.rimeos.remote.ui.touchpad.TouchpadUiState
@@ -68,6 +72,8 @@ class TouchpadOnDeviceTest {
     private lateinit var machine: PairedMachine
     private lateinit var model: TouchpadViewModel
     private lateinit var name: String
+    /** The screenshots take one look in the dark scheme too. */
+    private var dark by mutableStateOf(false)
 
     @get:Rule
     val compose = createAndroidComposeRule<ComposeHostActivity>()
@@ -90,7 +96,10 @@ class TouchpadOnDeviceTest {
         machine = Paired.machine(name)
         if (allowed) Desktop.grantInput(machine.deviceId, true)
         hub.remember(machine.deviceId, Paired.identityOf(machine))
-        hub.connectNow(machine)
+        // Held, as the app holds every machine while it is unlocked: a held
+        // link that drops is dialled again by the hub.
+        hub.markUnlocked()
+        hub.hold(machine)
         val remote = awaitValue(15_000, "the computer's remote hello") {
             hub.state(machine.deviceId)?.remote?.takeIf { it.features.isNotEmpty() }
         }
@@ -102,7 +111,7 @@ class TouchpadOnDeviceTest {
         }
         compose.setContent {
             val s by model.state.collectAsStateWithLifecycle()
-            TouchpadScreen(model, s, Settings(), onNatural = {}, onSpeed = {}, onBack = {})
+            RimeRemoteTheme(dark = dark) { TouchpadScreen(model, s, Settings(), onNatural = {}, onSpeed = {}, onBack = {}) }
         }
         instrumentation.runOnMainSync { model.enter() }
     }
@@ -348,6 +357,38 @@ class TouchpadOnDeviceTest {
     }
 
     @Test
+    fun a_lost_link_comes_back_by_itself_while_the_screen_is_in_front_and_not_once_it_left() {
+        open(allowed = true)
+        await("the touchpad to open") { it == TouchpadPhase.Ready }
+        val opens = { Desktop.inputStubActions().count { it.optString("a") == "open" } }
+        val first = opens()
+
+        Desktop.stopRemoted()
+        await("the link to drop") { it == TouchpadPhase.LinkLost }
+        compose.waitForIdle()
+        compose.onNodeWithContentDescription("Escape").assertIsNotEnabled()
+        Desktop.restartRemoted()
+        await("the touchpad to come back", timeoutMs = 90_000) { it == TouchpadPhase.Ready }
+        assertTrue("the channel was opened again at the computer", opens() > first)
+        val (centre, dp) = padCentre()
+        val before = Desktop.inputStubActions().size
+        touch(centre - Offset(100 * dp, 0f), Offset(160 * dp, 0f))
+        landed("the pointer to move on the new channel", before) { a -> a.of("motion").isNotEmpty() }
+
+        // Gone from the screen: a link that comes back opens nothing.
+        instrumentation.runOnMainSync { model.leave() }
+        Desktop.stopRemoted()
+        Desktop.restartRemoted()
+        awaitValue(90_000, "the link to come back") {
+            hub.state(machine.deviceId)?.status?.takeIf { it == LinkHub.Status.CONNECTED }
+        }
+        val away = opens()
+        Thread.sleep(3_000)
+        assertEquals("no channel opened for a screen that is not in front", away, opens())
+        assertEquals(TouchpadPhase.Away, state().phase)
+    }
+
+    @Test
     fun a_phone_that_is_not_allowed_sees_how_to_allow_it_and_opens_once_it_is() {
         open(allowed = false)
         await("the explanation") { it is TouchpadPhase.GrantOff }
@@ -368,10 +409,14 @@ class TouchpadOnDeviceTest {
         landed("the stub to open", before) { a -> a.any { it.optString("a") == "open" } }
     }
 
-    /** Screenshots for the review, only when asked for: `-e touchpad_shots 1`. */
+    /**
+     * Screenshots for the review, only when asked for: `adb shell setprop
+     * debug.rime.touchpad_shots 1` before the run (a debug property, gone at
+     * the emulator's next start). Otherwise this test does nothing.
+     */
     @Test
     fun screenshots() {
-        if (InstrumentationRegistry.getArguments().getString("touchpad_shots").isNullOrBlank()) return
+        if (!shots) return
         open(allowed = true)
         await("the touchpad to open") { it == TouchpadPhase.Ready }
         Thread.sleep(600)
@@ -386,12 +431,16 @@ class TouchpadOnDeviceTest {
         inject(down, MotionEvent.ACTION_POINTER_UP or (1 shl MotionEvent.ACTION_POINTER_INDEX_SHIFT), listOf(centre - Offset(80f, 0f), centre + Offset(80f, 40f)))
         inject(down, MotionEvent.ACTION_UP, listOf(centre - Offset(80f, 0f)))
         // A modifier armed, one locked, and the extra keys open.
-        compose.onNodeWithText("Ctrl").performClick()
+        compose.onNodeWithText("Ctrl").performScrollTo().performClick()
+        compose.onNodeWithText("Shift").performScrollTo().performClick()
         compose.onNodeWithText("Shift").performClick()
-        compose.onNodeWithText("Shift").performClick()
-        compose.onNodeWithContentDescription("More keys").performClick()
+        compose.onNodeWithContentDescription("More keys").performScrollTo().performClick()
         Thread.sleep(400)
         shot("keys")
+        instrumentation.runOnMainSync { dark = true }
+        Thread.sleep(400)
+        shot("keys-dark")
+        instrumentation.runOnMainSync { dark = false }
         compose.onNodeWithText("Options").performClick()
         Thread.sleep(400)
         shot("options")
@@ -408,6 +457,12 @@ class TouchpadOnDeviceTest {
         shot("paused")
         Desktop.inputStubGate(locked = false)
         await("the resume") { it == TouchpadPhase.Ready }
+        Desktop.stopRemoted()
+        await("the link to drop") { it == TouchpadPhase.LinkLost }
+        Thread.sleep(600)
+        shot("reconnecting")
+        Desktop.restartRemoted()
+        await("the touchpad to come back", timeoutMs = 90_000) { it == TouchpadPhase.Ready }
         Desktop.stopInput()
         await("the stop") { it is TouchpadPhase.Stopped }
         Thread.sleep(600)
@@ -416,8 +471,13 @@ class TouchpadOnDeviceTest {
 
     private val machineName: String get() = machine.machine
 
+    private val shots: Boolean by lazy {
+        val out = instrumentation.uiAutomation.executeShellCommand("getprop debug.rime.touchpad_shots")
+        android.os.ParcelFileDescriptor.AutoCloseInputStream(out).bufferedReader().readText().trim() == "1"
+    }
+
     private fun shot(label: String) {
-        if (InstrumentationRegistry.getArguments().getString("touchpad_shots").isNullOrBlank()) return
+        if (!shots) return
         compose.waitForIdle()
         Thread.sleep(250)
         val bmp: Bitmap = instrumentation.uiAutomation.takeScreenshot() ?: return

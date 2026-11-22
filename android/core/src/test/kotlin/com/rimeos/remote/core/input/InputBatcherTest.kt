@@ -263,12 +263,17 @@ class InputBatcherTest {
     @Test
     fun `a frame never passes this phone's byte limit`() {
         val b = InputBatcher()
-        // Characters that take four bytes and quotes that take two.
-        b.text("\"".repeat(900))
-        b.text("😀".repeat(900))
-        repeat(60) { b.tap(30, setOf(Mod.CTRL, Mod.SHIFT, Mod.ALT, Mod.SUPER, Mod.ALTGR)) }
+        // A second's worth of characters that take four bytes each (two
+        // text events of the computer's longest), then taps carrying every
+        // modifier (a three-digit code): under the event and text limits,
+        // over the byte budget.
+        b.text("😀".repeat(Input.TEXT_PER_SEC))
+        repeat(Input.MAX_EVENTS) { b.tap(248, setOf(Mod.CTRL, Mod.SHIFT, Mod.ALT, Mod.SUPER, Mod.ALTGR)) }
         val (frames, _) = drain(b)
-        assertTrue(frames.all { it.toByteArray().size <= Input.FRAME_BYTES })
+        val sizes = frames.map { it.toByteArray().size }
+        assertTrue(sizes.all { it <= Input.FRAME_BYTES }, "every frame within the budget: $sizes")
+        assertTrue(sizes.max() > Input.FRAME_BYTES - 200, "the budget was reached, so it was what split them: $sizes")
+        assertEquals(Input.MAX_EVENTS, frames.sumOf { f -> Frames.events(f).count { Frames.t(it) == "tap" } })
         assertTrue(Input.FRAME_BYTES < Input.MAX_FRAME_BYTES)
     }
 
