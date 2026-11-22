@@ -21,18 +21,48 @@
 #             and leaves matugen's colors.lua byte for byte;
 #   end       `hyprctl configerrors` is empty again, and Hyprland logged no XCursor shape fallback (session.lua
 #             names the Adwaita cursor theme; without it every shape fell back, 951 lines in one session).
+#   relock    (last: it kills the session's Shell) a foot window that appends every key it gets to a file takes
+#             "ab" (control); the Shell locks over IPC (secure=true), is killed with SIGKILL and started again
+#             with the dead process's own environment and argv. The new process logs "restarted while the
+#             session was locked" and "lock secure=true", its lock record names it, it stays up, getoption
+#             reads misc:allow_session_lock_restore true and set, and "zz" typed now never reaches foot. No
+#             Return is pressed and no password is ever submitted.
+#
+# Mutant: checks.x86_64-linux.hypr-lua.mutants.lock-restore (the shipped appearance.lua without
+# allow_session_lock_restore) must FAIL in relock: Hyprland refuses the new Shell's lock.
 #
 # Results (every reply the asserts read) are in the VM's /tmp/hl-out, copied out as hl-out.tar,
-# with screenshots (start, display-snapped, input-refused, probe-modules-missing).png.
+# with screenshots (start, display-snapped, input-refused, probe-modules-missing, relocked).png.
 #   nix build path:.#checks.x86_64-linux.hypr-lua -L
+#   nix build path:.#checks.x86_64-linux.hypr-lua.mutants.lock-restore -L   (must fail)
 { pkgs, self }:
 
 let
   user = "alice";
   shellDir = "/run/current-system/sw/share/rime-shell";
   libexec = "/run/current-system/sw/libexec";
-in
-pkgs.testers.runNixOSTest {
+
+  # The mutant: the same system with the shipped appearance.lua minus allow_session_lock_restore (desktop.nix's
+  # update-news mutant does the same to another knob). firstrun refreshes rime/*.lua from this tree at login.
+  lockRestoreDropped = {
+    environment.extraSetup = ''
+      f=$out/share/rime/hypr/rime/appearance.lua
+      # buildEnv may link a whole directory from one package: copy the links down to the file
+      for d in $out/share $out/share/rime; do
+        if [ -L "$d" ]; then
+          t=$(readlink -f "$d"); rm "$d"; mkdir "$d"
+          for x in "$t"/*; do ln -s "$x" "$d/"; done
+        fi
+      done
+      cp -rL --no-preserve=mode,ownership $out/share/rime/hypr $out/share/rime/hypr.real
+      rm -rf $out/share/rime/hypr; mv $out/share/rime/hypr.real $out/share/rime/hypr
+      t=$(mktemp); cp "$f" "$t"; rm "$f"
+      grep -v '^[[:space:]]*allow_session_lock_restore[[:space:]]*=' "$t" > "$f"
+      if grep allow_session_lock_restore "$f" | grep -v '^[[:space:]]*--'; then echo "mutant: option still there" >&2; exit 1; fi
+    '';
+  };
+
+  test = pkgs.testers.runNixOSTest {
   name = "rime-hypr-lua";
   node.pkgsReadOnly = false;
 
@@ -360,6 +390,76 @@ pkgs.testers.runNixOSTest {
             assert again == 1, str(again) + " 'loaded again' lines for one problem -> ok transition"
             empty = re.findall(r"could not ask Hyprland about its config: *$", log, re.M)
             assert not empty, str(len(empty)) + " probe answers with no detail (a probe killed mid-run)"
+
+        # Last: it kills the session's Shell, and nothing after it may need that Shell.
+        with subtest("relock: a Shell killed while the screen is locked gets its lock back"):
+            # A window that appends every key it gets to /tmp/typed, raw (no Return needed).
+            machine.succeed("install -m 0666 /dev/null /tmp/typed; printf '%s\\n' '#!/bin/sh' "
+                            "'stty raw -echo' 'exec cat >> /tmp/typed' > /tmp/keysink.sh; chmod 0755 /tmp/keysink.sh")
+            run("relock-spawn", "hyprctl dispatch 'hl.dsp.exec_cmd(\"foot -a rime-relock-test /tmp/keysink.sh\")'")
+            addr = None
+            for _ in range(60):
+                mine = [c for c in j("relock-clients", "hyprctl -j clients") if c.get("class") == "rime-relock-test"]
+                if mine:
+                    addr = mine[0]["address"]
+                    break
+                time.sleep(0.5)
+            assert addr, "foot never mapped a window"
+            for _ in range(20):
+                if j("relock-active", "hyprctl -j activewindow").get("address") == addr:
+                    break
+                time.sleep(0.5)
+            machine.sleep(1)
+            # Control: unlocked, the keys reach foot, so "nothing arrived" later means something.
+            machine.send_chars("ab")
+            machine.wait_until_succeeds("grep -q ab /tmp/typed", timeout=20)
+
+            def instances(name):
+                # qs may print a locale warning before the JSON (2>&1 in run)
+                rc, out = run(name, "qs -c ${shellDir} list -j")
+                assert rc == 0, name + ": exit " + str(rc)
+                return json.loads(out[out.index("["):])
+            inst = instances("relock-list-1")
+            assert len(inst) == 1, "want one Shell instance, got " + repr(inst)
+            pid1 = int(inst[0]["pid"])
+            machine.succeed("cp /proc/%d/environ /tmp/shell.env && cp /proc/%d/cmdline /tmp/shell.cmd && "
+                            "chmod 0644 /tmp/shell.env /tmp/shell.cmd" % (pid1, pid1))
+            run("relock-lock", "qs -c ${shellDir} ipc call lockscreen lock")
+            machine.wait_until_succeeds(u("qs -c ${shellDir} log 2>&1 | grep -q 'Rime pacing: lock secure=true'"), timeout=30)
+            machine.succeed("cat > /tmp/hl-out/relock-shell-1.log <<'HLEOF'\n" + shell_log() + "\nHLEOF")
+
+            machine.succeed("kill -9 %d" % pid1)
+            machine.wait_until_fails("test -e /proc/%d" % pid1, timeout=20)
+            # Started again the way the session started it: the dead process's own environment and argv,
+            # as a child of Hyprland.
+            machine.succeed("printf '%s\\n' 'mapfile -d \"\" E < /tmp/shell.env' 'mapfile -d \"\" A < /tmp/shell.cmd' "
+                            "'exec /run/current-system/sw/bin/env -i \"''${E[@]}\" RIME_PACING_LOG=1 \"''${A[@]}\" > /tmp/shell2.log 2>&1' "
+                            "> /tmp/restart-shell.sh; install -m 0666 /dev/null /tmp/shell2.log")
+            run("relock-restart", "hyprctl dispatch 'hl.dsp.exec_cmd(\"/run/current-system/sw/bin/bash /tmp/restart-shell.sh\")'")
+            try:
+                machine.wait_until_succeeds("grep -q 'restarted while the session was locked' /tmp/shell2.log", timeout=60)
+                machine.wait_until_succeeds("grep -q 'Rime pacing: lock secure=true' /tmp/shell2.log", timeout=60)
+            finally:
+                machine.execute("cp /tmp/shell2.log /tmp/hl-out/relock-shell-2.log")
+            machine.sleep(3)
+            machine.screenshot("relocked")
+            inst = instances("relock-list-2")
+            assert len(inst) == 1, "want one Shell instance after the restart, got " + repr(inst)
+            pid2 = int(inst[0]["pid"])
+            assert pid2 != pid1, "the restarted Shell has the old pid"
+            rec = j("relock-record", "cat /run/user/1000/rime-shell/lock-held.json")
+            assert rec.get("held") is True and rec.get("engaged") is True and rec.get("pid") == pid2, \
+                "the lock record does not name the restarted Shell: " + repr(rec)
+            assert "lock secure=false" not in machine.succeed("cat /tmp/shell2.log"), "the new Shell's lock was refused"
+            o = option("relock-option", "misc:allow_session_lock_restore")
+            assert o.get("set") is True and (o.get("bool") is True or o.get("int") == 1), \
+                "misc:allow_session_lock_restore is not set: " + repr(o)
+            # The desktop is not reachable: keys now go to the lock surface (its password field; no Return).
+            machine.send_chars("zz")
+            machine.sleep(3)
+            typed = machine.succeed("cat /tmp/typed")
+            assert "z" not in typed, "a key reached the desktop under the restarted Shell's lock: " + repr(typed)
+            machine.succeed("test -e /proc/%d" % pid2)
     except Exception:
         dump()
         raise
@@ -369,4 +469,7 @@ pkgs.testers.runNixOSTest {
         machine.execute("tar -C /tmp -cf /tmp/hl-out.tar hl-out 2>/dev/null")
         machine.copy_from_machine("/tmp/hl-out.tar")
   '';
-}
+  };
+in
+# The mutant is an attribute of the check (checks.x86_64-linux.hypr-lua.mutants.lock-restore), not a check itself.
+test // { mutants.lock-restore = test.extendNixOS { module = lockRestoreDropped; }; }

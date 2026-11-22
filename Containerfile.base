@@ -3283,6 +3283,15 @@ RUN set -eux; \
         m="$(basename "$f" .lua)"; \
         grep -q "^rime(\"${m}\")" /usr/share/rime/hypr/hyprland.lua; \
     done; \
+    # A Rime Shell started again while the screen is locked must get the lock
+    # back (rime-shell LockKeeper.qml): Hyprland refuses that new lock unless
+    # misc.allow_session_lock_restore is on, and the session then stays locked
+    # with no password prompt. Executable Lua only, never the comment above it
+    # that names the option. The --verify-config run below is what proves this
+    # Hyprland knows the key: it refuses an unknown one ("unknown config key").
+    if ! grep -qE '^[[:space:]]*allow_session_lock_restore[[:space:]]*=[[:space:]]*true[[:space:]]*,?[[:space:]]*$' \
+        /usr/share/rime/hypr/rime/appearance.lua \
+        ; then echo "FATAL: appearance.lua no longer sets misc.allow_session_lock_restore = true"; exit 1; fi; \
     # Parse the seeded form with this image's Hyprland. The tree is copied into a
     # config directory first because `require("rime.x")` resolves against the
     # CONFIG FILE's own directory — verifying the template where it sits would
