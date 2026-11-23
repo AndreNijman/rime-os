@@ -158,7 +158,9 @@ cd "$android" || fatal "cannot enter $android"
 export RIME_VERSION_CODE="$code"
 export RIME_VERSION_NAME="$name"
 
-./gradlew --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease \
+# gradle-retry.sh runs it again only when Gradle failed fetching a plugin or a
+# dependency (one bad answer from a repository is not a failed release).
+"$here/gradle-retry.sh" ./gradlew --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease \
     || fatal "the release build failed"
 
 # `verifyReleaseSigning` reads the signature out of the artefacts with

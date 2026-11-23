@@ -292,6 +292,9 @@ def missing_from_error(err):
 
 # The zstd level of the Rime cache's NARs (`stage`); delta.md §8 measured it against level 3.
 STAGE_LEVEL = 19
+# `stage --test-stage-level N` stages at another level: VM tests only (update-e2e: level 19 in a 4-core VM was ~12
+# min per release). A release never passes it: check_workflow.py refuses it in every release workflow (TEST_ONLY).
+TEST_STAGE_LEVELS = range(1, STAGE_LEVEL + 1)
 
 
 def store_url(base, **params):
@@ -773,11 +776,14 @@ def cmd_stage(a):
         placeholders.append(f)
     refs = {p: i["references"] for p, i in clo["paths"].items()}
     order = topo_order(rime, refs)
+    level = STAGE_LEVEL if getattr(a, "test_stage_level", None) is None else a.test_stage_level
+    if level != STAGE_LEVEL:
+        log(f"stage: TEST zstd level {level} (a release stages at {STAGE_LEVEL})")
     if order:
         # Level 19 (delta.md §8): 14-20 % fewer bytes than zstd's default level 3 for every client, and it decodes
         # with any zstd's default window (no --long). parallel-compression: the same bytes, less wall clock.
         run(NIX + ["copy", "--no-recursive", "--to", store_url("file://" + os.path.abspath(cache), compression="zstd",
-                                                               compression_level=STAGE_LEVEL,
+                                                               compression_level=level,
                                                                parallel_compression="true")] + FRESH + order)
     for f in placeholders:
         if "rime-placeholder" not in open(f).read():
@@ -2094,10 +2100,25 @@ def cmd_channels(a):
 def next_release_id(script, today, os_rev, shell_rev, candidates):
     """next-release-id with its published-* inputs = the newest of the candidates (bootc :daily, Nix edge)."""
     cands = [c for c in candidates if c and c.get("id") and RELEASE_RE.match(c["id"])]
-    newest = max(cands, key=lambda c: parse_release(c["id"])) if cands else {"id": "", "os": "", "shell": ""}
-    p = run([script, today, os_rev, shell_rev, newest["id"], newest.get("os", ""), newest.get("shell", "")])
-    rid = p.stdout.decode().strip()
-    parse_release(rid)
+
+    def ask(pub):
+        p = run([script, today, os_rev, shell_rev, pub["id"], pub.get("os", ""), pub.get("shell", "")])
+        rid = p.stdout.decode().strip()
+        parse_release(rid)
+        return rid
+
+    rid = ask(max(cands, key=lambda c: parse_release(c["id"])) if cands else {"id": "", "os": "", "shell": ""})
+    # A reissue of one candidate's ID must still be newer than every OTHER candidate, or publish refuses it as "not
+    # newer". It happened three times (runs 42907767160, 43794108179, 44216463487): a Nix-only merge published Nix
+    # release X, the next bootc release (build-image reads only bootc's own :daily) was ALSO named X, and the Nix
+    # release of that same source followed bootc's X as a reissue. Count on from the other candidate instead: on such
+    # a day bootc and Nix name the same source differently.
+    others = [c for c in cands if (c.get("os", ""), c.get("shell", "")) != (os_rev, shell_rev)]
+    for _ in range(len(others)):
+        held = [c for c in others if parse_release(c["id"]) >= parse_release(rid)]
+        if not held:
+            break
+        rid = ask(max(held, key=lambda c: parse_release(c["id"])))
     return rid
 
 
@@ -2386,10 +2407,12 @@ def main(argv=None):
         p.add_argument("--upstream", default="https://cache.nixos.org")
         p.add_argument("--upstream-key", action="append", default=[])
 
-    p = sub.add_parser("stage")
+    p = sub.add_parser("stage", allow_abbrev=False)  # --test-stage-level has one spelling (check_workflow.py)
     p.add_argument("--closure", required=True)
     p.add_argument("--split", required=True)
     p.add_argument("--out", required=True)
+    p.add_argument("--test-stage-level", type=int, choices=TEST_STAGE_LEVELS, metavar="N",
+                   help=f"TESTS ONLY: zstd level N instead of {STAGE_LEVEL} (no release workflow may pass it)")
     p.set_defaults(fn=cmd_stage)
 
     p = sub.add_parser("deltas", help="build job: zstd --patch-from deltas against the previous release")

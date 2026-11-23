@@ -176,6 +176,86 @@ def check(name, ok, detail=""):
         failures.append(name)
 
 
+def up():
+    """Seconds since the VM booted: the clock the journal lines in the test log carry."""
+    return float(open("/proc/uptime").read().split()[0])
+
+
+def mtime_up(path):
+    """When a file (or a link itself) last changed, on the up() clock; None when it is absent."""
+    try:
+        return os.lstat(path).st_mtime - (time.time() - up())
+    except FileNotFoundError:
+        return None
+
+
+HOME = os.path.expanduser("~")
+CURR_WALL = f"{HOME}/.curr_wall"
+WALL_JSON = f"{HOME}/.config/rime-shell/src/user_data/wallpaper.json"
+COLORS = f"{HOME}/.cache/rime-shell/colors.json"
+
+
+def running(names):
+    """Processes whose argv[0] or argv[1] basename is one of names."""
+    found = []
+    for p in os.listdir("/proc"):
+        if not p.isdigit():
+            continue
+        try:
+            argv = open(f"/proc/{p}/cmdline", "rb").read().split(b"\0")
+        except OSError:
+            continue
+        # argv[1] too: a script started through its #! line has the interpreter in argv[0].
+        if any(os.path.basename(a.decode(errors="replace")) in names for a in argv[:2]):
+            found.append(int(p))
+    return found
+
+
+def first_apply_done():
+    """The Shell's first-login wallpaper apply has finished. rime-shell-firstrun seeds wallpaper.json, so the Shell
+    finds ~/.curr_wall absent and runs WallpaperService.apply(): ~/.curr_wall is linked, matugen writes colors.json
+    (the frame's palette), rime-greet-wallpaper publishes it, and only then saveConfig() rewrites wallpaper.json."""
+    cw, wj = mtime_up(CURR_WALL), mtime_up(WALL_JSON)
+    return cw is not None and wj is not None and wj >= cw and not running({"matugen", "rime-greet-wallpaper"})
+
+
+def times():
+    def f(v):
+        return "absent" if v is None else f"{v:.1f}"
+    return f"now {up():.1f}, ~/.curr_wall {f(mtime_up(CURR_WALL))}, colors.json {f(mtime_up(COLORS))}, " \
+           f"wallpaper.json {f(mtime_up(WALL_JSON))}, palette background {background()}, frame corner {corner()}"
+
+
+def background():
+    """colors.json background (the frame colour); ColorLoader keeps its fallback #1a282a while it is empty."""
+    try:
+        return json.load(open(COLORS)).get("background", "none")
+    except (OSError, ValueError):
+        return "unreadable or empty"
+
+
+def corner():
+    """The frame's corner pixel on screen, as #rrggbb (None when grim fails)."""
+    from PIL import Image
+    if subprocess.run(["grim", "-g", "0,0 1x1", "/tmp/kept-corner.png"], capture_output=True).returncode != 0:
+        return None
+    return "#%02x%02x%02x" % Image.open("/tmp/kept-corner.png").convert("RGB").getpixel((0, 0))
+
+
+def palette_shown():
+    """The frame's corner pixel is colors.json's background: the Shell shows the wallpaper's palette."""
+    bg = background()
+    return isinstance(bg, str) and len(bg) == 7 and bg.startswith("#") and corner() == bg.lower()
+
+
+def colour_pairs(a, b, pts, n=5):
+    """The commonest (before, after) colours among the pixels that differ: says what changed, not only where."""
+    from collections import Counter
+    from PIL import Image
+    A, B = Image.open(a).convert("RGB"), Image.open(b).convert("RGB")
+    return Counter((A.getpixel(p), B.getpixel(p)) for p in pts).most_common(n)
+
+
 def png_diff(a, b, out_png):
     from PIL import Image, ImageChops
     A, B = Image.open(a).convert("RGB"), Image.open(b).convert("RGB")
@@ -220,6 +300,7 @@ if phase in ("full", "short"):
     hlog_start = len(open(hlog, errors="replace").read().splitlines())
     pid = qs_pid()
     log(f"quickshell pid {pid}, Hyprland pid {hypr_pid()}, frame budget {budget:.2f} ms")
+    log(f"driver start: {times()}")
     cursor(640, 400)
     time.sleep(3)
 
@@ -243,11 +324,25 @@ if phase in ("full", "short"):
     check("before any open: a click at (640,0) reaches the probe", probe_clicks() >= 1, f"{probe_clicks()} clicks")
     cursor(640, 400); time.sleep(1)
 
-    # 1. The picture with no panel ever opened, and the notch click with no window parked. The reference must be a
-    #    settled bar: one taken while the bar still repaints its left side makes every later picture "differ" by the
-    #    same pixels (CI: 765 px in (38,3)-(155,34), identical across all three retries). So it is retaken until two
-    #    pictures a few seconds apart agree outside the clock.
+    # 1. The picture with no panel ever opened, and the notch click with no window parked. It must carry the palette
+    #    the rest of the run has. On the first login the Shell paints its frame in ColorLoader's fallback #1a282a
+    #    until its wallpaper apply has run matugen (first_apply_done) and it has read colors.json. On a slow runner
+    #    that lands after this point, past the settle loop below, and every parked picture then differs from the
+    #    reference by the frame colour alone: CI 36,881-37,132 px, bbox the whole screen, the same in all three
+    #    pictures, in 7 runs. Reproduced by slowing matugen: 36,936 px, the reference (26, 40, 42) = #1a282a and the
+    #    parked picture the matugen palette. In those CI runs the apply's last step ran about 2 s after the driver
+    #    started, before the reference, so there the screen lagged colors.json too (not reproduced). So the
+    #    reference waits until the SCREEN shows colors.json's background, not only until the apply has finished.
+    #    Logged in two steps, so a run says how far the screen lagged the file.
+    applied = wait_for(first_apply_done, 180, 1.0)
+    log(f"first-login apply {'finished' if applied else 'NOT finished after 180 s'}: {times()}")
+    shown = wait_for(palette_shown, 180, 1.0)
+    log(f"first-login palette {'on screen' if shown else 'NOT on screen after 180 s'}: {times()}")
+    #    The reference must also be a settled bar: one taken while the bar still repaints its left side makes every
+    #    later picture "differ" by the same pixels (CI: 765 px in (38,3)-(155,34), identical across all three
+    #    retries). So it is retaken until two pictures a few seconds apart agree outside the clock.
     sh(["grim", f"{out}/0-none.png"])
+    log(f"reference taken: {times()}")
     for _ in range(8):
         time.sleep(3)
         sh(["grim", f"{out}/0-none-again.png"])
@@ -288,6 +383,8 @@ if phase in ("full", "short"):
         log(f"screenshot diff (picture {attempt}): {len(px)} px differ, bbox {bbox}; outside the clock: {len(other)} {other[:20]}")
         if not other:
             break
+        pairs = colour_pairs(f"{out}/0-none.png", f"{out}/1-parked.png", other)
+        log(f"  at {times()}; commonest (reference, now) colours: {pairs}")
         time.sleep(3)
     check("parked: the screen matches the one with no panel ever opened (outside the clock)", not other,
           f"{len(px)} px differ, {len(clock)} in the clock")

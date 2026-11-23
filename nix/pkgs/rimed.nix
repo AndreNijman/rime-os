@@ -12,10 +12,13 @@
 #     services module links /libexec and /share/rime-shell into the system path. Still fixed, still root-owned,
 #     still never a PATH lookup.
 #
-# Tests. checkPhase runs `cargo test --workspace --no-fail-fast`. The tests that cannot pass in the Nix build sandbox
-# are skipped BY NAME in `skips` below, each group with its reason; everything else must pass. postCheck writes the
-# total per crate to $out/share/doc/rimed/cargo-tests.{txt,json} (rimed-test-report.py) and refuses a total that
-# cannot be trusted: a skip name that matches no test, a test that passed by skipping itself, a lost test binary.
+# Tests. rimed itself is only compiled; its cargo test is `rimed.cargoTest` (checks.rimed-cargo-test, and a step of
+# nix-release's build job, so a failing test still stops a release): the same derivation with checkPhase on, whose
+# output is rimed's plus the report. Apart from that report it ships exactly what rimed ships. The checkPhase runs
+# `cargo test --workspace --no-fail-fast`. The tests that cannot pass in the Nix build sandbox are skipped BY NAME in
+# `skips` below, each group with its reason; everything else must pass. postCheck writes the total per crate to
+# $out/share/doc/rimed/cargo-tests.{txt,json} (rimed-test-report.py) and refuses a total that cannot be trusted: a
+# skip name that matches no test, a test that passed by skipping itself, a lost test binary.
 {
   lib,
   rustPlatform,
@@ -323,51 +326,32 @@ let
       "lock::tests::the_loginctl_contract_this_parser_relies_on_is_still_true"
     ];
   };
-in
-rustPlatform.buildRustPackage {
-  pname = "rimed";
-  version = "0.1.0";
 
-  src = lib.fileset.toSource {
-    inherit root;
-    fileset = lib.fileset.unions [
-      (lib.fileset.difference (root + "/rimed") (lib.fileset.maybeMissing (root + "/rimed/target")))
-      # include_str! targets: the system profiles, and (in tests) the firewall service catalogue.
-      (root + "/config")
-      (root + "/files/system/firewall/services")
-      # Test fixtures shared with other parts of the repository (the Android client's wire vectors, the relay).
-      (root + "/android/core/src/test/resources")
-      (root + "/relay/src/room.js")
-      # Installed next to the binaries: units, D-Bus policy, polkit actions, trust roots.
-      (root + "/files/system/units/rime-agentd.service")
-      (root + "/files/system/units/rime-aid.service")
-      (root + "/files/system/units/rime-lid.service")
-      (root + "/files/system/units/rime-remoted.service")
-      (root + "/files/system/units/rime-secretd.service")
-      (root + "/files/system/dbus-1")
-      (root + "/files/system/polkit-1/actions")
-      (root + "/files/system/trust")
-    ];
+  rimedTree = lib.fileset.difference (root + "/rimed") (lib.fileset.maybeMissing (root + "/rimed/target"));
+
+  # What rimed and its deps derivation share, so deps compiles each third-party crate exactly as rimed's own build
+  # would (same toolchain, hooks, flags, inputs and test environment): cargo then finds it fresh and reuses it.
+  common = {
+    version = "0.1.0";
+    cargoRoot = "rimed";
+    buildAndTestSubdir = "rimed";
+    cargoLock.lockFile = root + "/rimed/Cargo.lock";
+    # deps compiles the test units too; rimed turns its checkPhase off and on again in cargoTest.
+    doCheck = true;
+    # Programs the tests run: by the store paths above (curl, git, bwrap, openssl) or through PATH.
+    # dbus: rimed's bus tests (rimed/src/bus_tests.rs) start a private dbus-daemon from PATH.
+    nativeCheckInputs = [ bubblewrap cacert curl dbus git openssh openssl python3 util-linux ];
+    # xmllint, for the polkit checks in postInstall; help2man, for rime(1).
+    nativeBuildInputs = [ libxml2 help2man ];
+    inherit preCheck;
   };
 
-  cargoRoot = "rimed";
-  buildAndTestSubdir = "rimed";
-  cargoLock.lockFile = root + "/rimed/Cargo.lock";
-
-  env = lib.mapAttrs' (name: value: lib.nameValuePair "RIME_PATH_${name}" value) paths // {
-    RIME_PATHS_EXPECT_ALL_SET = "1";
-  };
-
-  # The whole workspace, every test binary even after one fails, so the log has every total.
-  doCheck = true;
-  cargoTestFlags = [ "--workspace" "--no-fail-fast" ];
-  # --show-output puts a passing test's captured output in the log, so the report can see a test that skipped itself.
-  checkFlags = lib.concatMap (t: [ "--skip" t ]) (lib.concatLists (lib.attrValues skips)) ++ [ "--show-output" ];
-  # Programs the tests run: by the store paths above (curl, git, bwrap, openssl) or through PATH.
-  # dbus: rimed's bus tests (rimed/src/bus_tests.rs) start a private dbus-daemon from PATH.
-  nativeCheckInputs = [ bubblewrap cacert curl dbus git openssh openssl python3 util-linux ];
-  # xmllint, for the polkit checks in postInstall; help2man, for rime(1).
-  nativeBuildInputs = [ libxml2 help2man ];
+  # The tests assume a root shaped like a running machine, which the build sandbox is not: their fixtures go under
+  # /var/tmp (the project's rule for anything a suite creates), the agent sandbox puts a tmpfs over /run, and a few
+  # fixtures exec /bin/true or look for setpriv in /bin. So `cargo test` runs under bwrap in a root that has
+  # those, with every top-level directory of the build sandbox bound in unchanged. /usr holds only /usr/bin/env,
+  # as on NixOS (environment.usrbinenv): code that assumed anything else under /usr would fail here, as it would
+  # on NixOS, and a `#!/usr/bin/env bash` script (rime-remoted's publisher stub) runs as it does there.
   preCheck = ''
     # The sandbox's HOME is /homeless-shelter (absent) and there is no XDG_RUNTIME_DIR, so code that falls back to
     # /run/user/<uid> would try a directory that does not exist here.
@@ -378,12 +362,6 @@ rustPlatform.buildRustPackage {
     # The relay and TLS tests read the system trust store.
     export SSL_CERT_FILE=${cacert}/etc/ssl/certs/ca-bundle.crt
 
-    # The tests assume a root shaped like a running machine, which the build sandbox is not: their fixtures go under
-    # /var/tmp (the project's rule for anything a suite creates), the agent sandbox puts a tmpfs over /run, and a few
-    # fixtures exec /bin/true or look for setpriv in /bin. So `cargo test` runs under bwrap in a root that has
-    # those, with every top-level directory of the build sandbox bound in unchanged. /usr holds only /usr/bin/env,
-    # as on NixOS (environment.usrbinenv): code that assumed anything else under /usr would fail here, as it would
-    # on NixOS, and a `#!/usr/bin/env bash` script (rime-remoted's publisher stub) runs as it does there.
     testRoot=$(mktemp -d)
     mkdir -p "$testRoot/var-tmp" "$testRoot/bin" "$testRoot/usr-bin" "$testRoot/shim"
     ln -s ${runtimeShell} "$testRoot/bin/sh"
@@ -407,10 +385,106 @@ rustPlatform.buildRustPackage {
     chmod +x "$testRoot/shim/cargo"
     export PATH="$testRoot/shim:$PATH"
     rm -f "$NIX_BUILD_TOP/cargo-test.log"
+    # rimed's postCheck counts from here: a third-party crate compiled after this was not taken from deps.
+    touch "$NIX_BUILD_TOP/rimed-check.marker"
   '';
+
+  # The workspace's third-party crates, compiled for `cargo build` and for `cargo test` from the real manifests and
+  # lock with an empty body in every member (nix/pkgs/rimed-deps.py). Its source is only the Cargo.toml files and
+  # Cargo.lock, so a change to Rime's own code leaves this derivation as it was: the packages job takes it from the
+  # dev cache and rimed compiles only its 13 members. What rimed ships is unchanged: its binaries are still compiled
+  # from the real source in rimed's own derivation, against the third-party artifacts it would have compiled itself.
+  deps = rustPlatform.buildRustPackage (common // {
+    pname = "rimed-deps";
+    src = lib.fileset.toSource {
+      inherit root;
+      fileset = lib.fileset.unions [
+        (root + "/rimed/Cargo.lock")
+        (lib.fileset.intersection rimedTree (lib.fileset.fileFilter (f: f.name == "Cargo.toml") (root + "/rimed")))
+      ];
+    };
+    postPatch = "python3 ${./rimed-deps.py} dummy rimed";
+    # Compile the test units too (dev-dependencies, test features), without running anything.
+    cargoTestFlags = [ "--workspace" "--no-run" ];
+    installPhase = ''
+      runHook preInstall
+      cargo metadata --offline --no-deps --format-version 1 --manifest-path rimed/Cargo.toml > "$NIX_BUILD_TOP/cargo-metadata.json"
+      python3 ${./rimed-deps.py} prune target "$NIX_BUILD_TOP/cargo-metadata.json"
+      mkdir -p $out
+      mv target $out/target
+      runHook postInstall
+    '';
+    # Build artifacts, not a program: nothing to strip or patch (a stripped .rlib is a broken one).
+    dontFixup = true;
+  });
+in
+rustPlatform.buildRustPackage (finalAttrs: common // {
+  pname = "rimed";
+  # Compiled only. Its cargo test (14 of the 20 minutes a rimed build took, measured: compiling ~80 release test
+  # binaries) is passthru.cargoTest, a check of its own, so the CI packages job and every leg that needs rimed wait
+  # for the compile alone.
+  doCheck = false;
+
+  src = lib.fileset.toSource {
+    inherit root;
+    fileset = lib.fileset.unions [
+      rimedTree
+      # include_str! targets: the system profiles, and (in tests) the firewall service catalogue.
+      (root + "/config")
+      (root + "/files/system/firewall/services")
+      # Test fixtures shared with other parts of the repository (the Android client's wire vectors, the relay).
+      (root + "/android/core/src/test/resources")
+      (root + "/relay/src/room.js")
+      # Installed next to the binaries: units, D-Bus policy, polkit actions, trust roots.
+      (root + "/files/system/units/rime-agentd.service")
+      (root + "/files/system/units/rime-aid.service")
+      (root + "/files/system/units/rime-lid.service")
+      (root + "/files/system/units/rime-remoted.service")
+      (root + "/files/system/units/rime-secretd.service")
+      (root + "/files/system/dbus-1")
+      (root + "/files/system/polkit-1/actions")
+      (root + "/files/system/trust")
+    ];
+  };
+
+  env = lib.mapAttrs' (name: value: lib.nameValuePair "RIME_PATH_${name}" value) paths // {
+    RIME_PATHS_EXPECT_ALL_SET = "1";
+  };
+
+  # The third-party crates, already compiled (deps above). cargoBuildHook runs this before it points
+  # CARGO_TARGET_DIR at ./target; an override that replaces buildPhase (nix/tests/rimed-session.nix) sets it there
+  # itself. A copy, not a link (cargo writes into it), so every artifact gets a fresh mtime, newer than the vendored
+  # sources the setup hook copied before it.
+  preBuild = ''
+    cp -r ${deps}/target target
+    chmod -R u+w target
+    # cargo runs a build script again (and compiles its crate and every crate above it again) when a file it named
+    # with rerun-if-changed is newer than its last run, and cargoSetupHook has just copied the vendored crates with
+    # fresh mtimes: one time for the whole copy, taken after that, keeps them fresh (measured: 86 of 193 compiled
+    # again without it).
+    touch "$NIX_BUILD_TOP/rimed-deps.stamp"
+    find target -exec touch -h -r "$NIX_BUILD_TOP/rimed-deps.stamp" {} +
+    # The guard: no workspace member may come from deps. Its dummy artifacts are now as new as everything else, so
+    # cargo would take them for the real crates.
+    cargo metadata --offline --no-deps --format-version 1 --manifest-path rimed/Cargo.toml > "$NIX_BUILD_TOP/cargo-metadata.json"
+    ${python3.interpreter} ${./rimed-deps.py} prune target "$NIX_BUILD_TOP/cargo-metadata.json"
+    touch "$NIX_BUILD_TOP/rimed-build.marker"
+  '';
+  # Says how many third-party crates came from deps and names any compiled again (a deps derivation that no longer
+  # matches this build: a new env var a build script reads, a flag, an input only one of them has). python3 by store
+  # path: an override with doCheck off (security.nix, the mutants) has no nativeCheckInputs on PATH.
+  postBuild = ''
+    ${python3.interpreter} ${./rimed-deps.py} recompiled target "$NIX_BUILD_TOP/cargo-metadata.json" "$NIX_BUILD_TOP/rimed-build.marker"
+  '';
+
+  # The whole workspace, every test binary even after one fails, so the log has every total.
+  cargoTestFlags = [ "--workspace" "--no-fail-fast" ];
+  # --show-output puts a passing test's captured output in the log, so the report can see a test that skipped itself.
+  checkFlags = lib.concatMap (t: [ "--skip" t ]) (lib.concatLists (lib.attrValues skips)) ++ [ "--show-output" ];
 
   postCheck = ''
     cargo metadata --offline --no-deps --format-version 1 --manifest-path rimed/Cargo.toml > "$NIX_BUILD_TOP/cargo-metadata.json"
+    python3 ${./rimed-deps.py} recompiled target "$NIX_BUILD_TOP/cargo-metadata.json" "$NIX_BUILD_TOP/rimed-check.marker"
     python3 ${./rimed-test-report.py} "$NIX_BUILD_TOP/cargo-test.log" "$NIX_BUILD_TOP/cargo-metadata.json" \
       ${builtins.toFile "rimed-test-skips.json" (builtins.toJSON { skip = skips; inherit selfSkipOk; })} \
       "$NIX_BUILD_TOP/cargo-tests.txt" "$NIX_BUILD_TOP/cargo-tests.json"
@@ -418,7 +492,7 @@ rustPlatform.buildRustPackage {
 
   postInstall = ''
     share=$out/share
-    # The test report (postCheck); absent only from a build that overrides doCheck off (security.nix's mutant).
+    # The test report (postCheck): only cargoTest has one.
     if [ -e "$NIX_BUILD_TOP/cargo-tests.txt" ]; then
       install -Dm644 -t $share/doc/rimed "$NIX_BUILD_TOP/cargo-tests.txt" "$NIX_BUILD_TOP/cargo-tests.json"
     fi
@@ -500,6 +574,13 @@ rustPlatform.buildRustPackage {
     inherit agentdPath;
     # The 76 tests nix/tests/rimed-session.nix runs in a logged-in VM session (the two cgroup groups above).
     sessionTests = skips.needsLoginSessionCgroup ++ selfSkipOk.noLoginSessionCgroup;
+    # The third-party crates, compiled (nix/ci/prebuild.txt builds it once per run, like rimed).
+    inherit deps;
+    # rimed with its cargo test: checks.rimed-cargo-test, and nix-release builds it before it publishes anything.
+    cargoTest = finalAttrs.finalPackage.overrideAttrs {
+      pname = "rimed-cargo-test";
+      doCheck = true;
+    };
   };
 
   meta = {
@@ -509,4 +590,4 @@ rustPlatform.buildRustPackage {
     platforms = lib.platforms.linux;
     mainProgram = "rime";
   };
-}
+})

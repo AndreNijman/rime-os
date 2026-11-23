@@ -75,6 +75,18 @@ let
             esac
           done
           seen=" " n=0 unlocked=0
+          # The file first, then the console. A TERM (initrd-switch-root stops this unit) can land while echo is blocked
+          # on the serial port: the write fails with EINTR and, before this, the line was lost while `unlocked` already
+          # said it was sent (run 44885148618: "echo: write error: Interrupted system call", then a 5 min wait for
+          # RIME-UNLOCKED). So the console write is retried, a few times, and the caller marks a line sent only after.
+          report() {
+            echo "$1" >> /run/rime-test-asks
+            for _ in 1 2 3 4 5 6 7 8 9 10; do
+              if echo "$1" > /dev/ttyS0; then return 0; fi
+              sleep 0.1
+            done
+            return 0
+          }
           # One scan per 0.2 s, and a last one when initrd-switch-root stops this unit (TERM): the poll alone can miss
           # a volume that opens just before switch-root (the TPM lab hit it), and the test waits for RIME-UNLOCKED.
           scan() {
@@ -111,13 +123,11 @@ let
               done
               ${lib.optionalString (mutant == "type-early") "agent=plymouth"}
               line="RIME-ASK $tag $n keymap=$km vconsole-setup=$vc agent=$agent"
-              echo "$line" > /dev/ttyS0
-              echo "$line" >> /run/rime-test-asks
+              report "$line"
             done
             if [ "$unlocked" = 0 ] && [ -e /dev/mapper/cryptdata ]; then
+              report "RIME-UNLOCKED $tag after $n asks"
               unlocked=1
-              echo "RIME-UNLOCKED $tag after $n asks" > /dev/ttyS0
-              echo "RIME-UNLOCKED $tag after $n asks" >> /run/rime-test-asks
             fi
           }
           trap 'scan; exit 0' TERM

@@ -54,6 +54,10 @@ open("gate-mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"]
     'if not seen:  # follow-ons alone' 'if False:  # follow-ons alone'
   gmutant "a builder that failed counts as a follow-on" \
     'errors[-1][1] = "follow-on" if DEPENDENCY_FAILED_RE.match(ln) else None' 'errors[-1][1] = "follow-on"'
+  gmutant "a 416 is retried without a resume" 'if c == 416 and m.group(1) in resumed:' 'if c == 416:'
+  gmutant "a resumed download is not noticed" '            resumed.add(r.group(1))' '            pass'
+  gmutant "unrealised references fail the release" '             "could not be realised")' '             )'
+  gmutant "cache.nixos.org errors are never retried" '    if env.get("UPSTREAM_CACHE"):' '    if False:'
   gmutant "retry without a bound" 'if n == tries:' 'if False:'
   gmutant "the gate checked only before later tries" '        before()
         code, lines = run(cmd)' '        if n > 1:
@@ -85,6 +89,7 @@ open("mutant.py", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))
   mutant "boot path outside the closure accepted" 'elif boot[k] not in clo:' 'elif False:'
   mutant "any signer accepted" 'if sans[0] not in signers:' 'if False:'
   mutant "any OIDC issuer accepted" 'if got != issuer:' 'if False:'
+  mutant "a reissue may repeat the ID of another candidate" '        if not held:' '        if True:'
   mutant "a channel may move backwards" 'if parse_release(new_rel) < parse_release(old_rel):' 'if False:'
   mutant "the signed digest is not compared" \
     'if (crit.get("image") or {}).get("docker-manifest-digest") != digest:' 'if False:'
@@ -159,6 +164,9 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
     echo "killed: $name"
   }
   wmutant "action pinned by tag" "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" "actions/checkout@v4"
+  wmutant "the release staged at the VM tests' fast level" \
+    'stage --closure "$t/closure.json" --split "$t/split.json" --out "$t/artifact"' \
+    'stage --closure "$t/closure.json" --split "$t/split.json" --out "$t/artifact" --test-stage-level 3'
   wmutant "a release without its catalogue apps" \
     'for c in "$t"/catalogue/*; do args+=(--catalogue-out "$(readlink -f "$c")"); done' ""
   wmutant "the catalogue never built" '-L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue' '-L .#rime-release-plan'

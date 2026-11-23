@@ -7,7 +7,8 @@
 #              ci/runner/check-workflows.py over the workflows. run-checks.sh's classify is proved on real logs
 #              (nix/ci/fixtures) and its single download retry with a stub nix; the dev cache and check reuse
 #              (prebuild, REUSED, export-result, results-merge, fresh runs, metrics) with a stub nix, and
-#              nix/ci/check-cache-isolation.py (no release builds from a CI cache), each with mutants.
+#              nix/ci/check-cache-isolation.py (no release builds from a CI cache), and the evaluation shards
+#              (nix/ci/test-eval-shard.sh), each with mutants.
 { pkgs, self }:
 
 let
@@ -29,11 +30,13 @@ let
       (root + "/nix/ci")
       (root + "/nix/tests")
       (root + "/nix/pkgs/rimed-test-report.py")
+      (root + "/nix/pkgs/rimed-deps.py")
       (root + "/ci/runner/check-workflows.py")
     ];
   };
 
   report = ../pkgs/rimed-test-report.py;
+  deps = ../pkgs/rimed-deps.py;
 in
 {
   ci-userns = pkgs.runCommand "rime-ci-userns" { nativeBuildInputs = [ pkgs.bubblewrap ]; } ''
@@ -72,6 +75,16 @@ in
       has "run by .github/workflows/nix.yml"
       expect 0 "actionlint accepts nix.yml" -- actionlint .github/workflows/nix.yml
       expect 0 "check-workflows.py: no self-hosted job breaks the fork/key rules" -- python3 ci/runner/check-workflows.py .github/workflows
+      # The evaluation shards: every flake output in exactly one shard, --merge refuses less, the job graph gates the
+      # plan and the summary (nix/ci/test-eval-shard.sh, a stub nix, with its own mutants).
+      expect 0 "eval-each.sh shards and --merge, nix.yml's shard graph (nix/ci/test-eval-shard.sh)" -- bash nix/ci/test-eval-shard.sh
+      # rimed is only compiled; its cargo test (checks.rimed-cargo-test) stops a release only because nix-release builds it.
+      gates_rimed() { grep -E '^\s*python3 nix/release/cache_gate\.py retry --ensure -- nix build .*\.#checks\.x86_64-linux\.rimed-cargo-test\s*$' "$1" > /dev/null; }
+      if gates_rimed .github/workflows/nix-release.yml; then ok "nix-release builds rimed-cargo-test before it publishes"
+      else bad "nix-release.yml does not build checks.x86_64-linux.rimed-cargo-test: a failing rimed test would not stop a release"; fi
+      grep -v 'checks\.x86_64-linux\.rimed-cargo-test' .github/workflows/nix-release.yml > "$NIX_BUILD_TOP/release-m.yml"
+      if gates_rimed "$NIX_BUILD_TOP/release-m.yml"; then bad "mutant: nix-release without the rimed-cargo-test build passed"
+      else ok "killed: nix-release without the rimed-cargo-test build is seen"; fi
       # The workflow runs only on hosted images.
       if grep -E '^\s*runs-on:' .github/workflows/nix.yml | grep -vE 'runs-on: ubuntu-24\.04\s*$' > /dev/null; then
         bad "nix.yml has a job off ubuntu-24.04"
@@ -266,7 +279,9 @@ in
           fi
           exit 0 ;;
         eval) a=$2; h=$(printf '%s' "$a$4" | sha256sum | cut -c1-32); n=''${a##*.}; printf '/nix/store/%s-%s.drv' "$h" "$n" ;;
-        build) echo "stub nix build $*" >> "$NIX_BUILD_TOP/stub2.builds"; exit "''${STUB_BUILD_RC:-0}" ;;
+        build) echo "stub nix build $*" >> "$NIX_BUILD_TOP/stub2.builds"
+               if [ "$1" = --dry-run ]; then printf '%s\n' "''${STUB_DRYRUN:-}" >&2; exit 0; fi
+               exit "''${STUB_BUILD_RC:-0}" ;;
         *) echo "stub nix: $cmd $*" >&2; exit 1 ;;
       esac
       EOF
@@ -374,21 +389,36 @@ in
       has "'dup' listed twice"
       fresh
       rimedout=$(awk -F'\t' '$1 == "rimed" { print $3 }' "$P/items.tsv")
-      mkdir -p "$rimedout/share/doc/rimed"; echo "TOTAL 9 9 0 0 0 0" > "$rimedout/share/doc/rimed/cargo-tests.txt"
+      mkdir -p "$rimedout"
+      : > "$NIX_BUILD_TOP/stub2.builds"
       expect 0 "cold: every item BUILT" -- env PATH="$S:$PATH" RIME_DEV_CACHE="$DC" STUB_ULTIMATE=true bash nix/ci/run-checks.sh prebuild "$P"
       has "BUILT  rimed: in this job"
+      # Only the outputs items.tsv names, by name: DRV^* also asks for outputs the dev cache does not keep
+      # (cosmic-initial-setup's -debug), and Nix then compiled that item again in every run (run 44968969858).
+      if grep -F '^*' "$NIX_BUILD_TOP/stub2.builds" > /dev/null; then bad "prebuild asked for DRV^*"; else ok "prebuild never asks for DRV^*"; fi
+      grep -E '[.]drv\^out( |$)' "$NIX_BUILD_TOP/stub2.builds" > /dev/null && ok "outputs asked for by name (^out)" || bad "no ^out: $(cat "$NIX_BUILD_TOP/stub2.builds")"
+      sed 's|todo+=("$drv^$(out_names "$drv" "$outs")")|todo+=("$drv^*")|' nix/ci/run-checks.sh > "$NIX_BUILD_TOP/rc-m-star.sh"
+      if cmp -s nix/ci/run-checks.sh "$NIX_BUILD_TOP/rc-m-star.sh"; then bad "mutant: pattern not found"; fi
+      : > "$NIX_BUILD_TOP/stub2.builds"
+      env PATH="$S:$PATH" RIME_DEV_CACHE="$DC" STUB_ULTIMATE=true bash "$NIX_BUILD_TOP/rc-m-star.sh" prebuild "$P" > /dev/null 2>&1 || true
+      grep -F '^*' "$NIX_BUILD_TOP/stub2.builds" > /dev/null && ok "killed: the DRV^* mutant is seen" || bad "DRV^* mutant not caught"
       expect 0 "report" -- bash nix/ci/run-checks.sh prebuild-report "$P"
-      has "(ran in this job)"
-      has "TOTAL 9 9 0 0 0 0"
+      has "compiled in this job"
+      has "runs in the \`rimed-cargo-test\` check"
       expect 0 "export" -- env PATH="$S:$PATH" RIME_RUN=4242 bash nix/ci/run-checks.sh dev-cache-export "$P" "$DC"
       [ "$(find "$DC" -name '*.narinfo' | wc -l)" = "$(cut -f4 "$P/status.tsv" | tr ',' '\n' | wc -l)" ] && ok "a narinfo per output" || bad "narinfos: $(find "$DC" -name '*.narinfo' | wc -l)"
       grep -F "	4242" "$DC/rime-meta/rimed.tsv" > /dev/null && ok "meta: rimed built in run 4242" || bad "meta"
       expect 0 "warm: every item REUSED" -- env PATH="$S:$PATH" RIME_DEV_CACHE="$DC" STUB_ULTIMATE=false RIME_PREBUILD_ALL=0 bash nix/ci/run-checks.sh prebuild "$P"
       has "REUSED rimed: built and tested by run 4242 on identical inputs"
+      if grep -F "plans to build" "$NIX_BUILD_TOP/last.out" > /dev/null; then bad "a warning with nothing to build"; else ok "no warning when Nix plans no build"; fi
+      rimeddrv=$(awk -F'\t' '$1 == "rimed" { print $2 }' "$P/items.tsv")
+      expect 0 "in the dev cache but Nix plans to build it: said before the build" -- env PATH="$S:$PATH" RIME_DEV_CACHE="$DC" STUB_ULTIMATE=false RIME_PREBUILD_ALL=0 STUB_DRYRUN="these 1 derivations will be built:
+        $rimeddrv" bash nix/ci/run-checks.sh prebuild "$P"
+      has "::warning::rimed is in the dev cache but Nix plans to build it"
       expect 0 "report" -- env RIME_DEV_CACHE="$DC" bash nix/ci/run-checks.sh prebuild-report "$P"
-      has "REUSED, not run in this job"
-      has "passed in run 4242 on identical inputs"
-      if grep -F "(ran in this job)" "$NIX_BUILD_TOP/last.out" > /dev/null; then bad "a reused report reads as run here"; else ok "not labelled as run here"; fi
+      has "REUSED, not compiled in this job"
+      has "was compiled in run 4242 on identical inputs"
+      if grep -F "compiled in this job (" "$NIX_BUILD_TOP/last.out" > /dev/null; then bad "a reused rimed reads as compiled here"; else ok "not labelled as compiled here"; fi
       expect 0 "in the dev cache but built locally (dev cache not trusted): said" -- env PATH="$S:$PATH" RIME_DEV_CACHE="$DC" STUB_ULTIMATE=true RIME_PREBUILD_ALL=0 bash nix/ci/run-checks.sh prebuild "$P"
       has "rimed was in the dev cache but was BUILT here"
       has "BUILT  rimed: in this job"
@@ -486,6 +516,56 @@ in
       has "selfSkipOk names w, which did not skip itself"
       grep -v 'Running tests/wire.rs' good.log > lost.log
       expect nonzero "a test binary with no header" -- python3 ${report} lost.log meta.json skips.json r.txt r.json
+
+      echo "== rimed-deps.py: the deps derivation's dummy members, and the prune that keeps them out of rimed"
+      mkdir -p "$NIX_BUILD_TOP/ws/a" "$NIX_BUILD_TOP/ws/b" && cd "$NIX_BUILD_TOP/ws"
+      printf '[workspace]\nmembers = ["a", "b"]\n' > Cargo.toml
+      printf '[package]\nname = "a"\n[[bin]]\nname = "a"\npath = "src/main.rs"\n[[test]]\nname = "wire"\npath = "tests/wire.rs"\n' > a/Cargo.toml
+      printf '[package]\nname = "b-core"\n[lib]\npath = "src/lib.rs"\n' > b/Cargo.toml
+      expect 0 "dummy" -- python3 ${deps} dummy .
+      has "rimed-deps: 4 dummy targets for 2 members"
+      if [ "$(cat a/src/main.rs)" = "fn main() {}" ] && [ -f a/tests/wire.rs ] && [ -f a/src/lib.rs ] && [ ! -s b/src/lib.rs ]; then
+        ok "a body at every target path, and a lib for a bin-only member"
+      else bad "dummy targets: $(find a b -name '*.rs')"; fi
+      printf '[package]\nname = "c"\nbuild = "build.rs"\n' > b/Cargo.toml
+      expect nonzero "a member with a build script is refused" -- python3 ${deps} dummy .
+      # A target directory as cargo leaves it: two profiles (host and the target triple), members and crates.io crates.
+      printf '%s\n' '{"workspace_members": ["a 0.1.0", "b-core 0.1.0"], "packages": [' \
+        '{"id": "a 0.1.0", "name": "a", "targets": [{"name": "a"}, {"name": "wire"}]},' \
+        '{"id": "b-core 0.1.0", "name": "b-core", "targets": [{"name": "b-core"}]},' \
+        '{"id": "serde 1.0.0", "name": "serde", "targets": [{"name": "serde"}]}]}' > meta.json
+      mkt() {
+        rm -rf t
+        for prof in t/release t/x86_64-unknown-linux-gnu/release; do
+          mkdir -p $prof/.fingerprint $prof/deps $prof/build $prof/incremental/x
+          for u in a-0123456789abcdef b-core-0123456789abcdef serde-0123456789abcdef; do
+            mkdir -p $prof/.fingerprint/$u && touch $prof/.fingerprint/$u/lib-x
+          done
+          touch $prof/deps/liba-0123456789abcdef.rlib $prof/deps/b_core-0123456789abcdef.d $prof/deps/wire-0123456789abcdef \
+            $prof/deps/libserde-0123456789abcdef.rlib $prof/deps/libserde-0123456789abcdef.rmeta $prof/a $prof/a.d $prof/.cargo-lock
+          mkdir -p $prof/build/a-0123456789abcdef $prof/build/serde-0123456789abcdef
+        done
+      }
+      mkt
+      expect 0 "prune" -- python3 ${deps} prune t meta.json
+      has "third-party units kept in 2 profiles"
+      left=$(find t \( -name 'a-*' -o -name 'liba-*' -o -name 'b-core-*' -o -name 'b_core-*' -o -name 'wire-*' -o -name a -o -name a.d -o -name incremental \) | sort)
+      kept=$(find t \( -name 'serde-*' -o -name 'libserde-*' -o -name .cargo-lock \) | wc -l)
+      if [ -z "$left" ] && [ "$kept" = 10 ]; then ok "every member artifact gone, every crates.io one kept"
+      else bad "prune left [$left], kept $kept of 10"; fi
+      echo "== mutant: a prune that does not know one member (b-core)"
+      sed 's/sorted(names)/sorted(names - {"b-core"})/' ${deps} > deps-m.py
+      grep -F 'names - {"b-core"}' deps-m.py > /dev/null || bad "mutant not applied"
+      mkt
+      python3 deps-m.py prune t meta.json > /dev/null 2>&1 || true
+      if [ -n "$(find t -name 'b-core-*')" ]; then ok "killed: the member fingerprint it left behind is seen"; else bad "the mutant was not seen"; fi
+      mkt
+      touch -d @1 $(find t -path '*/.fingerprint/*' -type f)
+      touch -d @100 marker  # an explicit time: two touches in one clock tick compared equal on a hosted runner
+      touch t/release/.fingerprint/serde-0123456789abcdef/lib-x
+      expect 0 "recompiled" -- python3 ${deps} recompiled t meta.json marker
+      has "rimed-deps: 1 third-party units reused, 1 compiled here: serde-0123456789abcdef"
+      cd "$NIX_BUILD_TOP"
 
       echo
       if [ "$fails" -gt 0 ]; then echo "ci: $fails failure(s)"; exit 1; fi

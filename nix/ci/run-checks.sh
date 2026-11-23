@@ -14,7 +14,7 @@
 #   prebuild-plan DIR                 evaluate nix/ci/prebuild.txt: DIR/items.tsv (name, drvPath, outPaths), DIR/key
 #   prebuild DIR                      build the items, substituting what RIME_DEV_CACHE already holds; DIR/status.tsv
 #                                     says BUILT (in this job) or REUSED (built and tested by an earlier run)
-#   prebuild-report DIR               rimed's cargo test report, labelled RAN or REUSED (markdown)
+#   prebuild-report DIR               rimed's line: compiled in this job or REUSED (markdown)
 #   dev-cache-export DIR CACHE        write the items' locally built runtime closures to the file:// cache CACHE
 #   export-result CHECK RESDIR CACHE  keep a PASSED check's output in CACHE (refuses anything but a pass)
 #   results-merge PLANDIR RESDIR INCOMING CACHE
@@ -36,7 +36,9 @@
 #   RIME_DEV_CACHE          build/prebuild: a file:// binary cache directory (the packages job's dev cache) added as
 #                           an extra substituter, trusted without a signature (it never leaves this workflow)
 #   RIME_DEV_CACHE_STATE    build: how the leg got the dev cache (exact / fallback <key> / none), for the metrics
-#   RIME_CHECK_DRVS         plan: "attribute<TAB>drvPath" lines (eval-each.sh's RIME_EVAL_OUT)
+#   RIME_CHECK_DRVS         plan: "attribute<TAB>drvPath[<TAB>outPath]" lines (eval-each.sh's RIME_EVAL_OUT; nix.yml
+#                           merges the shards' with --merge, which always writes the outPath: the plan runner never
+#                           instantiated the .drv, so the nix-store fallback below would find nothing there)
 #   RIME_RESULTS            plan: the restored results cache; a check whose evaluated outPath it holds, with a
 #                           manifest line, PASSED EARLIER on the same inputs and is not built again (REUSED)
 #   RIME_CI_FRESH           plan: 1 = build every planned check anyway (prior passes are still recorded, so a fresh
@@ -458,11 +460,28 @@ meta_run() { # NAME DRV: the run that built NAME's DRV, from the dev cache's met
     if [ "$d" = "$2" ] && [ -n "$r" ]; then echo "run $r"; else echo "an earlier run"; fi
 }
 
+out_names() { # DRV OUTS (comma-separated paths): the outputs' names, comma-separated (out, lib, ...)
+    # Nix names an output path <hash>-<drv name> for `out` and <hash>-<drv name>-<output> for any other.
+    local base=${1##*/} o n names=
+    base=${base:33}
+    base=${base%.drv}
+    for o in ${2//,/ }; do
+        n=${o##*/}
+        n=${n:33}
+        n=${n#"$base"}
+        if [ -z "$n" ]; then n=out; else n=${n#-}; fi
+        names=${names:+$names,}$n
+    done
+    echo "$names"
+}
+
 # prebuild DIR: realise the items. An item whose outputs the dev cache already holds is REUSED (substituted, never
 # compiled or tested again: an earlier run on identical inputs did both); the others are BUILT here. With
-# RIME_PREBUILD_ALL=0 (an exact cache hit: nothing to export) only rimed is realised, for its test report.
+# RIME_PREBUILD_ALL=0 (an exact cache hit: nothing to export) only rimed is realised, for prebuild-report.
+# Only the outputs items.tsv names are realised, never DRV^*: an output no check needs and the dev cache does not
+# keep (cosmic-initial-setup's -debug) made Nix build that whole derivation again in every run.
 prebuild() {
-    local dir=$1 all=${RIME_PREBUILD_ALL:-1} name drv outs state rc=0 o
+    local dir=$1 all=${RIME_PREBUILD_ALL:-1} name drv outs state rc=0 o plan
     local -a todo=() extra
     mapfile -t extra < <(dev_cache_args)
     : > "$dir/status.tsv"
@@ -470,10 +489,17 @@ prebuild() {
         state=BUILT
         in_dev_cache "$outs" && state=REUSED
         printf '%s\t%s\t%s\t%s\n' "$name" "$state" "$drv" "$outs" >> "$dir/status.tsv"
-        if [ "$state" = BUILT ] || [ "$all" = 1 ] || [ "$name" = rimed ]; then todo+=("$drv^*"); fi
+        if [ "$state" = BUILT ] || [ "$all" = 1 ] || [ "$name" = rimed ]; then todo+=("$drv^$(out_names "$drv" "$outs")"); fi
     done < "$dir/items.tsv"
     echo "prebuild: realising ${#todo[@]} of $(wc -l < "$dir/items.tsv" | tr -d ' ') items (dev cache: ${RIME_DEV_CACHE:-none})"
     if [ "${#todo[@]}" -gt 0 ]; then
+        # Said before the build, by name: an item the dev cache holds that Nix still plans to build.
+        plan=$(nix build --dry-run "${extra[@]}" "${todo[@]}" 2>&1) || true
+        while IFS=$'\t' read -r name state drv outs; do
+            if [ "$state" = REUSED ] && printf '%s\n' "$plan" | grep -F "$drv" > /dev/null; then
+                echo "::warning::$name is in the dev cache but Nix plans to build it ($drv)"
+            fi
+        done < "$dir/status.tsv"
         nix build -L --no-link --print-out-paths "${extra[@]}" "${todo[@]}" || rc=$?
     fi
     : > "$dir/status.new"
@@ -496,28 +522,25 @@ prebuild() {
     return "$rc"
 }
 
-# prebuild-report DIR: rimed's cargo test report as markdown, saying whether it ran in this job or is REUSED.
+# prebuild-report DIR: rimed as markdown, compiled in this job or REUSED. Its cargo test does not run here: that is the
+# rimed-cargo-test check (nix/pkgs/rimed.nix cargoTest), which gates the run through the summary like every check.
 prebuild_report() {
-    local dir=$1 name state drv outs o report
+    local dir=$1 name state drv outs o
     IFS=$'\t' read -r name state drv outs < <(awk -F'\t' '$1 == "rimed"' "$dir/status.tsv")
     o=${outs%%,*}
-    report=$o/share/doc/rimed/cargo-tests.txt
-    if [ -z "$o" ] || [ ! -f "$report" ]; then
-        echo "::error::no cargo test report: rimed did not build"
+    if [ -z "$o" ] || [ ! -e "$o" ]; then
+        echo "::error::rimed did not build"
         return 1
     fi
     if [ "$state" = REUSED ]; then
-        echo "### rimed: cargo test --workspace --no-fail-fast: REUSED, not run in this job"
+        echo "### rimed: REUSED, not compiled in this job"
         echo
-        echo "rimed ($drv) was built and its cargo test passed in $(meta_run rimed "$drv") on identical inputs; this job took"
-        echo "that output from the dev cache. The report below is that run's."
+        echo "rimed ($drv) was compiled in $(meta_run rimed "$drv") on identical inputs; this job took it from the dev cache."
     else
-        echo "### rimed: cargo test --workspace --no-fail-fast (ran in this job)"
+        echo "### rimed: compiled in this job ($drv)"
     fi
     echo
-    echo '```'
-    cat "$report"
-    echo '```'
+    echo "Its cargo test runs in the \`rimed-cargo-test\` check."
 }
 
 # dev-cache-export DIR CACHE: every item's runtime closure, only the paths no upstream key signed (built here, or

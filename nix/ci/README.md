@@ -8,7 +8,11 @@ cd /work/<worktree>
 nix/ci/run-checks.sh plan /work/scratch/plan        # prints WILL RUN / SKIPPED <check>: <reason>
 nix/ci/run-checks.sh build rimed /work/scratch/res  # one check, as one matrix leg runs it
 nix/ci/run-checks.sh summary /work/scratch/plan /work/scratch/res
-nix/ci/eval-each.sh path:.                        # evaluate every output, one process each (what the plan job runs)
+nix/ci/eval-each.sh path:.                        # evaluate every output, one process each
+nix/ci/eval-each.sh --shards 8 path:.             # which shard evaluates which output, and each one's estimate
+RIME_EVAL_PART=/work/scratch/parts/eval-3 nix/ci/eval-each.sh --shard 3/8 path:.   # one shard, as one eval leg runs it
+RIME_EVAL_OUT=/work/scratch/drvs.tsv nix/ci/eval-each.sh --merge /work/scratch/parts path:.   # the plan job's merge
+bash nix/ci/test-eval-shard.sh                    # the shards and the merge with a stub nix (checks.ci runs it)
 RIME_FLAKE_CHECKS_FILE=/work/scratch/plan/checks.txt tests/check-suites-run-in-ci.sh
 ```
 
@@ -24,8 +28,18 @@ A GitHub runner has them.)
 - **The summary.** The last job lists every flake check as RAN (pass/fail, seconds), REUSED (passed earlier on the
   same inputs, with the run) or SKIPPED (reason) in the run summary, and fails unless every planned check passed or
   was reused and the plan and packages jobs succeeded. Below it, "where each leg's time went" (the metrics table).
+- **Evaluation in shards.** The `eval` matrix ("Evaluate shard N") runs `eval-each.sh --shard K/N` with
+  N = `strategy.job-total`; each shard uploads its part (`eval-K`: the items it enumerated, the ones it was given,
+  OK/FAIL per item, `attribute<TAB>drvPath<TAB>outPath`). The plan job ("Evaluate and plan") runs `--merge`, which
+  refuses unless every output was evaluated exactly once and OK, whatever the shards' exit status said, then `plan`.
+  Which shard gets which output is a pure function of the output list and N; `eval-cost.tsv` (hosted seconds per
+  item, refresh it from the shards' `OK` lines) only balances them, an item it lacks gets 45 s. The heavy items in
+  `eval-heavy.txt` still run alone in their shard. `check-eval-shards.py` refuses a nix.yml in which a failed shard
+  could leave the plan, a check leg or the summary green. Measured and modelled times: `docs/nixos/ci.md`
+  "Evaluation in shards".
 - **The checks of this machinery** are `ci` and `ci-userns` (`nix/tests/ci.nix`): the plan, the summary,
-  check-suites and the rimed test report against mutants that must be refused, actionlint, ci/runner/check-workflows.py,
+  check-suites and the rimed test report against mutants that must be refused, the evaluation shards
+  (`test-eval-shard.sh`), actionlint, ci/runner/check-workflows.py,
   the dev cache and check reuse (below) with a stub nix, `check-cache-isolation.py`, and bubblewrap's user namespace
   inside the build sandbox.
 - **Not CI: the development VM.** `nix/dev/dev-vm` (`nix run path:.#dev-vm`) is a persistent VM to try changes in
@@ -41,8 +55,9 @@ all 83 checks).
 - **Dev cache.** `prebuild.txt` lists those derivations (`NAME ATTRIBUTE [PNAME]`; the attribute must give the SAME
   drvPath the checks build: overrides are reached through a check's own node). The packages job runs
   `prebuild-plan` (key `rime-dev-pkgs-v1-<hash of every item's drvPath>`), restores the Actions cache under that key
-  (or the newest older one), `prebuild` (an item the cache holds is REUSED: substituted, its cargo test not run
-  again, and the report says which run built and tested it; the others BUILT), `prebuild-report`, and on a miss
+  (or the newest older one), `prebuild` (an item the cache holds is REUSED: substituted, not built again, and the
+  report says which run built it; the others BUILT; only the outputs the plan names are realised, never `DRV^*`),
+  `prebuild-report`, and on a miss
   `dev-cache-export`: the items' runtime closures, ONLY the paths no cache.nixos.org key signed, as a zstd
   `file://` binary cache (`cihelp.py export`: narinfos may name references the cache does not hold; Nix fetches those
   from cache.nixos.org). Measured: a few hundred MB. Every leg restores it (exact key, else the newest) and builds
@@ -53,7 +68,7 @@ all 83 checks).
   output path's narinfo + NAR and a manifest line `check outPath run sha date`. The summary job's `results-merge`
   adds only checks whose result in this run is `pass` (and whose output is the one the plan evaluated), drops a prior
   pass whose check failed now on the same inputs, and saves `rime-check-results-v1-<ISO week>-<run>-<attempt>`. The
-  plan job restores the newest of this week's, has `eval-each.sh` write every drvPath (`RIME_EVAL_OUT`), and `plan`
+  plan job restores the newest of this week's, merges the shards' drvPaths and output paths (`RIME_EVAL_OUT`), and `plan`
   (`RIME_CHECK_DRVS`, `RIME_RESULTS`) takes a check out of the matrix when the manifest names the output path it just
   evaluated AND `nix path-info --store file://<results cache> <outPath>` finds it: same output path = same derivation
   = same inputs. Never decided from a log or a time. The summary row is `REUSED | PASSED EARLIER, same inputs, run N`,
@@ -61,7 +76,13 @@ all 83 checks).
 - **Fresh run (reuse nothing).** A branch named `nix/fresh-*`, the trailer `Rime-CI: fresh` in the head commit's
   message (a trailer, not prose), or Run workflow with `fresh` ticked. The plan still records prior passes, so a
   fresh FAILURE of a check that passed on the same inputs says `flake signal: ... PASSED in run N`. The packages job
-  then skips the dev cache restore too (rimed's cargo test runs again).
+  then skips the dev cache restore too (rimed and its third-party crates compile again).
+- **rimed: deps, compile, test.** `rimed.deps` (nix/pkgs/rimed.nix, nix/pkgs/rimed-deps.py) compiles the workspace's
+  third-party crates from the Cargo.toml files and Cargo.lock alone (every member an empty body), so it changes only
+  with a manifest or the lock; rimed copies its target directory and compiles only the 13 members (its build log
+  says `rimed-deps: N third-party units reused, M compiled here`; M is 0 when deps matches). rimed itself is only
+  compiled; its cargo test is the `rimed-cargo-test` check (`rimed.cargoTest`: the same derivation with checkPhase
+  on), which gates the run through the summary and which nix-release's build job builds before it publishes.
 - **Scope.** A push restores caches of its own branch and of the default branch (main, which has none of these); a
   `pull_request` run also restores its base branch's (feat/nixos). So the first run of a new `nix/*` branch is cold
   and a PR to feat/nixos starts from feat/nixos's caches. A PR's saves stay in its merge ref (`refs/pull/N/merge`):
