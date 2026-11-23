@@ -1094,6 +1094,45 @@ class StageCompression(unittest.TestCase):
         self.assertIn("compression-level=19", url)
         self.assertIn("parallel-compression=true", url)
 
+    def stage_url(self, *extra):
+        """The file:// URL `rime-nix-release stage ... EXTRA` copies to, through the real command line."""
+        clo, _, _, x = synthetic()
+        calls = []
+        real_run = r.run
+        r.run = lambda cmd, **kw: calls.append(cmd)
+        try:
+            with tempfile.TemporaryDirectory() as d:
+                for n, v in (("closure.json", clo), ("split.json", {"rime": [x["shell"]], "upstream": [x["glibc"]]})):
+                    json.dump(v, open(os.path.join(d, n), "w"))
+                rc = r.main(["stage", "--closure", os.path.join(d, "closure.json"),
+                             "--split", os.path.join(d, "split.json"), "--out", os.path.join(d, "stage")] + list(extra))
+                self.assertEqual(rc, 1)  # nothing was copied: the narinfo count check refuses
+        finally:
+            r.run = real_run
+        copies = [c for c in calls if "copy" in c]
+        self.assertEqual(len(copies), 1, calls)
+        return next(c for c in copies[0] if str(c).startswith("file://"))
+
+    def test_the_command_line_stages_at_19_unless_told(self):
+        """nix-release.yml passes no level (check_workflow.py refuses --test-stage-level there): 19 it is."""
+        url = self.stage_url()
+        self.assertIn("compression-level=19", url)
+        self.assertIn("parallel-compression=true", url)
+
+    def test_a_test_stage_level(self):
+        """VM tests stage at a fast level; every other part of the URL stays the release's."""
+        url = self.stage_url("--test-stage-level", "3")
+        self.assertIn("compression=zstd", url)
+        self.assertIn("compression-level=3&", url)
+        self.assertIn("parallel-compression=true", url)
+        for bad in ("0", "20", "22"):
+            with self.assertRaises(SystemExit):  # argparse: outside 1..19
+                r.main(["stage", "--closure", "c", "--split", "s", "--out", "o", "--test-stage-level", bad])
+        # check_workflow.py looks for the full name: no shorter spelling reaches the option
+        for short in ("--test-stage", "--test"):
+            with self.assertRaises(SystemExit):
+                r.main(["stage", "--closure", "c", "--split", "s", "--out", "o", short, "3"])
+
 def clo_paths(m):
     return [e["path"] for e in m["paths"]]
 

@@ -159,6 +159,9 @@ open("mut.yml", "w").write(s.replace(os.environ["OLD"], os.environ["NEW"], 1))' 
     echo "killed: $name"
   }
   wmutant "action pinned by tag" "actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683" "actions/checkout@v4"
+  wmutant "the release staged at the VM tests' fast level" \
+    'stage --closure "$t/closure.json" --split "$t/split.json" --out "$t/artifact"' \
+    'stage --closure "$t/closure.json" --split "$t/split.json" --out "$t/artifact" --test-stage-level 3'
   wmutant "a release without its catalogue apps" \
     'for c in "$t"/catalogue/*; do args+=(--catalogue-out "$(readlink -f "$c")"); done' ""
   wmutant "the catalogue never built" '-L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue' '-L .#rime-release-plan'
