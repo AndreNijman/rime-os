@@ -295,7 +295,7 @@ jobs:
           # android job is the only one that runs that suite. The gate whose
           # job is to hold the release flow would not have run on a change to
           # the release flow.
-          grep -Eq '^(android/|tests/test-android-(release|signing)\.sh|\.github/workflows/release-android\.yml)' <<<"$files" && android=true
+          grep -Eq '^(android/|tests/test-android-(release|signing|gradle-retry)\.sh|\.github/workflows/release-android\.yml)' <<<"$files" && android=true
           # The release rechunker, end to end on a real bootc image. Its own
           # job because it pulls Fedora's bootc base and re-lays it three times
           # (several minutes); only a change to the rechunker selects it. The
@@ -5129,13 +5129,22 @@ jobs:
           test -f "$jar" || { echo "::error::$jar is missing; the platform unpacked badly"; exit 1; }
           echo "android-36: $(stat -c%s "$jar") bytes"
 
+      # Every Gradle step below runs under tools/gradle-retry.sh: run 44990757311
+      # failed here on a plugin the portal did not serve once (the job is cold on
+      # every new PR). It reruns a step only on Gradle's own fetch failures, at
+      # most 3 tries, says "PASSED ON RETRY" when a later try passes, and fails a
+      # compile error or a failing test at once. This suite holds it to that.
+      - name: Gradle steps retry only a failed fetch
+        working-directory: ${{ github.workspace }}
+        run: ./tests/test-android-gradle-retry.sh
+
       # The protocol suite first, and on its own. `:core` is a plain Kotlin/JVM
       # module with no Android plugin in it, so this step needs no SDK, no
       # device and no emulator — which is the property that makes the protocol
       # testable at all under the project's headless rule. If the SDK half of
       # this job ever breaks, this step still reports.
       - name: Protocol tests
-        run: ./gradlew --no-daemon --stacktrace :core:test
+        run: ./tools/gradle-retry.sh ./gradlew --no-daemon --stacktrace :core:test
 
       # Gradle's `test` task exits 0 when it runs NOTHING — a misconfigured
       # source set, a renamed package, a JUnit platform that failed to load —
@@ -5189,13 +5198,13 @@ jobs:
       # every AndroidX dependency and packages. It proves nothing about how the
       # app behaves, and this job does not pretend otherwise.
       - name: Assemble the debug APK
-        run: ./gradlew --no-daemon --stacktrace :app:assembleDebug
+        run: ./tools/gradle-retry.sh ./gradlew --no-daemon --stacktrace :app:assembleDebug
 
       # The instrumentation suite needs a device to RUN, but not to compile.
       # It was never compiled here, so a changed screen signature broke it
       # unnoticed until the first emulator run (2026-11-17).
       - name: Compile the device suite
-        run: ./gradlew --no-daemon --stacktrace :app:assembleDebugAndroidTest
+        run: ./tools/gradle-retry.sh ./gradlew --no-daemon --stacktrace :app:assembleDebugAndroidTest
 
       - name: An APK exists
         run: |
@@ -5208,7 +5217,7 @@ jobs:
       # parser lives — the one piece of the Android module whose bugs are
       # invisible on a network where IPv4 happens to work.
       - name: App unit tests
-        run: ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
+        run: ./tools/gradle-retry.sh ./gradlew --no-daemon --stacktrace :app:testDebugUnitTest
 
       - name: The app suite actually ran
         run: |
@@ -5274,7 +5283,7 @@ jobs:
       # mechanism as Secure Boot, far worse blast radius, so the key appears in
       # exactly one workflow. docs/android-signing.md.
       - name: Build the release APK and AAB
-        run: ./gradlew --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease
+        run: ./tools/gradle-retry.sh ./gradlew --no-daemon --stacktrace :app:assembleRelease :app:bundleRelease
 
       - name: Plainly not signed, and no key on this runner
         run: |

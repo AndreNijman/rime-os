@@ -233,7 +233,8 @@ jobs:
       # those 404 itself from the cache's index and redirects the rest to the cache, so Nix still reads every narinfo
       # Rime serves from Pages and checks its signature. Every nix build runs under `cache_gate.py retry --ensure`:
       # the gate must answer before each try (a substituter Nix cannot reach is skipped and its paths BUILT), and a
-      # command that failed only on a transient error of the cache (429, 5xx, a dropped connection) runs again.
+      # command that failed only on a transient error of the cache or cache.nixos.org (429, 5xx, a dropped connection,
+      # a 416 answering a resumed download) runs again.
       - name: Rime's cache gate (Nix asks Pages only about what the cache holds)
         run: python3 nix/release/cache_gate.py ensure
       - name: Install Nix (pinned, hash-checked; Rime's cache trusted)

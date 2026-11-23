@@ -112,6 +112,10 @@ candidates: bootc's `:daily` labels and the release named by the Nix channel doc
 reads both again immediately before it pushes, and bumps `.N` if bootc published the same ID in the meantime. The two
 pipelines do not share a concurrency group, so this re-read is the only guard; the rimeos.com chain test catches a
 duplicate if it slips through (residual risk, §17).
+A reissue (this source is the newest candidate's) is still counted on past the OTHER candidate when that one holds
+the same ID or a newer one: bootc names its release from its own `:daily` only, so after a Nix-only release X the
+next bootc release is also X, and the Nix release of that source becomes X.2 instead of being refused as "not newer"
+(runs 42907767160, 43794108179, 44216463487). On such a day bootc and Nix name the same source differently.
 
 ---
 
@@ -476,10 +480,11 @@ not the daemon's `nix.conf`.
    - **Ask again on a busy cache, never build instead.** Every `nix build` and `nix-store --realise` in a job whose Nix
      trusts the gate runs under `cache_gate.py retry --ensure --`. Before each try it makes sure the gate answers: Nix
      skips a substituter it cannot reach and BUILDS its paths, even with `fallback = false`. A command that failed only
-     on a transient error of Rime's cache (HTTP 429 or 5xx, a dropped connection, and Nix's own follow-on errors after
-     one) runs again after 90 s, 180 s and 360 s (plus up to 50 %), four tries in all. A build failure, a refused
-     signature, a 404 or anything it does not recognise fails at once. `check_workflow.py` refuses a release job
-     without the gate step, with Nix pointed at Pages directly, or with a Nix command outside the wrapper.
+     on a transient error of Rime's cache or cache.nixos.org (HTTP 429 or 5xx, a dropped connection, a 416 answering a
+     download Nix was resuming, and Nix's own follow-on errors after one) runs again after 90 s, 180 s and 360 s
+     (plus up to 50 %), four tries in all. A build failure, a refused signature or hash, a 404 or anything it does not
+     recognise fails at once. `check_workflow.py` refuses a release job without the gate step, with Nix pointed at
+     Pages directly, or with a Nix command outside the wrapper.
    - **Upstream paths with a different local narHash.** A path cache.nixos.org has, but which the build host built
      itself (upstream lacked it when the build ran, and the rebuild was non-reproducible), is treated as a Rime path:
      exported from the build host and uploaded, so `closure.json`, the cache and the manifest agree. A path both caches
