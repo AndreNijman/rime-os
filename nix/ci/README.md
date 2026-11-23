@@ -55,8 +55,9 @@ all 83 checks).
 - **Dev cache.** `prebuild.txt` lists those derivations (`NAME ATTRIBUTE [PNAME]`; the attribute must give the SAME
   drvPath the checks build: overrides are reached through a check's own node). The packages job runs
   `prebuild-plan` (key `rime-dev-pkgs-v1-<hash of every item's drvPath>`), restores the Actions cache under that key
-  (or the newest older one), `prebuild` (an item the cache holds is REUSED: substituted, its cargo test not run
-  again, and the report says which run built and tested it; the others BUILT), `prebuild-report`, and on a miss
+  (or the newest older one), `prebuild` (an item the cache holds is REUSED: substituted, not built again, and the
+  report says which run built it; the others BUILT; only the outputs the plan names are realised, never `DRV^*`),
+  `prebuild-report`, and on a miss
   `dev-cache-export`: the items' runtime closures, ONLY the paths no cache.nixos.org key signed, as a zstd
   `file://` binary cache (`cihelp.py export`: narinfos may name references the cache does not hold; Nix fetches those
   from cache.nixos.org). Measured: a few hundred MB. Every leg restores it (exact key, else the newest) and builds
@@ -75,7 +76,13 @@ all 83 checks).
 - **Fresh run (reuse nothing).** A branch named `nix/fresh-*`, the trailer `Rime-CI: fresh` in the head commit's
   message (a trailer, not prose), or Run workflow with `fresh` ticked. The plan still records prior passes, so a
   fresh FAILURE of a check that passed on the same inputs says `flake signal: ... PASSED in run N`. The packages job
-  then skips the dev cache restore too (rimed's cargo test runs again).
+  then skips the dev cache restore too (rimed and its third-party crates compile again).
+- **rimed: deps, compile, test.** `rimed.deps` (nix/pkgs/rimed.nix, nix/pkgs/rimed-deps.py) compiles the workspace's
+  third-party crates from the Cargo.toml files and Cargo.lock alone (every member an empty body), so it changes only
+  with a manifest or the lock; rimed copies its target directory and compiles only the 13 members (its build log
+  says `rimed-deps: N third-party units reused, M compiled here`; M is 0 when deps matches). rimed itself is only
+  compiled; its cargo test is the `rimed-cargo-test` check (`rimed.cargoTest`: the same derivation with checkPhase
+  on), which gates the run through the summary and which nix-release's build job builds before it publishes.
 - **Scope.** A push restores caches of its own branch and of the default branch (main, which has none of these); a
   `pull_request` run also restores its base branch's (feat/nixos). So the first run of a new `nix/*` branch is cold
   and a PR to feat/nixos starts from feat/nixos's caches. A PR's saves stay in its merge ref (`refs/pull/N/merge`):

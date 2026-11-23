@@ -34,6 +34,8 @@
   delta = import ./delta.nix { inherit pkgs self; };
   unit-docs = import ./unit-docs.nix { inherit pkgs self; };
   rimed-session = import ./rimed-session.nix { inherit pkgs self; };
+  # rimed's cargo test (nix/pkgs/rimed.nix cargoTest; the packages rimed is only compiled). nix-release builds it too.
+  rimed-cargo-test = pkgs.rime.rimed.cargoTest;
 }
 # kernel-config-fresh, kernel-gate, kernel-vm, kernel-boot-budget
 // import ./kernel.nix { inherit pkgs self; }

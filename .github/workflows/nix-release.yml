@@ -295,6 +295,9 @@ jobs:
           python3 nix/release/cache_gate.py retry --ensure -- nix build "${o[@]}" -L --out-link "$RUNNER_TEMP/catalogue" .#rime-release-catalogue
           python3 nix/release/cache_gate.py retry --ensure -- nix build -L .#checks.x86_64-linux.release-unit
           python3 nix/release/cache_gate.py retry --ensure -- nix build "${o[@]}" -L .#checks.x86_64-linux.release-plan
+          # The toplevels' rimed is only compiled: its cargo test is this check (nix/pkgs/rimed.nix cargoTest), and a
+          # failing test stops the release here, before anything is published.
+          python3 nix/release/cache_gate.py retry --ensure -- nix build "${o[@]}" -L .#checks.x86_64-linux.rimed-cargo-test
           # TODO(handover): the VM tests (nix flake check) run here once the katana-nix runners have KVM to spare.
           curl -sS "$RIME_CACHE_GATE/_gate/health" || true  # what the gate was asked: redirected, not_held
 

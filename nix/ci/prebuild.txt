@@ -14,8 +14,14 @@
 # (checks.security only; it rebuilds whenever rimed's source changes, so caching it saves nothing and the packages
 # job would hold every leg for it) and the per-test system closures (each test's are its own).
 #
-# Rime's own packages: rimed is 45 legs x ~25 min (8 min release build + ~17 min checkPhase with its cargo test).
+# Rime's own packages: rimed is 45 legs x ~8 min (its release build; until 11-22 also ~17 min of checkPhase, whose
+# cargo test is now the rimed-cargo-test check, nix/pkgs/rimed.nix cargoTest).
 rimed                       packages.x86_64-linux.rimed
+# rimed's third-party crates, compiled (nix/pkgs/rimed.nix `deps`): it changes only with rimed's Cargo.toml files or
+# Cargo.lock, so a run that changes Rime's code takes it from the dev cache and compiles only the 13 members. The
+# legs that build a rimed of their own (security's rimed-weakened, the mutants, rimed-session's test binaries) take
+# it from here too.
+rimed-deps                  packages.x86_64-linux.rimed.deps
 rime-libexec                packages.x86_64-linux.rime-libexec
 rime-hostlayer              packages.x86_64-linux.rime-hostlayer
 rime-shell                  packages.x86_64-linux.rime-shell

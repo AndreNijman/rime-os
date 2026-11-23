@@ -28,6 +28,9 @@ let
     buildPhase = ''
       runHook preBuild
       echo "build dir: $PWD"
+      # Where rimed's preBuild put the third-party crates (rimed.deps), with the profile setting cargoBuildHook
+      # exports: cargo then reuses them and compiles only the workspace.
+      export CARGO_TARGET_DIR="$PWD/target" CARGO_PROFILE_RELEASE_STRIP=false
       (cd rimed && cargo test --release --offline --workspace --no-run -j "$NIX_BUILD_CORES" \
         --target ${pkgs.stdenv.hostPlatform.rust.rustcTargetSpec} --message-format=json-render-diagnostics \
         > "$NIX_BUILD_TOP/cargo-messages.json")
