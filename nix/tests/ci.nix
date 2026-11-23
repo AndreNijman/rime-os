@@ -561,7 +561,7 @@ in
       if [ -n "$(find t -name 'b-core-*')" ]; then ok "killed: the member fingerprint it left behind is seen"; else bad "the mutant was not seen"; fi
       mkt
       touch -d @1 $(find t -path '*/.fingerprint/*' -type f)
-      touch marker
+      touch -d @100 marker  # an explicit time: two touches in one clock tick compared equal on a hosted runner
       touch t/release/.fingerprint/serde-0123456789abcdef/lib-x
       expect 0 "recompiled" -- python3 ${deps} recompiled t meta.json marker
       has "rimed-deps: 1 third-party units reused, 1 compiled here: serde-0123456789abcdef"
