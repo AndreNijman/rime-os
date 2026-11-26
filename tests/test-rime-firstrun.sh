@@ -284,6 +284,49 @@ else
         && ok "a legacy autostart gains the shell" || bad "a legacy autostart gains the shell"
     grep -qxF 'xterm &' "${h}/.config/labwc/autostart" \
         && ok "the user's own autostart lines survive" || bad "the user's own autostart lines survive"
+    grep -qxF '[ -x /usr/libexec/rime-session-activate ] && /usr/libexec/rime-session-activate &' \
+        "${h}/.config/labwc/autostart" \
+        && ok "a legacy autostart gains rime-session-activate" \
+        || bad "a legacy autostart gains rime-session-activate"
+
+    # graphical-session.target (xdg-desktop-portal requires it): a fresh seed
+    # carries the call once, and a second login does not add another.
+    h="${WORK}/labwc-fresh"
+    [ "$(grep -c 'rime-session-activate' "${h}/.config/labwc/autostart")" = 1 ] \
+        && ok "a fresh autostart calls rime-session-activate once" \
+        || bad "a fresh autostart calls rime-session-activate once" \
+               "$(grep -c 'rime-session-activate' "${h}/.config/labwc/autostart")"
+
+    # An autostart seeded BEFORE the helper existed (it already starts the
+    # Shell, so the Shell repair above leaves it alone) still gains the call,
+    # keeps every line it had, and gains it only once.
+    h="${WORK}/labwc-preportal"; mkdir -p "${h}/.config/labwc"
+    printf '%s\n' '# seeded by an older Rime' 'awww-daemon &' '/usr/libexec/rime-shell-autostart &' 'my-own-thing &' \
+        > "${h}/.config/labwc/autostart"
+    cp "${h}/.config/labwc/autostart" "${WORK}/labwc-preportal.orig"
+    run_labwc "$h"
+    grep -qxF '[ -x /usr/libexec/rime-session-activate ] && /usr/libexec/rime-session-activate &' \
+        "${h}/.config/labwc/autostart" \
+        && ok "a pre-portal autostart gains rime-session-activate" \
+        || bad "a pre-portal autostart gains rime-session-activate"
+    head -n "$(wc -l < "${WORK}/labwc-preportal.orig")" "${h}/.config/labwc/autostart" \
+        | cmp -s - "${WORK}/labwc-preportal.orig" \
+        && ok "a pre-portal autostart keeps every line it had, in order" \
+        || bad "a pre-portal autostart keeps every line it had, in order"
+    run_labwc "$h"
+    [ "$(grep -c 'rime-session-activate' "${h}/.config/labwc/autostart")" = 1 ] \
+        && ok "a second login does not add rime-session-activate again" \
+        || bad "a second login does not add rime-session-activate again"
+
+    # A user who commented the call out keeps it commented out.
+    h="${WORK}/labwc-optout"; mkdir -p "${h}/.config/labwc"
+    printf '%s\n' '/usr/libexec/rime-shell-autostart &' '# /usr/libexec/rime-session-activate &' \
+        > "${h}/.config/labwc/autostart"
+    cp "${h}/.config/labwc/autostart" "${WORK}/labwc-optout.orig"
+    run_labwc "$h"
+    cmp -s "${h}/.config/labwc/autostart" "${WORK}/labwc-optout.orig" \
+        && ok "a commented-out rime-session-activate is not added back" \
+        || bad "a commented-out rime-session-activate is not added back"
 fi
 
 # The shipped XML must be well-formed: labwc has no --verify-config, and a
