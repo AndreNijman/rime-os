@@ -1187,6 +1187,21 @@ if command -v labwc >/dev/null 2>&1 || [ -x /usr/bin/labwc ]; then
         # session with no shell.
         [ -f "${LABWC_DIR}/autostart" ] && chmod 0755 "${LABWC_DIR}/autostart"
 
+        # An autostart seeded before rime-session-activate existed never reaches
+        # graphical-session.target, so xdg-desktop-portal (screen sharing, file
+        # choosers) fails every start in that labwc session. Append the call,
+        # never rewrite: the user's lines stay as they are, and a line they
+        # commented out still matches, so it is not added back.
+        if [ -f "${LABWC_DIR}/autostart" ] \
+           && ! grep -q 'rime-session-activate' "${LABWC_DIR}/autostart" 2>/dev/null; then
+            cat >> "${LABWC_DIR}/autostart" <<'LABWCSESSION'
+
+# ── graphical-session.target, so the desktop portal can start (appended by rime-shell-firstrun) ──
+[ -x /usr/libexec/rime-session-activate ] && /usr/libexec/rime-session-activate &
+LABWCSESSION
+            log "appended rime-session-activate -> ${LABWC_DIR}/autostart"
+        fi
+
         # Self-heal an existing config that predates Rime Shell, or one a user
         # created by hand: without this line the session starts with no bar and
         # no way to discover why.

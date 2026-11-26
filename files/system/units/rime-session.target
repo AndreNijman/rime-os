@@ -1,0 +1,12 @@
+# Started by /usr/libexec/rime-session-activate once a compositor is up.
+# greetd execs the compositor with no session manager, so without this nothing
+# reaches graphical-session.target and every unit with
+# Requisite=graphical-session.target (xdg-desktop-portal among them) fails with
+# result 'dependency': no screen sharing, no Flatpak file chooser.
+[Unit]
+Description=Rime OS: compositor session
+Documentation=man:systemd.special(7)
+BindsTo=graphical-session.target
+Before=graphical-session.target
+Wants=graphical-session-pre.target
+After=graphical-session-pre.target

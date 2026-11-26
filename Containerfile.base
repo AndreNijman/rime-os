@@ -2096,12 +2096,41 @@ COPY files/system/libexec/rime-shell-firstrun /usr/libexec/rime-shell-firstrun
 # identity key (which would unpair every phone) and before the compositor starts.
 COPY --chmod=0755 files/system/libexec/rime-session-migrate /usr/libexec/rime-session-migrate
 COPY files/system/units/rime-session-migrate.service /usr/lib/systemd/user/rime-session-migrate.service
+# A service account in a machine's /etc/passwd keeps the ID an OLD build gave
+# it, and a newer build may give that ID to another account in /usr/lib/passwd
+# (rtkit and systemd-oom both 976 on the katana: rtkit-daemon hung, and the
+# portal with it). This repairs it at boot, before sysinit.target. The --check
+# below is the same question asked of this image: its own /etc/passwd and
+# /usr/lib/passwd must not share an ID between two names, or every fresh
+# install starts drifted.
+COPY --chmod=0755 files/system/libexec/rime-account-ids /usr/libexec/rime-account-ids
+COPY files/system/units/rime-account-ids.service /usr/lib/systemd/system/rime-account-ids.service
+RUN set -eux; \
+    python3 -m py_compile /usr/libexec/rime-account-ids; \
+    test -s /usr/lib/passwd; \
+    /usr/libexec/rime-account-ids --check; \
+    systemctl enable rime-account-ids.service; \
+    test -L /etc/systemd/system/sysinit.target.wants/rime-account-ids.service
 # Idempotent launcher for hypridle + quickshell. Kept after vendoring because it
 # still owns two things: preferring the user's own ~/.config/hypr/hypridle.conf
 # over the image copy, and refusing to start a second instance (which is what lets
 # the provisioner safely re-invoke it to repair a live session).
 COPY --chmod=0755 files/system/libexec/rime-shell-autostart \
      /usr/libexec/rime-shell-autostart
+
+# graphical-session.target for a compositor greetd execs directly. Without it
+# xdg-desktop-portal (Requisite=graphical-session.target) never starts, so there
+# is no screen sharing and no Flatpak file chooser. Run first from the Hyprland
+# and labwc autostarts; the target itself is started by the helper, never
+# enabled.
+COPY --chmod=0755 files/system/libexec/rime-session-activate \
+     /usr/libexec/rime-session-activate
+COPY files/system/units/rime-session.target /usr/lib/systemd/user/rime-session.target
+RUN set -eux; \
+    grep -qx 'BindsTo=graphical-session.target' /usr/lib/systemd/user/rime-session.target; \
+    grep -q 'Requisite=graphical-session.target' /usr/lib/systemd/user/xdg-desktop-portal.service; \
+    bash -n /usr/libexec/rime-session-activate; \
+    grep -q 'systemctl --user start rime-session.target' /usr/libexec/rime-session-activate
 
 # The session's Secret Service. rime-shell-autostart and rime-gaming-session
 # both run rime-secrets-start: it starts the provider named in
@@ -3234,6 +3263,7 @@ COPY files/desktop/hypr/rime/ /usr/share/rime/hypr/rime/
 #      loads hyprland.lua and never looks at a .conf beside it.
 RUN set -eux; \
     grep -q 'exec_cmd("/usr/libexec/rime-shell-autostart")' /usr/share/rime/hypr/rime/session.lua; \
+    grep -q 'exec_cmd("\[ -x /usr/libexec/rime-session-activate \] && exec /usr/libexec/rime-session-activate")' /usr/share/rime/hypr/rime/session.lua; \
     if grep -rq 'local/bin/rime-shell-autostart' /usr/share/rime/hypr/ \
         ; then echo "FATAL: a ~/.local/bin autostart path survives in the shipped hypr tree"; exit 1; fi; \
     if grep -rq '(unset)' /usr/share/rime/hypr/ \

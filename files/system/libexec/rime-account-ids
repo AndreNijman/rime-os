@@ -1,0 +1,274 @@
+#!/usr/bin/python3
+# ─────────────────────────────────────────────────────────────────────────────
+#  rime-account-ids — give back a system account's ID when an image update has
+#  handed the same number to a different account.
+#  Installed to /usr/libexec/rime-account-ids; run once per boot by
+#  rime-account-ids.service, before sysinit.target.
+#
+#  WHY
+#  Most Fedora service accounts are allocated dynamically at image build time
+#  (`u rtkit - ...` in sysusers.d), so each build can number them differently.
+#  On a bootc machine the accounts live in two places: the image's
+#  /usr/lib/passwd (nss-altfiles, replaced by every update) and the machine's
+#  /etc/passwd (written once at install, then kept by the /etc merge). An
+#  account that is in /etc/passwd keeps the number an OLD build gave it, while
+#  a NEWER build is free to give that number to another account in
+#  /usr/lib/passwd. Two names, one UID.
+#
+#  Measured on the katana, 2026-11-26: rtkit 976 in /etc/passwd, systemd-oom
+#  976 in /usr/lib/passwd (and geoclue / systemd-coredump on 977). rtkit-daemon
+#  sets a tiny RLIMIT_NPROC for its UID; systemd-oomd's threads count against
+#  it, so rtkit logged `pthread_create failed: Resource temporarily
+#  unavailable` and stopped answering D-Bus. xdg-desktop-portal blocks on
+#  RealtimeKit while it sets up its Realtime portal and was killed after its
+#  start timeout, so screen sharing and file choosers failed even once the
+#  portal could start. A fresh install of the same image has no collision:
+#  only machines that have taken updates across builds drift.
+#
+#  WHAT
+#  For each account in /etc/passwd (and group in /etc/group) whose ID belongs
+#  to a DIFFERENTLY named entry in /usr/lib/passwd (/usr/lib/group):
+#    * only system IDs (1-999) are touched: never root, never a person;
+#    * the new ID is the one the shipped default (/usr/etc/passwd, /usr/etc/
+#      group) gives that name, if it is free everywhere, else the LOWEST free
+#      ID in Fedora's dynamic range (SYS_UID_MIN 201 .. 999). sysusers hands
+#      out the image's dynamic accounts downward from 999, so the low end is
+#      the least likely to be taken by a later image (and a later collision is
+#      repaired on the next boot anyway);
+#    * an account and its same-named group move together and keep one number;
+#    * every /etc/passwd entry whose primary group moved is updated;
+#    * files under the account's home are re-owned, but only when the home is
+#      a directory under /var/lib that no other account shares (rtkit's home
+#      is /, so nothing is walked for it);
+#    * /etc/passwd and /etc/group are replaced atomically under the shadow
+#      lock (/etc/.pwd.lock), keeping mode, owner and SELinux label, and the
+#      originals are kept under /var/lib/rime/account-ids/<time>/.
+#  With nothing colliding it writes nothing, so it is cheap on every boot.
+#
+#  `--check` prints the plan and exits 1 if there is drift, 0 if not.
+#  RIME_ACCOUNT_IDS_ROOT and RIME_ACCOUNT_IDS_NO_CHOWN exist for
+#  tests/test-rime-account-ids.sh only.
+# ─────────────────────────────────────────────────────────────────────────────
+import errno
+import fcntl
+import os
+import sys
+import time
+
+PROG = "rime-account-ids"
+ROOT = os.environ.get("RIME_ACCOUNT_IDS_ROOT", "/")
+NO_CHOWN = os.environ.get("RIME_ACCOUNT_IDS_NO_CHOWN") == "1"
+SYS_MIN, SYS_MAX = 1, 999          # IDs this tool may move
+DYN_MIN = 201                      # login.defs SYS_UID_MIN: where new IDs are taken from
+
+
+def path(p):
+    return os.path.join(ROOT, p.lstrip("/"))
+
+
+def say(msg):
+    print(f"{PROG}: {msg}", flush=True)
+
+
+class Db:
+    """A passwd/group file as raw lines, with the entries parsed beside them."""
+
+    def __init__(self, p, need):
+        self.path = p
+        try:
+            with open(p, encoding="utf-8") as fh:
+                self.lines = fh.read().splitlines()
+        except FileNotFoundError:
+            self.lines = []
+        self.need = need
+
+    def entries(self):
+        for i, line in enumerate(self.lines):
+            f = line.split(":")
+            if len(f) >= self.need and not line.startswith(("#", "+", "-")) and f[2].isdigit():
+                yield i, f
+
+    def ids(self):
+        return {int(f[2]): f[0] for _, f in self.entries()}
+
+    def names(self):
+        return {f[0]: int(f[2]) for _, f in self.entries()}
+
+
+def collisions(etc, img):
+    """Names in etc whose ID the image gives to a different name."""
+    img_ids, img_names = img.ids(), img.names()
+    out = {}
+    for _, f in etc.entries():
+        name, num = f[0], int(f[2])
+        if name in img_names or num not in img_ids or img_ids[num] == name:
+            continue
+        if not SYS_MIN <= num <= SYS_MAX:
+            say(f"NOT repairing {name} ({num}, shared with {img_ids[num]}): not a system ID")
+            continue
+        out[name] = num
+    return out
+
+
+def pick(name, want, defaults):
+    pref = defaults.get(name)
+    if pref is not None and SYS_MIN <= pref <= SYS_MAX and all(pref not in t for t in want):
+        return pref
+    for n in range(DYN_MIN, SYS_MAX + 1):
+        if all(n not in t for t in want):
+            return n
+    raise SystemExit(f"{PROG}: no free system ID left for {name}")
+
+
+def plan():
+    pw, pw_img = Db(path("/etc/passwd"), 7), Db(path("/usr/lib/passwd"), 7)
+    gr, gr_img = Db(path("/etc/group"), 4), Db(path("/usr/lib/group"), 4)
+    pw_def, gr_def = Db(path("/usr/etc/passwd"), 7).names(), Db(path("/usr/etc/group"), 4).names()
+
+    bad_u, bad_g = collisions(pw, pw_img), collisions(gr, gr_img)
+    uids = set(pw.ids()) | set(pw_img.ids())
+    gids = set(gr.ids()) | set(gr_img.ids())
+    umap, gmap = {}, {}          # name -> (old, new)
+    for name in sorted(set(bad_u) | set(bad_g)):
+        both = name in bad_u and name in bad_g and bad_u[name] == bad_g[name]
+        if both:
+            new = pick(name, (uids, gids), pw_def)
+            umap[name] = (bad_u[name], new)
+            gmap[name] = (bad_g[name], new)
+            uids.add(new); gids.add(new)
+        elif name in bad_u:
+            new = pick(name, (uids,), pw_def)
+            umap[name] = (bad_u[name], new); uids.add(new)
+        else:
+            new = pick(name, (gids,), gr_def)
+            gmap[name] = (bad_g[name], new); gids.add(new)
+    return pw, gr, pw_img, umap, gmap
+
+
+def rewrite(pw, gr, umap, gmap):
+    # An /etc/passwd entry's primary GID names an /etc/group entry: the image's
+    # accounts are in /usr/lib/passwd and never reach this loop.
+    g_old_to_new = {old: new for old, new in gmap.values()}
+    for i, f in pw.entries():
+        changed = False
+        if f[0] in umap:
+            f[2] = str(umap[f[0]][1]); changed = True
+        if f[3].isdigit() and int(f[3]) in g_old_to_new:
+            f[3] = str(g_old_to_new[int(f[3])]); changed = True
+        if changed:
+            pw.lines[i] = ":".join(f)
+    for i, f in gr.entries():
+        if f[0] in gmap:
+            f[2] = str(gmap[f[0]][1])
+            gr.lines[i] = ":".join(f)
+
+
+def replace(db, backup_dir):
+    p = db.path
+    st = os.stat(p)
+    os.makedirs(backup_dir, mode=0o700, exist_ok=True)
+    with open(p, "rb") as src, open(os.path.join(backup_dir, os.path.basename(p)), "wb") as dst:
+        dst.write(src.read())
+    tmp = f"{p}.{PROG}.{os.getpid()}"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, st.st_mode & 0o7777)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write("\n".join(db.lines) + "\n")
+            fh.flush()
+            os.fsync(fh.fileno())
+        if os.geteuid() == 0:
+            os.chown(tmp, st.st_uid, st.st_gid)
+        try:
+            os.setxattr(tmp, "security.selinux", os.getxattr(p, "security.selinux"))
+        except OSError as e:
+            if e.errno not in (errno.ENODATA, errno.ENOTSUP, errno.EOPNOTSUPP):
+                raise
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except FileNotFoundError:
+            pass
+        raise
+    dfd = os.open(os.path.dirname(p), os.O_DIRECTORY)
+    try:
+        os.fsync(dfd)
+    finally:
+        os.close(dfd)
+
+
+def homes_to_walk(pw_after, pw_img, umap, gmap):
+    """(home, uid_old->new or None, gid_old->new or None) for safe homes only."""
+    all_homes = {}
+    for db in (pw_after, pw_img):
+        for _, f in db.entries():
+            all_homes.setdefault(os.path.normpath(f[5]), set()).add(f[0])
+    out = []
+    for name in sorted(set(umap) | set(gmap)):
+        home = next((os.path.normpath(f[5]) for _, f in pw_after.entries() if f[0] == name), None)
+        if not home or not home.startswith("/var/lib/") or len(all_homes.get(home, ())) != 1:
+            continue
+        out.append((home, umap.get(name), gmap.get(name)))
+    return out
+
+
+def chown_tree(home, u, g):
+    top = path(home)
+    if not os.path.isdir(top) or os.path.islink(top):
+        return 0
+    dev = os.lstat(top).st_dev
+    n = 0
+    for dirpath, dirnames, filenames in os.walk(top, followlinks=False):
+        dirnames[:] = [d for d in dirnames if os.lstat(os.path.join(dirpath, d)).st_dev == dev]
+        for p in [dirpath] + [os.path.join(dirpath, x) for x in filenames + dirnames]:
+            st = os.lstat(p)
+            nu = u[1] if u and st.st_uid == u[0] else -1
+            ng = g[1] if g and st.st_gid == g[0] else -1
+            if nu == -1 and ng == -1:
+                continue
+            if NO_CHOWN:
+                say(f"would re-own {os.path.relpath(p, path('/'))} {st.st_uid}:{st.st_gid} -> "
+                    f"{nu if nu != -1 else st.st_uid}:{ng if ng != -1 else st.st_gid}")
+            else:
+                os.lchown(p, nu, ng)
+            n += 1
+    return n
+
+
+def main(argv):
+    check = argv[1:] == ["--check"]
+    if argv[1:] and not check:
+        print(f"usage: {PROG} [--check]", file=sys.stderr)
+        return 64
+    if not os.path.exists(path("/usr/lib/passwd")):
+        return 0                    # not an image with nss-altfiles
+    lockfd = None
+    if not check:
+        lockfd = os.open(path("/etc/.pwd.lock"), os.O_WRONLY | os.O_CREAT, 0o600)
+        fcntl.lockf(lockfd, fcntl.LOCK_EX)
+    try:
+        pw, gr, pw_img, umap, gmap = plan()
+        if not umap and not gmap:
+            return 0
+        for name, (old, new) in sorted(umap.items()):
+            say(f"user {name}: {old} -> {new} ({old} is {pw_img.ids()[old]} in /usr/lib/passwd)")
+        for name, (old, new) in sorted(gmap.items()):
+            say(f"group {name}: {old} -> {new}")
+        if check:
+            return 1
+        rewrite(pw, gr, umap, gmap)
+        backup = path(f"/var/lib/rime/account-ids/{time.strftime('%Y%m%dT%H%M%S')}")
+        if gmap:
+            replace(gr, backup)
+        replace(pw, backup)
+        for home, u, g in homes_to_walk(pw, pw_img, umap, gmap):
+            say(f"re-owned {chown_tree(home, u, g)} entries under {home}")
+        say(f"done; the previous files are in {os.path.relpath(backup, path('/'))}")
+        return 0
+    finally:
+        if lockfd is not None:
+            os.close(lockfd)
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

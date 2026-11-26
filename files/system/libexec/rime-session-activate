@@ -1,0 +1,93 @@
+#!/usr/bin/env bash
+# ─────────────────────────────────────────────────────────────────────────────
+#  Rime OS — reach graphical-session.target for a compositor greetd exec'd
+#  Installed to /usr/libexec/rime-session-activate. Run once at compositor
+#  start: first line of the hyprland.start handler in hypr/rime/session.lua, and
+#  from the labwc autostart.
+#
+#  WHY
+#  greetd execs the compositor directly (start-hyprland, labwc): there is no
+#  uwsm and no systemd hand-off, so nothing ever starts graphical-session.target.
+#  xdg-desktop-portal.service has Requisite=graphical-session.target, so every
+#  activation of it fails with result 'dependency'. With no portal there is no
+#  ScreenCast (screen sharing in Discord/Equibop, browsers, OBS) and no Flatpak
+#  file chooser. Measured on the katana, 2026-11-26: 30 failed portal starts in
+#  one boot, `graphical-session.target - Current graphical user session is
+#  inactive` before each.
+#
+#  WHAT
+#   1. Under uwsm (the NixOS Hyprland session, withUWSM) the compositor runs in
+#      a wayland-wm@ unit and uwsm owns the target: do nothing.
+#   2. graphical-session.target can still be active from an EARLIER login: the
+#      user manager outlives the compositor when the account lingers, and the
+#      portal's Requisite= keeps the target "needed", so StopWhenUnneeded never
+#      fires. Those portals hold the dead compositor's WAYLAND_DISPLAY and
+#      HYPRLAND_INSTANCE_SIGNATURE. Stop the target, which stops everything
+#      PartOf= it, before importing the new environment.
+#   3. Import the compositor's environment into the user manager and the D-Bus
+#      activation environment, so units started from now on reach THIS
+#      compositor. XDG_SESSION_TYPE is forced to wayland: logind registered the
+#      greetd session as a tty, which is what the compositor inherited.
+#   4. Start rime-session.target, which BindsTo=graphical-session.target.
+#
+#  A second run in the same login finds RIME_SESSION_ID matching and exits, so
+#  running it by hand to repair a live session is safe.
+# ─────────────────────────────────────────────────────────────────────────────
+set -u
+
+PROG=rime-session-activate
+say() { printf '%s: %s\n' "$PROG" "$*" >&2; }
+
+# 1. uwsm owns it. Children of the compositor share its cgroup.
+#    RIME_SESSION_CGROUP exists for tests/test-rime-session-activate.sh only.
+if grep -q 'wayland-wm@' "${RIME_SESSION_CGROUP:-/proc/self/cgroup}" 2>/dev/null; then
+    exit 0
+fi
+
+if [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    say "WAYLAND_DISPLAY is not set: not running under a Wayland compositor"
+    exit 1
+fi
+
+# One login = one logind session id. The pid is the fallback for a session
+# that has none (a nested or hand-started compositor).
+session_id="${XDG_SESSION_ID:-pid-$PPID}"
+
+manager_env="$(systemctl --user show-environment 2>/dev/null)" || {
+    say "the user manager is not reachable"
+    exit 1
+}
+
+if systemctl --user -q is-active graphical-session.target; then
+    if printf '%s\n' "$manager_env" | grep -qxF "RIME_SESSION_ID=$session_id"; then
+        exit 0          # already done for this login
+    fi
+    # 2. Left over from another login.
+    say "graphical-session.target is active from an earlier session; restarting it"
+    systemctl --user stop graphical-session.target ||
+        say "could not stop the stale graphical-session.target"
+fi
+
+# 3. The variables a portal or a D-Bus-activated app needs to find this
+#    compositor. Only names that are set are imported: an unset name would be
+#    exported as empty and shadow nothing useful.
+export XDG_SESSION_TYPE=wayland
+export RIME_SESSION_ID="$session_id"
+vars=(RIME_SESSION_ID XDG_SESSION_TYPE)
+for v in WAYLAND_DISPLAY DISPLAY XDG_CURRENT_DESKTOP XDG_SESSION_DESKTOP \
+         HYPRLAND_INSTANCE_SIGNATURE NIRI_SOCKET PATH; do
+    [ -n "${!v:-}" ] && vars+=("$v")
+done
+if ! dbus-update-activation-environment --systemd "${vars[@]}"; then
+    say "dbus-update-activation-environment failed; importing into systemd only"
+    systemctl --user import-environment "${vars[@]}" || {
+        say "could not import the session environment"
+        exit 1
+    }
+fi
+
+# 4.
+if ! systemctl --user start rime-session.target; then
+    say "could not start rime-session.target"
+    exit 1
+fi

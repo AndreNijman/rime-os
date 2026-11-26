@@ -16,6 +16,10 @@ export PATH
 
 # Wallpaper daemon, by absolute-ish name so it resolves regardless of PATH
 # timing, exactly as the Hyprland session does.
+# graphical-session.target first: greetd execs labwc with no session manager,
+# and xdg-desktop-portal (screen sharing, file choosers) requires the target.
+[ -x /usr/libexec/rime-session-activate ] && /usr/libexec/rime-session-activate &
+
 awww-daemon &
 
 # hypridle + Rime Shell. The helper resolves hypridle's config and is idempotent,
