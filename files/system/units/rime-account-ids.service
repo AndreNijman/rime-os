@@ -1,0 +1,22 @@
+# Gives a service account in /etc/passwd a free ID back when an image update
+# handed its number to a different account in /usr/lib/passwd (two names, one
+# UID). Measured: rtkit sharing 976 with systemd-oom hung rtkit-daemon, which
+# hung xdg-desktop-portal. Early, so no daemon has started under the shared ID
+# yet; writes nothing when nothing collides.
+[Unit]
+Description=Rime OS: repair service-account IDs an image update reused
+Documentation=man:rime(1)
+DefaultDependencies=no
+After=local-fs.target systemd-remount-fs.service
+Before=sysinit.target systemd-sysusers.service systemd-tmpfiles-setup.service rtkit-daemon.service geoclue.service
+Conflicts=shutdown.target
+Before=shutdown.target
+ConditionPathExists=/usr/lib/passwd
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/libexec/rime-account-ids
+
+[Install]
+WantedBy=sysinit.target

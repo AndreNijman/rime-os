@@ -931,6 +931,13 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-session-activate.sh
 
+      # A service account whose ID an image update gave to another account
+      # (rtkit vs systemd-oom on one machine: rtkit hung, the portal with it)
+      # gets a free ID back, and root, people and non-colliding accounts never move.
+      - name: Service-account IDs reused by an image update are repaired
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-account-ids.sh
+
       # After a kernel panic: the summary names the panic, not a log flood
       # before it; a record from an earlier boot is not news; the notice says
       # it once; bootc and NixOS read one set of kernel arguments. Its full-disk

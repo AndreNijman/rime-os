@@ -2096,6 +2096,21 @@ COPY files/system/libexec/rime-shell-firstrun /usr/libexec/rime-shell-firstrun
 # identity key (which would unpair every phone) and before the compositor starts.
 COPY --chmod=0755 files/system/libexec/rime-session-migrate /usr/libexec/rime-session-migrate
 COPY files/system/units/rime-session-migrate.service /usr/lib/systemd/user/rime-session-migrate.service
+# A service account in a machine's /etc/passwd keeps the ID an OLD build gave
+# it, and a newer build may give that ID to another account in /usr/lib/passwd
+# (rtkit and systemd-oom both 976 on the katana: rtkit-daemon hung, and the
+# portal with it). This repairs it at boot, before sysinit.target. The --check
+# below is the same question asked of this image: its own /etc/passwd and
+# /usr/lib/passwd must not share an ID between two names, or every fresh
+# install starts drifted.
+COPY --chmod=0755 files/system/libexec/rime-account-ids /usr/libexec/rime-account-ids
+COPY files/system/units/rime-account-ids.service /usr/lib/systemd/system/rime-account-ids.service
+RUN set -eux; \
+    python3 -m py_compile /usr/libexec/rime-account-ids; \
+    test -s /usr/lib/passwd; \
+    /usr/libexec/rime-account-ids --check; \
+    systemctl enable rime-account-ids.service; \
+    test -L /etc/systemd/system/sysinit.target.wants/rime-account-ids.service
 # Idempotent launcher for hypridle + quickshell. Kept after vendoring because it
 # still owns two things: preferring the user's own ~/.config/hypr/hypridle.conf
 # over the image copy, and refusing to start a second instance (which is what lets
