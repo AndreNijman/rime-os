@@ -32,6 +32,12 @@ end
 -- handler on the `hyprland.start` event, which fires once per compositor start
 -- and — like exec-once before it — does NOT re-fire on `hyprctl reload`.
 hl.on("hyprland.start", function()
+    -- First, so the portals that apps reach for (screen sharing, file
+    -- choosers) can start: greetd execs Hyprland with no session manager, so
+    -- nothing else reaches graphical-session.target. A no-op under uwsm and
+    -- where the helper is not installed (the NixOS session uses uwsm).
+    hl.exec_cmd("[ -x /usr/libexec/rime-session-activate ] && exec /usr/libexec/rime-session-activate")
+
     -- awww-daemon by absolute name so the wallpaper is restored at boot
     -- regardless of PATH resolution timing.
     hl.exec_cmd("awww-daemon")

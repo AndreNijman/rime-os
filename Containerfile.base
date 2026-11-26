@@ -2103,6 +2103,20 @@ COPY files/system/units/rime-session-migrate.service /usr/lib/systemd/user/rime-
 COPY --chmod=0755 files/system/libexec/rime-shell-autostart \
      /usr/libexec/rime-shell-autostart
 
+# graphical-session.target for a compositor greetd execs directly. Without it
+# xdg-desktop-portal (Requisite=graphical-session.target) never starts, so there
+# is no screen sharing and no Flatpak file chooser. Run first from the Hyprland
+# and labwc autostarts; the target itself is started by the helper, never
+# enabled.
+COPY --chmod=0755 files/system/libexec/rime-session-activate \
+     /usr/libexec/rime-session-activate
+COPY files/system/units/rime-session.target /usr/lib/systemd/user/rime-session.target
+RUN set -eux; \
+    grep -qx 'BindsTo=graphical-session.target' /usr/lib/systemd/user/rime-session.target; \
+    grep -q 'Requisite=graphical-session.target' /usr/lib/systemd/user/xdg-desktop-portal.service; \
+    bash -n /usr/libexec/rime-session-activate; \
+    grep -q 'systemctl --user start rime-session.target' /usr/libexec/rime-session-activate
+
 # The session's Secret Service. rime-shell-autostart and rime-gaming-session
 # both run rime-secrets-start: it starts the provider named in
 # /usr/share/rime/secrets-provider (gnome-keyring: `--start` hands the session
@@ -3234,6 +3248,7 @@ COPY files/desktop/hypr/rime/ /usr/share/rime/hypr/rime/
 #      loads hyprland.lua and never looks at a .conf beside it.
 RUN set -eux; \
     grep -q 'exec_cmd("/usr/libexec/rime-shell-autostart")' /usr/share/rime/hypr/rime/session.lua; \
+    grep -q 'exec_cmd("\[ -x /usr/libexec/rime-session-activate \] && exec /usr/libexec/rime-session-activate")' /usr/share/rime/hypr/rime/session.lua; \
     if grep -rq 'local/bin/rime-shell-autostart' /usr/share/rime/hypr/ \
         ; then echo "FATAL: a ~/.local/bin autostart path survives in the shipped hypr tree"; exit 1; fi; \
     if grep -rq '(unset)' /usr/share/rime/hypr/ \

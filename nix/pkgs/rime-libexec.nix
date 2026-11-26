@@ -106,6 +106,9 @@ let
     "rime-migrate"
     # bootc's MokManager way back; nix/modules/boot.nix runs rime-boot's port of it (same custom.cfg block).
     "rime-secureboot-key"
+    # bootc's greetd sessions reach graphical-session.target through it; the NixOS Hyprland session runs under uwsm,
+    # which owns that target (session.lua and the labwc autostart call it only when it is installed: -x test).
+    "rime-session-activate"
   ];
 
   # Shipped by another Rime module, which owns the one copy on the system profile (buildEnv picks a winner

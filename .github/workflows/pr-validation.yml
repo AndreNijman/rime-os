@@ -923,6 +923,14 @@ jobs:
         if: ${{ !cancelled() }}
         run: ./tests/test-rime-gpu-notice.sh
 
+      # greetd execs the compositor with no session manager: graphical-session.target
+      # is reached only through rime-session-activate, and a target left over from
+      # an earlier login is restarted rather than kept (its portals point at a
+      # compositor that is gone). Without it there is no screen sharing.
+      - name: Compositor session reaches graphical-session.target (portals)
+        if: ${{ !cancelled() }}
+        run: ./tests/test-rime-session-activate.sh
+
       # After a kernel panic: the summary names the panic, not a log flood
       # before it; a record from an earlier boot is not news; the notice says
       # it once; bootc and NixOS read one set of kernel arguments. Its full-disk
@@ -4878,6 +4886,8 @@ jobs:
             files/system/libexec/rime-screen-reader \
             files/system/libexec/rime-gpu-notice \
             tests/test-rime-gpu-notice.sh \
+            files/system/libexec/rime-session-activate \
+            tests/test-rime-session-activate.sh \
             files/system/libexec/rime-crash-record \
             files/system/libexec/rime-crash-notice \
             tests/test-rime-crash.sh \
